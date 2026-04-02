@@ -1,0 +1,27 @@
+# 環境変数・シークレット
+.env
+credentials/
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 顧客資料・出力ファイル
+output/
+1.交付申請_過去採択なし/
+京の食事処資料/
+
+# Excelの一時ファイル
+~$*.xlsx
+
+# Excel・PDF（顧客資料）
+*.xlsx
+*.xls
+*.pdf
+
+# その他
+*.log
+.DS_Store
+Thumbs.db
