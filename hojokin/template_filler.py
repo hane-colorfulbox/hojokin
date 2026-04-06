@@ -86,8 +86,8 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
     write('rep_name', co.representative_name, '代表者氏名')
     write('rep_kana', co.representative_kana, '代表者フリガナ')
 
-    # 役員 (最大7名)
-    for i, officer in enumerate(co.officers[:7]):
+    # 役員 (最大10名)
+    for i, officer in enumerate(co.officers[:10]):
         idx = i + 1
         write(f'officer_{idx}_title', officer.get('title'), f'役員({idx})役職')
         write(f'officer_{idx}_name', officer.get('name'), f'役員({idx})氏名')
