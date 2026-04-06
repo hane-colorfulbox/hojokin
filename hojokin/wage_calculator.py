@@ -1,8 +1,23 @@
 # -*- coding: utf-8 -*-
-"""給与支給総額計算Excel生成"""
+"""
+給与支給総額計算Excel生成 + 1人当たり給与支給総額算出
+
+2026年度要件:
+- 指標: 1人当たり給与支給総額（非常勤を含む全従業員）
+- 計算: 給与支給総額（役員報酬除く）÷ 従業員数（パートは正社員換算）
+- 年平均成長率: 3.5%以上
+
+対象給与: 給料、賃金、賞与、各種手当（残業手当、休日出勤手当、
+         職務手当、地域手当、家族手当、住宅手当）等
+除外: 役員報酬、福利厚生費、法定福利費、退職金
+
+対象従業員: 全月分の給与を受けた従業員のみ（中途・退職者はその年度除外）
+パート換算: 正社員の所定労働時間で換算
+"""
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 import openpyxl
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -12,6 +27,85 @@ from .models import FinancialData, MonthlyWageData
 from .config import STANDARD_ANNUAL_HOURS
 
 logger = logging.getLogger(__name__)
+
+
+# ── 1人当たり給与支給総額計算（2026年新要件）──
+
+@dataclass
+class PayrollEmployee:
+    """賃金台帳から読み取った従業員1名のデータ"""
+    name: str
+    employment_type: str  # 正社員, 契約社員, パート, アルバイト, 役員
+    monthly_salary: list[float] = dc_field(default_factory=list)  # 12ヶ月分の総支給額
+    monthly_hours: list[float] = dc_field(default_factory=list)   # 12ヶ月分の労働時間
+    is_officer: bool = False
+    is_excluded: bool = False      # 産休・育休等で除外
+    full_year: bool = True         # 全月分の給与を受けたか
+
+
+@dataclass
+class PerCapitaWageResult:
+    """1人当たり給与支給総額の計算結果"""
+    total_salary: float = 0.0              # 給与支給総額（役員報酬除く）
+    employee_count_fte: float = 0.0        # 従業員数（正社員換算）
+    per_person_salary: float = 0.0         # 1人当たり給与支給総額
+    officer_compensation: float = 0.0      # 役員報酬合計
+    regular_annual_hours: float = 0.0      # 正社員の年間所定労働時間
+    included: list[PayrollEmployee] = dc_field(default_factory=list)
+    excluded_names: list[str] = dc_field(default_factory=list)
+
+    GROWTH_RATE = 0.035  # 3.5%
+
+    def plan_values(self) -> dict[str, float]:
+        """3年分の計画数値（3.5%成長）"""
+        b = self.per_person_salary
+        r = self.GROWTH_RATE
+        return {
+            'year_0': b,
+            'year_1': b * (1 + r),
+            'year_2': b * (1 + r) ** 2,
+            'year_3': b * (1 + r) ** 3,
+        }
+
+
+def _calc_fte(emp: PayrollEmployee, annual_hours: float) -> float:
+    """パート・アルバイトを正社員換算"""
+    if emp.employment_type in ('正社員', '契約社員'):
+        return 1.0
+    if not emp.monthly_hours:
+        return 1.0
+    return sum(emp.monthly_hours) / annual_hours
+
+
+def calculate_per_capita_wage(
+    employees: list[PayrollEmployee],
+    regular_annual_hours: float = STANDARD_ANNUAL_HOURS,
+) -> PerCapitaWageResult:
+    """従業員リストから1人当たり給与支給総額を算出"""
+    result = PerCapitaWageResult(regular_annual_hours=regular_annual_hours)
+
+    for emp in employees:
+        if emp.is_officer:
+            result.officer_compensation += sum(emp.monthly_salary)
+            continue
+        if emp.is_excluded or not emp.full_year:
+            result.excluded_names.append(emp.name)
+            continue
+
+        annual = sum(emp.monthly_salary)
+        result.total_salary += annual
+        fte = _calc_fte(emp, regular_annual_hours)
+        result.employee_count_fte += fte
+        result.included.append(emp)
+
+    if result.employee_count_fte > 0:
+        result.per_person_salary = result.total_salary / result.employee_count_fte
+
+    logger.info(
+        f'1人当たり計算: {result.total_salary:,.0f}円 / '
+        f'{result.employee_count_fte:.1f}人 = {result.per_person_salary:,.0f}円'
+    )
+    return result
 
 # ── スタイル定義 ──
 TITLE_FONT = Font(name='游ゴシック', size=14, bold=True)
