@@ -131,16 +131,33 @@ st.markdown("""
 
 
 def find_template(base_dir: Path, template_type: str) -> Path | None:
-    """テンプレートファイルを検索"""
+    """テンプレートファイルを検索（v2を優先）"""
+    import unicodedata
     keywords = {
         '通常枠_2026': ['原本', '通常枠', '2026'],
         'インボイス枠_2026': ['原本', 'インボイス', '2026'],
     }
     kws = keywords.get(template_type, [])
+    candidates = []
     for p in base_dir.iterdir():
-        if p.suffix == '.xlsx' and all(kw in p.name for kw in kws) and not p.name.startswith('~$'):
-            return p
-    return None
+        name = unicodedata.normalize('NFC', p.name)
+        if p.suffix == '.xlsx' and all(kw in name for kw in kws) and not name.startswith('~$'):
+            candidates.append(p)
+    if not candidates:
+        # ツール/サブフォルダも探す
+        tool_dir = base_dir / 'ツール'
+        if tool_dir.exists():
+            for p in tool_dir.iterdir():
+                name = unicodedata.normalize('NFC', p.name)
+                if p.suffix == '.xlsx' and all(kw in name for kw in kws) and not name.startswith('~$'):
+                    candidates.append(p)
+    if not candidates:
+        return None
+    # v2を優先（ファイル名に'v2'が含まれるものを優先）
+    for c in candidates:
+        if 'v2' in c.name:
+            return c
+    return candidates[0]
 
 
 def save_uploaded_files(uploaded_files, target_dir: Path) -> list[str]:
