@@ -463,70 +463,90 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
 
         # ファイル検出プレビュー
         detector = FileDetector(work_dir)
-        with st.expander('検出されたファイル（デバッグ用）'):
-            st.code(detector.summary())
 
         # 処理実行
-        progress_bar = st.progress(0, text='処理を開始します...')
-        status_text = st.empty()
+        with st.spinner('AIが資料を読み取り中...（1〜3分かかります）'):
+            results = run_processing(
+                company_name=company_name,
+                template_type=template_type,
+                task_type=task_type,
+                work_dir=work_dir,
+                template_dir=template_dir,
+            )
 
-        def update_progress(msg):
-            status_text.info(msg)
-
-        progress_bar.progress(10, text='AIが資料を読み取り中...')
-
-        results = run_processing(
-            company_name=company_name,
-            template_type=template_type,
-            task_type=task_type,
-            work_dir=work_dir,
-            template_dir=template_dir,
-            progress_callback=update_progress,
-        )
-
-        progress_bar.progress(100, text='処理完了!')
-
-        # ── 結果表示 ──
-        st.markdown(
-            '<span class="step-number">3</span>'
-            '<span class="step-title">結果・ダウンロード</span>',
-            unsafe_allow_html=True,
-        )
-
+        # 結果をsession_stateに保存（画面再描画後も残る）
+        session_results = {}
         for task_name, result in results.items():
-            task_display = '📝 申請書作成' if task_name == 'application' else '💰 給与支給総額計算'
+            entry = {
+                'status': result['status'],
+                'message': result['message'],
+                'empty_cells': result.get('empty_cells', []),
+                'file_data': None,
+                'file_name': None,
+            }
+            if result.get('output_path') and result['output_path'].exists():
+                with open(result['output_path'], 'rb') as f:
+                    entry['file_data'] = f.read()
+                entry['file_name'] = result['output_path'].name
+            session_results[task_name] = entry
 
-            if result['status'] == '完了':
-                st.success(f'{task_display}: 完了')
+        st.session_state['last_results'] = session_results
+        st.session_state['last_company'] = company_name
+        st.session_state['last_template'] = template_label
+        st.session_state['last_time'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+        st.session_state['last_detector_summary'] = detector.summary()
 
-                if result.get('output_path') and result['output_path'].exists():
-                    with open(result['output_path'], 'rb') as f:
-                        st.download_button(
-                            label=f'⬇️ {result["output_path"].name} をダウンロード',
-                            data=f.read(),
-                            file_name=result['output_path'].name,
-                            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                            use_container_width=True,
-                        )
+# ── 結果表示（session_stateから復元） ──
+if 'last_results' in st.session_state:
+    st.markdown('---')
+    st.markdown(
+        '<span class="step-number">3</span>'
+        '<span class="step-title">結果・ダウンロード</span>',
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f'処理日時: {st.session_state["last_time"]} | '
+        f'会社名: {st.session_state["last_company"]} | '
+        f'テンプレート: {st.session_state["last_template"]}'
+    )
 
-                # 空セル表示
-                if result.get('empty_cells'):
-                    with st.expander(f'⚠️ 未入力セル（{len(result["empty_cells"])}件） — 手動確認が必要'):
-                        for cell in result['empty_cells']:
-                            st.text(cell)
-            else:
-                st.error(f'{task_display}: {result["message"]}')
+    with st.expander('検出されたファイル（デバッグ用）'):
+        st.code(st.session_state.get('last_detector_summary', ''))
 
-        # ── 人間チェックリスト ──
-        st.markdown('---')
-        st.markdown(
-            '<span class="step-number">4</span>'
-            '<span class="step-title">ダウンロード後の確認事項</span>',
-            unsafe_allow_html=True,
-        )
-        st.warning('AIが自動生成した内容です。提出前に必ず以下の項目を確認してください。')
+    for task_name, result in st.session_state['last_results'].items():
+        task_display = '📝 申請書作成' if task_name == 'application' else '💰 給与支給総額計算'
 
-        st.markdown("""
+        if result['status'] == '完了':
+            st.success(f'{task_display}: 完了')
+
+            if result['file_data']:
+                st.download_button(
+                    label=f'⬇️ {result["file_name"]} をダウンロード',
+                    data=result['file_data'],
+                    file_name=result['file_name'],
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    use_container_width=True,
+                    key=f'download_{task_name}',
+                )
+
+            # 空セル表示
+            if result.get('empty_cells'):
+                with st.expander(f'⚠️ 未入力セル（{len(result["empty_cells"])}件） — 手動確認が必要'):
+                    for cell in result['empty_cells']:
+                        st.text(cell)
+        else:
+            st.error(f'{task_display}: {result["message"]}')
+
+    # ── 人間チェックリスト ──
+    st.markdown('---')
+    st.markdown(
+        '<span class="step-number">4</span>'
+        '<span class="step-title">ダウンロード後の確認事項</span>',
+        unsafe_allow_html=True,
+    )
+    st.warning('AIが自動生成した内容です。提出前に必ず以下の項目を確認してください。')
+
+    st.markdown("""
 **申請内容シート（AIが読み取り・生成した項目）**
 
 | 確認項目 | 確認ポイント | よくあるミス |
@@ -554,9 +574,19 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
 |---|---|
 | **給料手当・雑給・賞与** | 決算書（販管費内訳書）の数値と一致しているか |
 | **従業員数・労働時間** | 空欄になっていないか（手入力が必要な場合あり） |
-        """)
+    """)
 
-        st.info('確認が完了したら、申請内容シートの手順に沿ってgBizIDから申請を進めてください。')
+    st.info('確認が完了したら、申請内容シートの手順に沿ってgBizIDから申請を進めてください。')
+
+    # 結果クリアボタン
+    if st.button('結果をクリア', type='secondary'):
+        del st.session_state['last_results']
+        del st.session_state['last_company']
+        del st.session_state['last_template']
+        del st.session_state['last_time']
+        if 'last_detector_summary' in st.session_state:
+            del st.session_state['last_detector_summary']
+        st.rerun()
 
 # ── フッター ──
 st.markdown('---')
