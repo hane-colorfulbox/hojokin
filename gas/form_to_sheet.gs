@@ -19,35 +19,44 @@
 // ============================================================
 const FORM_CONFIG = {
   // 案件管理スプレッドシートID
-  MANAGEMENT_SHEET_ID: 'ここにスプレッドシートIDを入力',
+  // https://docs.google.com/spreadsheets/d/1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU/
+  MANAGEMENT_SHEET_ID: '1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU',
 
-  // 案件管理シート名
-  MANAGEMENT_SHEET_NAME: '案件管理',
+  // 案件管理シート名（★ 実際のシート名に合わせて変更）
+  MANAGEMENT_SHEET_NAME: 'シート1',
 
-  // 顧客フォルダの親フォルダID
+  // 顧客フォルダの親フォルダID（★ 要確認）
   PARENT_FOLDER_ID: 'ここにフォルダIDを入力',
 
   // 自動作成するサブフォルダ名
   SUB_FOLDERS: ['01_提出資料', '02_作成書類', '03_その他'],
 
   // フォーム回答の列マッピング（0始まり）
-  // ★ フォームの質問順に合わせて変更してください
+  // 送客フォーム: https://docs.google.com/forms/d/11x2wgdXtkAvkEaKUa2rwjuPqovD1IWnaNYh_5qFo74Q/
   FORM_COLUMNS: {
-    TIMESTAMP: 0,       // タイムスタンプ（自動）
-    COMPANY_NAME: 1,    // 会社名
-    CONTACT_NAME: 2,    // 担当者名
-    EMAIL: 3,           // メールアドレス
-    PHONE: 4,           // 電話番号
-    TEMPLATE_TYPE: 5,   // 申請枠（通常枠/インボイス枠）
+    TIMESTAMP: 0,              // タイムスタンプ（自動）
+    COMPANY_NAME: 1,           // お客様企業名
+    TEMPLATE_TYPE: 2,          // 申請枠
+    CONTACT_TOOL: 3,           // 希望連絡ツール
+    CONTACT_NAME: 4,           // お客様担当者氏名
+    CONTACT_EMAIL: 5,          // お客様担当者メールアドレス
+    CONTACT_PHONE: 6,          // お客様担当者電話番号
+    SUPPORT_CONTACT_NAME: 7,   // 支援事業者担当者名
+    SUPPORT_EMAIL: 8,          // 支援事業者メールアドレス
+    SUPPORT_PHONE: 9,          // 支援事業者電話番号
   },
 
-  // 案件管理シートへの転記マッピング
+  // 案件管理シートへの転記マッピング（★ 管理シートの列構成に合わせて要調整）
   // { 管理シートの列番号(1始まり): フォーム回答の列番号(0始まり) }
   TRANSFER_MAP: {
-    1: 1,   // A列 ← 会社名
-    2: 2,   // B列 ← 担当者名
-    3: 3,   // C列 ← メールアドレス
-    4: 4,   // D列 ← 電話番号
+    1: 1,   // A列 ← お客様企業名
+    2: 2,   // B列 ← 申請枠
+    3: 4,   // C列 ← お客様担当者氏名
+    4: 5,   // D列 ← お客様担当者メールアドレス
+    5: 6,   // E列 ← お客様担当者電話番号
+    6: 7,   // F列 ← 支援事業者担当者名
+    7: 8,   // G列 ← 支援事業者メールアドレス
+    8: 9,   // H列 ← 支援事業者電話番号
   },
 };
 

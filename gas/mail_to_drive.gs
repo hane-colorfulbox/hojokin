@@ -30,10 +30,11 @@ const CONFIG = {
   PARENT_FOLDER_ID: 'ここにフォルダIDを入力',
 
   // 案件管理スプレッドシートID
-  MANAGEMENT_SHEET_ID: 'ここにスプレッドシートIDを入力',
+  // https://docs.google.com/spreadsheets/d/1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU/
+  MANAGEMENT_SHEET_ID: '1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU',
 
-  // 案件管理シート名
-  MANAGEMENT_SHEET_NAME: '案件管理',
+  // 案件管理シート名（★ 実際のシート名に合わせて変更）
+  MANAGEMENT_SHEET_NAME: 'シート1',
 
   // 案件管理シートの列番号（1始まり）
   COL_COMPANY_NAME: 1,    // 会社名の列
