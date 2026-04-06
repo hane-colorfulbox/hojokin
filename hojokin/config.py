@@ -162,7 +162,7 @@ MAPPING_2026_TSUJO = TemplateMapping(
         'rep_name': 83,
         'rep_kana': 84,
 
-        # 役員 (最大7名)
+        # 役員 (最大10名) ※(1)〜(7)はズレなし、(8)〜(10)は新規
         'officer_1_title': 87,
         'officer_1_name': 88,
         'officer_1_kana': 89,
@@ -184,38 +184,47 @@ MAPPING_2026_TSUJO = TemplateMapping(
         'officer_7_title': 105,
         'officer_7_name': 106,
         'officer_7_kana': 107,
+        'officer_8_title': 108,
+        'officer_8_name': 109,
+        'officer_8_kana': 110,
+        'officer_9_title': 111,
+        'officer_9_name': 112,
+        'officer_9_kana': 113,
+        'officer_10_title': 114,
+        'officer_10_name': 115,
+        'officer_10_kana': 116,
 
-        # その他
-        'past_subsidies': 113,
-        'eruboshi': 114,
-        'kurumin': 115,
-        'business_types': 135,
+        # その他 ※+9
+        'past_subsidies': 122,
+        'eruboshi': 123,
+        'kurumin': 124,
+        'business_types': 144,
 
-        # 財務情報入力 (行139〜)
-        'officer_count_prev': 145,
+        # 財務情報入力 ※+9
+        'officer_count_prev': 154,
 
-        # 経営状況 (行157〜)
-        'management_intent': 159,
-        'strength': 161,
-        'weakness': 163,
-        'it_investment_status': 164,
-        'it_investment_amount': 165,
-        'it_utilization_status': 166,
-        'it_investment_process': 168,
-        'security_status': 169,
-        'improvement_process': 170,
-        'expected_effect_dept': 171,
-        'expected_effect': 172,
-        'future_goals': 173,
+        # 経営状況 ※+9
+        'management_intent': 168,
+        'strength': 170,
+        'weakness': 172,
+        'it_investment_status': 173,
+        'it_investment_amount': 174,
+        'it_utilization_status': 175,
+        'it_investment_process': 177,
+        'security_status': 178,
+        'improvement_process': 179,
+        'expected_effect_dept': 180,
+        'expected_effect': 181,
+        'future_goals': 182,
 
-        # 計画数値入力 (行202〜)
-        'min_wage': 204,
-        'min_wage_hourly': 205,
-        'employee_count_fte': 206,
-        'wage_raise_declaration': 213,
-        'wage_raise_amount': 214,
-        'wage_raise_method': 215,
-        'wage_raise_date': 216,
+        # 計画数値入力 ※+9
+        'min_wage': 213,
+        'min_wage_hourly': 214,
+        'employee_count_fte': 215,
+        'wage_raise_declaration': 222,
+        'wage_raise_amount': 223,
+        'wage_raise_method': 224,
+        'wage_raise_date': 225,
     },
     kyuyo_sheet_name='生産性指標給与支給総額計算',
     kyuyo={
@@ -229,7 +238,7 @@ MAPPING_2026_TSUJO = TemplateMapping(
         'bonus':            (7,  5),  # E7:  賞与手当
         'officer_comp':     (4,  5),  # E4:  役員報酬（D4ラベル参照）
     },
-    shinsei_clear_range=(5, 260),
+    shinsei_clear_range=(5, 270),
     tenki_text_range=(15, 26),
 )
 
@@ -284,7 +293,7 @@ MAPPING_2026_INVOICE = TemplateMapping(
         (86, 83, False),   # インボイス登録予定
     ],
     shinsei={
-        # 基本情報入力 (行39〜)
+        # 基本情報入力 (行39〜) ※役員枠より前なのでズレなし
         'headquarters_address': 45,
         'industry_code': 46,
         'industry_text': 47,
@@ -294,13 +303,13 @@ MAPPING_2026_INVOICE = TemplateMapping(
         'fiscal_month': 64,
         'tool_name': 61,
 
-        # 担当者・代表者
+        # 担当者・代表者 ※ズレなし
         'officer_count': 71,
         'rep_title': 72,
         'rep_name': 73,
         'rep_kana': 74,
 
-        # 役員 (最大7名)
+        # 役員 (最大10名) ※(1)〜(7)はズレなし、(8)〜(10)は新規
         'officer_1_title': 77,
         'officer_1_name': 78,
         'officer_1_kana': 79,
@@ -322,32 +331,41 @@ MAPPING_2026_INVOICE = TemplateMapping(
         'officer_7_title': 95,
         'officer_7_name': 96,
         'officer_7_kana': 97,
+        'officer_8_title': 98,
+        'officer_8_name': 99,
+        'officer_8_kana': 100,
+        'officer_9_title': 101,
+        'officer_9_name': 102,
+        'officer_9_kana': 103,
+        'officer_10_title': 104,
+        'officer_10_name': 105,
+        'officer_10_kana': 106,
 
-        # その他
-        'past_subsidies': 103,
-        'eruboshi': 107,
-        'kurumin': 108,
-        'business_types': 128,
+        # その他 ※+9
+        'past_subsidies': 112,
+        'eruboshi': 116,
+        'kurumin': 117,
+        'business_types': 137,
 
-        # 財務情報入力 (行132〜)
-        'officer_count_prev': 137,
+        # 財務情報入力 ※+9
+        'officer_count_prev': 146,
 
-        # 経営状況 (行149〜)
-        'management_intent': 151,
-        'security_status': 152,
-        'future_goals': 153,
-        'it_investment_status': 154,
-        'it_utilization_scope': 155,
-        'invoice_related_work': 156,
+        # 経営状況 ※+9
+        'management_intent': 160,
+        'security_status': 161,
+        'future_goals': 162,
+        'it_investment_status': 163,
+        'it_utilization_scope': 164,
+        'invoice_related_work': 165,
 
-        # 計画数値入力 (行187〜)
-        'min_wage': 189,
-        'min_wage_hourly': 190,
-        'employee_count_fte': 191,
-        'wage_raise_declaration': 198,
-        'wage_raise_amount': 199,
-        'wage_raise_method': 200,
-        'wage_raise_date': 201,
+        # 計画数値入力 ※+9
+        'min_wage': 198,
+        'min_wage_hourly': 199,
+        'employee_count_fte': 200,
+        'wage_raise_declaration': 207,
+        'wage_raise_amount': 208,
+        'wage_raise_method': 209,
+        'wage_raise_date': 210,
     },
     kyuyo_sheet_name='給与支給総額計算',
     kyuyo={
@@ -360,7 +378,7 @@ MAPPING_2026_INVOICE = TemplateMapping(
         'misc_wages':       (6,  5),  # E6:  雑給
         'bonus':            (7,  5),  # E7:  賞与手当
     },
-    shinsei_clear_range=(5, 260),
+    shinsei_clear_range=(5, 270),
     tenki_text_range=(16, 26),
 )
 
