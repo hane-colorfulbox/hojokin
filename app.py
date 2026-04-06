@@ -341,28 +341,59 @@ uploaded_files = st.file_uploader(
     key='file_uploader',
 )
 
-# アップロード済みファイルのプレビュー
+# アップロード済みファイルのチェックリスト
 if uploaded_files:
-    with st.expander(f'アップロード済み: {len(uploaded_files)}件', expanded=True):
-        detector_names = {
-            'ヒアリング': '📝 ヒアリングシート',
-            '履歴事項': '🏢 履歴事項全部証明書',
-            '損益計算書': '💰 損益計算書',
-            '決算報告書': '💰 決算報告書',
-            '決算書': '💰 決算書',
-            '納税証明': '📄 納税証明書',
-            '見積': '📋 見積書',
-            '賃金状況報告': '👥 賃金状況報告シート',
-        }
-        for f in uploaded_files:
-            matched = False
-            for keyword, label in detector_names.items():
-                if keyword in f.name:
-                    st.markdown(f'&ensp; {label} → `{f.name}`')
-                    matched = True
-                    break
-            if not matched:
-                st.markdown(f'&ensp; ⚠️ 判別不可 → `{f.name}`（ファイル名にキーワードがありません）')
+    # ファイル判別ルール: (カテゴリ, 表示名, キーワードリスト, 必須フラグ)
+    FILE_CHECKS = [
+        ('hearing',     'ヒアリングシート',     ['ヒアリング'],                          True),
+        ('registry',    '履歴事項全部証明書',   ['履歴事項'],                            True),
+        ('pl',          '損益計算書 / 決算報告書', ['損益計算書', '決算報告書', '決算書'], True),
+        ('tax',         '納税証明書',           ['納税証明'],                            False),
+        ('estimate',    '見積書',               ['見積'],                                False),
+        ('wage_report', '賃金状況報告シート',   ['賃金状況報告'],                        False),
+    ]
+
+    # 各カテゴリにマッチしたファイルを集計
+    detected = {cat: [] for cat, *_ in FILE_CHECKS}
+    unmatched = []
+    for f in uploaded_files:
+        matched = False
+        for cat, _, keywords, _ in FILE_CHECKS:
+            if any(kw in f.name for kw in keywords):
+                detected[cat].append(f.name)
+                matched = True
+                break
+        if not matched:
+            unmatched.append(f.name)
+
+    # 必須チェック
+    missing_required = [
+        display for cat, display, _, required in FILE_CHECKS
+        if required and not detected[cat]
+    ]
+    all_required_ok = len(missing_required) == 0
+
+    # チェック結果を表示
+    if all_required_ok:
+        st.success(f'ファイルチェック OK — 必須ファイルがすべて揃っています（{len(uploaded_files)}件アップロード済み）')
+    else:
+        st.error(f'必須ファイルが不足しています: **{"、".join(missing_required)}**')
+
+    with st.expander('ファイル判別結果（詳細）', expanded=not all_required_ok):
+        for cat, display, _, required in FILE_CHECKS:
+            files = detected[cat]
+            if files:
+                st.markdown(f'✅ **{display}** → `{"`, `".join(files)}`')
+            elif required:
+                st.markdown(f'❌ **{display}** — **未検出（必須）** ファイル名にキーワードが含まれているか確認してください')
+            else:
+                st.markdown(f'➖ {display} — なし（任意）')
+
+        if unmatched:
+            st.markdown('---')
+            st.markdown('**判別できなかったファイル:**')
+            for name in unmatched:
+                st.markdown(f'&ensp; ⚠️ `{name}`（キーワードなし → 処理対象外）')
 
 # テンプレート原本
 st.markdown('---')
@@ -381,14 +412,35 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-can_run = bool(company_name) and bool(uploaded_files)
+# 必須ファイルチェック（アップロード済みの場合のみ）
+_required_keywords = {
+    'hearing': ['ヒアリング'],
+    'registry': ['履歴事項'],
+    'pl': ['損益計算書', '決算報告書', '決算書'],
+}
+
+def _check_required(files):
+    """必須ファイルが全て揃っているかチェック"""
+    if not files:
+        return False
+    names = [f.name for f in files]
+    for cat, keywords in _required_keywords.items():
+        if not any(any(kw in name for kw in keywords) for name in names):
+            return False
+    return True
+
+has_files = bool(uploaded_files)
+has_required = _check_required(uploaded_files) if has_files else False
+can_run = bool(company_name) and has_files
 
 if not company_name:
     st.warning('⬅️ サイドバーで会社名を入力してください')
-elif not uploaded_files:
+elif not has_files:
     st.warning('⬆️ 資料ファイルをアップロードしてください')
+elif not has_required:
+    st.warning('⬆️ 必須ファイルが不足しています。ファイル判別結果を確認してください')
 else:
-    st.info(f'**{company_name}** の書類を **{template_label}** で作成します')
+    st.info(f'**{company_name}** の書類を **{template_label}** で作成します — 準備OKです')
 
 if st.button('処理開始', type='primary', disabled=not can_run, use_container_width=True):
     # 一時ディレクトリに保存
