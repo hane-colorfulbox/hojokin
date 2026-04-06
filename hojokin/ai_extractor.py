@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 PROMPT_REGISTRY = """この履歴事項全部証明書の画像から、以下の情報をJSON形式で抽出してください。
 読み取れない項目はnullにしてください。
 
+重要ルール:
+- 履歴事項には役員の就任・退任・重任の履歴が記録されています。同一人物が複数回登場する場合は、最新の役職のみを採用してください。
+- 下線が引かれた（抹消された）情報は過去のものなので無視してください。
+- 代表者はofficersには含めないでください（representative_name/representative_titleに記載）。
+- 退任済みの役員は含めないでください。
+
 ```json
 {
   "name": "法人名（株式会社等含む）",
@@ -302,11 +308,18 @@ class ClaudeExtractor(BaseExtractor):
         text = self._call_api(images, PROMPT_REGISTRY)
         data = self._parse_json(text)
 
+        # 役員リスト（同一人物の重複を排除）
         officers = []
+        seen_names = set()
+        rep_name = data.get('representative_name', '')
         for o in data.get('officers', []):
+            name = o.get('name', '').strip()
+            if not name or name in seen_names or name == rep_name:
+                continue
+            seen_names.add(name)
             officers.append({
                 'title': o.get('title', ''),
-                'name': o.get('name', ''),
+                'name': name,
                 'kana': o.get('kana', ''),
             })
 
