@@ -218,14 +218,132 @@ MAPPING_2026_TSUJO = TemplateMapping(
 # ── 2026 インボイス枠 ──
 # テンプレート原本: ツール/【原本_法人】企業名_インボイス枠_法人2026.xlsx
 # ヒアリングシート: ツール/ヒアリングシート2026_インボイス法人.xlsx
-# 現時点では通常枠と同じマッピングを仮置き。テンプレート確認後に調整
 MAPPING_2026_INVOICE = TemplateMapping(
-    hearing_to_tenki=MAPPING_2026_TSUJO.hearing_to_tenki,
-    shinsei=MAPPING_2026_TSUJO.shinsei.copy(),
+    hearing_to_tenki=[
+        # (ヒアリング行, 転記行, 電話番号変換)
+        (8,  8,  False),   # 企業名
+        (10, 10, False),   # 企業名フリガナ
+        (12, 12, False),   # 店舗事業所数
+        (14, 14, False),   # 事業者URL
+        (17, 16, False),   # 主な事業内容
+        (18, 17, False),   # 強み
+        (19, 18, False),   # 時間がかかっている業務
+        (20, 19, False),   # 月間何時間
+        (21, 20, False),   # どの機能で楽にしたいか
+        (22, 21, False),   # 何%削減
+        (23, 22, False),   # 浮いた時間の活用
+        (24, 23, False),   # 3年後の売上目標
+        (25, 24, False),   # 取引先属性
+        (28, 26, True),    # 代表電話番号
+        (30, 28, False),   # 担当者氏名
+        (32, 30, False),   # 担当者氏名フリガナ
+        (34, 32, False),   # 担当者メールアドレス
+        (36, 34, True),    # 担当者電話番号
+        (38, 36, True),    # 担当者携帯番号
+        (40, 38, False),   # 正規雇用
+        (42, 40, False),   # 契約社員
+        (44, 42, False),   # パートアルバイト
+        (46, 44, False),   # 派遣社員
+        (48, 46, False),   # その他
+        (50, 48, False),   # 過去に補助金
+        (52, 50, False),   # 申請年度
+        (53, 51, False),   # 申請枠
+        (54, 52, False),   # 申請回
+        (58, 56, False),   # えるぼし
+        (61, 59, False),   # くるみん
+        (63, 61, False),   # SECURITY ACTION ID
+        (66, 64, False),   # 正規雇用(前期)
+        (67, 65, False),   # 契約社員(前期)
+        (68, 66, False),   # パート(前期)
+        (69, 67, False),   # 年間平均労働時間
+        (72, 70, False),   # 事業所内最低賃金
+        (74, 72, False),   # 賃金引上げ表明
+        (76, 74, False),   # 賃金引上げ幅
+        (79, 76, False),   # 従業員代表者
+        (80, 77, False),   # 給与担当者
+        (81, 78, False),   # 事業所内最低賃金者
+        (84, 81, False),   # インボイス登録状況
+        (86, 83, False),   # インボイス登録予定
+    ],
+    shinsei={
+        # 基本情報入力 (行39〜)
+        'headquarters_address': 45,
+        'industry_code': 46,
+        'industry_text': 47,
+        'established_date': 48,
+        'capital': 49,
+        'business_description': 63,
+        'fiscal_month': 64,
+        'tool_name': 61,
+
+        # 担当者・代表者
+        'officer_count': 71,
+        'rep_title': 72,
+        'rep_name': 73,
+        'rep_kana': 74,
+
+        # 役員 (最大7名)
+        'officer_1_title': 77,
+        'officer_1_name': 78,
+        'officer_1_kana': 79,
+        'officer_2_title': 80,
+        'officer_2_name': 81,
+        'officer_2_kana': 82,
+        'officer_3_title': 83,
+        'officer_3_name': 84,
+        'officer_3_kana': 85,
+        'officer_4_title': 86,
+        'officer_4_name': 87,
+        'officer_4_kana': 88,
+        'officer_5_title': 89,
+        'officer_5_name': 90,
+        'officer_5_kana': 91,
+        'officer_6_title': 92,
+        'officer_6_name': 93,
+        'officer_6_kana': 94,
+        'officer_7_title': 95,
+        'officer_7_name': 96,
+        'officer_7_kana': 97,
+
+        # その他
+        'past_subsidies': 103,
+        'eruboshi': 107,
+        'kurumin': 108,
+        'business_types': 128,
+
+        # 財務情報入力 (行132〜)
+        'officer_count_prev': 137,
+
+        # 経営状況 (行149〜)
+        'management_intent': 151,
+        'security_status': 152,
+        'future_goals': 153,
+        'it_investment_status': 154,
+        'it_utilization_scope': 155,
+        'invoice_related_work': 156,
+
+        # 計画数値入力 (行187〜)
+        'min_wage': 189,
+        'min_wage_hourly': 190,
+        'employee_count_fte': 191,
+        'wage_raise_declaration': 198,
+        'wage_raise_amount': 199,
+        'wage_raise_method': 200,
+        'wage_raise_date': 201,
+    },
     kyuyo_sheet_name='給与支給総額計算',
-    kyuyo=MAPPING_2026_TSUJO.kyuyo.copy(),
+    kyuyo={
+        'revenue':          (10, 2),  # B10: 売上高
+        'gross_profit':     (11, 2),  # B11: 粗利益
+        'operating_profit': (12, 2),  # B12: 営業利益
+        'ordinary_profit':  (13, 2),  # B13: 経常利益
+        'depreciation':     (16, 5),  # E16: 減価償却費
+        'salary':           (5,  5),  # E5:  給料手当
+        'misc_wages':       (6,  5),  # E6:  雑給
+        'bonus':            (7,  5),  # E7:  賞与手当
+    },
     shinsei_clear_range=(5, 260),
-    tenki_text_range=(15, 26),
+    tenki_text_range=(16, 26),
 )
 
 

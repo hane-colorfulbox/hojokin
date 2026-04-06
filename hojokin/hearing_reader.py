@@ -8,6 +8,37 @@ import openpyxl
 
 logger = logging.getLogger(__name__)
 
+# 全角→半角変換テーブル
+_ZEN2HAN = str.maketrans(
+    '０１２３４５６７８９'
+    'ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ'
+    'ａｂｃｄｅｆｇｈｉｊｋｌｍｎｏｐｑｒｓｔｕｖｗｘｙｚ'
+    '－（）　＠．／：，',
+    '0123456789'
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    'abcdefghijklmnopqrstuvwxyz'
+    '-() @./：,',
+)
+
+
+def normalize_value(value):
+    """全角数字・英字を半角に変換。数値化できるものは数値にする。"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    s = str(value).translate(_ZEN2HAN).strip()
+    # 先頭0の数字列は電話番号等なので文字列のまま返す
+    s_clean = s.replace(',', '').replace('円', '').replace('人', '').replace('時間', '')
+    if s_clean.startswith('0') and s_clean.isdigit() and len(s_clean) >= 2:
+        return s_clean
+    try:
+        if '.' in s_clean:
+            return float(s_clean)
+        return int(s_clean)
+    except ValueError:
+        return s
+
 
 def normalize_phone(value) -> str | None:
     """数値の電話番号を先頭0補完した文字列に変換"""
@@ -51,7 +82,7 @@ def read_hearing_sheet(path: Path) -> dict[int, any]:
         if label is not None:
             data[row_num] = {
                 'label': str(label).strip(),
-                'value': value,
+                'value': normalize_value(value),
             }
 
     wb.close()
