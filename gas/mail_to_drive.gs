@@ -27,18 +27,18 @@ const CONFIG = {
 
   // 資料格納先の親フォルダID（DriveのURL末尾の文字列）
   // 例: https://drive.google.com/drive/folders/XXXXX → XXXXX がID
-  PARENT_FOLDER_ID: 'ここにフォルダIDを入力',
+  PARENT_FOLDER_ID: '1L_nt38A9IFbZLaDZl1_nKxcbSrUlwKjX',
 
   // 案件管理スプレッドシートID
   // https://docs.google.com/spreadsheets/d/1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU/
   MANAGEMENT_SHEET_ID: '1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU',
 
-  // 案件管理シート名（★ 実際のシート名に合わせて変更）
-  MANAGEMENT_SHEET_NAME: 'シート1',
+  // 案件管理シート名
+  MANAGEMENT_SHEET_NAME: 'Form_Responses',
 
   // 案件管理シートの列番号（1始まり）
-  COL_COMPANY_NAME: 1,    // 会社名の列
-  COL_DOC_RECEIVED: 5,    // 資料受領チェックの列（★要確認）
+  COL_COMPANY_NAME: 12,   // L列: お客様企業名
+  COL_DOC_RECEIVED: 21,   // U列: 資料受領チェック（★要確認: 空き列を使用）
 
   // 処理済みラベル名
   PROCESSED_LABEL: 'auto-processed',
