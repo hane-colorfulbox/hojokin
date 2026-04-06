@@ -109,6 +109,10 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
     write('it_investment_status', ai.it_investment_status, 'IT投資状況')
     write('it_utilization_status', ai.it_utilization_status, 'IT活用状況')
 
+    # ── インボイス枠特有の項目 ──
+    write('it_utilization_scope', ai.it_utilization_scope, 'IT電子化範囲')
+    write('invoice_related_work', ai.invoice_related_work, 'インボイス対応業務')
+
     # ── 最低賃金 ──
     min_wage = get_min_wage(co.address)
     if min_wage:
@@ -198,7 +202,17 @@ def check_empty_cells(wb: openpyxl.Workbook) -> list[str]:
         'ここまで入力',
         # プロンプト
         'プロンプト',
+        # 補助事業者登録（手動確認項目）
+        '補助事業者登録',
+        # 代表者フリガナ・代表電話番号（転記シートから）
+        '代表者氏名（フリガナ）',
     }
+
+    # 使われていない役員枠を除外（役員(N)で値がないもの）
+    def is_empty_officer_slot(label_str, row_num):
+        """役員(N)のラベルだが値が空の場合True"""
+        import re
+        return bool(re.match(r'役員（[0-9０-９]+）', label_str))
 
     for row in ws.iter_rows(min_row=35, max_row=250):
         row_num = row[0].row
@@ -210,6 +224,10 @@ def check_empty_cells(wb: openpyxl.Workbook) -> list[str]:
 
         label_str = str(label).strip()
         if any(kw in label_str for kw in skip_keywords):
+            continue
+
+        # 使われていない役員枠はスキップ
+        if is_empty_officer_slot(label_str, row_num):
             continue
 
         empty.append(f'行{row_num:3d} [{label_str[:60]}]')

@@ -103,6 +103,8 @@ class AIJudgment:
     min_wage_text: str = ''         # 地域別最低賃金
     it_investment_status: str = ''  # IT投資状況
     it_utilization_status: str = '' # IT活用状況
+    it_utilization_scope: str = ''  # IT電子化範囲（インボイス枠）
+    invoice_related_work: str = ''  # インボイス対応業務（インボイス枠）
 
 
 @dataclass
