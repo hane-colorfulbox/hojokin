@@ -24,7 +24,7 @@ class FileDetector:
         'hearing': ['ヒアリング'],
         'registry': ['履歴事項'],
         'tax': ['納税証明'],
-        'pl': ['損益計算書'],
+        'pl': ['損益計算書', '決算報告書', '決算書'],
         'estimate': ['見積', 'お見積'],
         'wage_report': ['賃金状況報告'],
         'wage_data': ['支給控除一覧', '給与データ'],
