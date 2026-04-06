@@ -34,11 +34,11 @@ const CONFIG = {
   MANAGEMENT_SHEET_ID: '1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU',
 
   // 案件管理シート名
-  MANAGEMENT_SHEET_NAME: 'Form_Responses',
+  MANAGEMENT_SHEET_NAME: 'シート1',
 
   // 案件管理シートの列番号（1始まり）
-  COL_COMPANY_NAME: 12,   // L列: お客様企業名
-  COL_DOC_RECEIVED: 21,   // U列: 資料受領チェック（★要確認: 空き列を使用）
+  COL_COMPANY_NAME: 2,    // B列: お客様企業名
+  COL_DOC_RECEIVED: 42,   // AP列: 資料チェック
 
   // 処理済みラベル名
   PROCESSED_LABEL: 'auto-processed',
