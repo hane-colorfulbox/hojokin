@@ -23,9 +23,13 @@ load_dotenv()
 sys.path.insert(0, str(Path(__file__).parent))
 
 from hojokin.ai_extractor import create_extractor
-from hojokin.config import CLAUDE_API_KEY
+from hojokin.config import CLAUDE_API_KEY, detect_prefecture
 from hojokin.pipeline import (
     FileDetector, run_application_transfer, run_wage_calculation,
+)
+from hojokin.wage_reader import (
+    read_wage_ledger, judge_bonus_points,
+    fill_bonus_sheet_1, fill_bonus_sheet_2,
 )
 
 # ── 定数 ──
@@ -37,6 +41,7 @@ TEMPLATE_OPTIONS = {
 TASK_OPTIONS = {
     '申請書作成のみ': 'application',
     '給与計算のみ': 'wage',
+    '加点判定（賃金台帳）': 'bonus',
     '両方（申請書 + 給与計算）': 'all',
 }
 
@@ -177,12 +182,15 @@ def run_processing(
     work_dir: Path,
     template_dir: Path,
     progress_callback=None,
+    prefecture: str = '',
 ):
     """メイン処理を実行"""
     results = {}
 
-    # Extractor作成
-    extractor = create_extractor(CLAUDE_API_KEY)
+    # Extractor作成（加点判定のみの場合はAPI不要）
+    extractor = None
+    if task_type in ('application', 'wage', 'all'):
+        extractor = create_extractor(CLAUDE_API_KEY)
 
     if task_type in ('application', 'all'):
         if progress_callback:
@@ -231,7 +239,74 @@ def run_processing(
             'output_path': output_path if status.status == '完了' else None,
         }
 
+    if task_type == 'bonus':
+        if progress_callback:
+            progress_callback('賃金台帳を読み取り中...')
+
+        results['bonus'] = _run_bonus_judgment(work_dir, company_name, prefecture, template_dir)
+
     return results
+
+
+def _run_bonus_judgment(work_dir: Path, company_name: str, prefecture: str, template_dir: Path) -> dict:
+    """加点判定を実行"""
+    # 賃金台帳ファイルを探す
+    wage_file = None
+    for f in work_dir.iterdir():
+        if f.suffix in ('.xlsx', '.xls') and not f.name.startswith('~$'):
+            if '賃金' in f.name or '給与' in f.name or '明細' in f.name or 'wage' in f.name.lower():
+                wage_file = f
+                break
+    if wage_file is None:
+        # 賃金台帳のキーワードがなくてもExcelならとりあえず読む
+        for f in work_dir.iterdir():
+            if f.suffix in ('.xlsx', '.xls') and not f.name.startswith('~$'):
+                wage_file = f
+                break
+
+    if wage_file is None:
+        return {
+            'status': 'エラー',
+            'message': '賃金台帳ファイルが見つかりません。Excelファイルをアップロードしてください。',
+        }
+
+    try:
+        employees = read_wage_ledger(wage_file)
+        if not employees:
+            return {
+                'status': 'エラー',
+                'message': '賃金台帳からデータを読み取れませんでした。シートの形式を確認してください。',
+            }
+
+        result = judge_bonus_points(employees, prefecture)
+
+        # 加点措置シートのテンプレートを探して自動入力
+        bonus_dir = template_dir / '補助金加点'
+        output_files = {}
+
+        if bonus_dir.exists():
+            for bp in bonus_dir.iterdir():
+                if '加点措置①' in bp.name and bp.suffix == '.xlsx':
+                    out = work_dir / f'{company_name}_加点措置①_結果.xlsx'
+                    fill_bonus_sheet_1(bp, out, result)
+                    output_files['bonus1'] = out
+                elif '加点措置②' in bp.name and bp.suffix == '.xlsx':
+                    out = work_dir / f'{company_name}_加点措置②_結果.xlsx'
+                    fill_bonus_sheet_2(bp, out, result)
+                    output_files['bonus2'] = out
+
+        return {
+            'status': '完了',
+            'message': f'従業員{len(employees)}名の賃金台帳を分析しました。',
+            'result': result,
+            'output_files': output_files,
+        }
+
+    except Exception as e:
+        return {
+            'status': 'エラー',
+            'message': f'処理中にエラーが発生しました: {str(e)}',
+        }
 
 
 # ── ヘッダー ──
@@ -275,9 +350,20 @@ with st.sidebar:
     task_label = st.selectbox(
         '実行タスク',
         list(TASK_OPTIONS.keys()),
-        help='申請書作成：ヒアリングシート+各種PDFから申請書を自動作成。給与計算：損益計算書+賃金データから給与支給総額を計算。',
+        help='申請書作成：ヒアリングシート+各種PDFから申請書を自動作成。給与計算：損益計算書+賃金データから給与支給総額を計算。加点判定：賃金台帳から加点措置の対象かを判定。',
     )
     task_type = TASK_OPTIONS[task_label]
+
+    # 加点判定の場合は都道府県が必要
+    if task_type == 'bonus':
+        from hojokin.config import MIN_WAGE_MAP
+        prefecture = st.selectbox(
+            '事業場の都道府県',
+            [''] + list(MIN_WAGE_MAP.keys()),
+            help='加点判定に必要です。事業場の所在地の都道府県を選択してください。',
+        )
+    else:
+        prefecture = ''
 
     st.divider()
 
@@ -448,16 +534,25 @@ def _check_required(files):
 
 has_files = bool(uploaded_files)
 has_required = _check_required(uploaded_files) if has_files else False
-can_run = bool(company_name) and has_files
+# 加点判定の場合はExcelファイルがあればOK（申請書の必須ファイルは不要）
+if task_type == 'bonus':
+    can_run = bool(company_name) and has_files and bool(prefecture)
+else:
+    can_run = bool(company_name) and has_files
 
 if not company_name:
     st.warning('⬅️ サイドバーで会社名を入力してください')
+elif task_type == 'bonus' and not prefecture:
+    st.warning('⬅️ サイドバーで事業場の都道府県を選択してください')
 elif not has_files:
     st.warning('⬆️ 資料ファイルをアップロードしてください')
-elif not has_required:
+elif task_type != 'bonus' and not has_required:
     st.warning('⬆️ 必須ファイルが不足しています。ファイル判別結果を確認してください')
 else:
-    st.info(f'**{company_name}** の書類を **{template_label}** で作成します — 準備OKです')
+    if task_type == 'bonus':
+        st.info(f'**{company_name}** の賃金台帳を分析して加点判定を行います — 準備OKです')
+    else:
+        st.info(f'**{company_name}** の書類を **{template_label}** で作成します — 準備OKです')
 
 if st.button('処理開始', type='primary', disabled=not can_run, use_container_width=True):
     # 一時ディレクトリに保存
@@ -482,13 +577,15 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
         detector = FileDetector(work_dir)
 
         # 処理実行
-        with st.spinner('AIが資料を読み取り中...（1〜3分かかります）'):
+        spinner_msg = '賃金台帳を分析中...' if task_type == 'bonus' else 'AIが資料を読み取り中...（1〜3分かかります）'
+        with st.spinner(spinner_msg):
             results = run_processing(
                 company_name=company_name,
                 template_type=template_type,
                 task_type=task_type,
                 work_dir=work_dir,
                 template_dir=template_dir,
+                prefecture=prefecture,
             )
 
         # 結果をsession_stateに保存（画面再描画後も残る）
@@ -500,11 +597,39 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 'empty_cells': result.get('empty_cells', []),
                 'file_data': None,
                 'file_name': None,
+                'bonus_result': None,
+                'bonus_files': {},
             }
             if result.get('output_path') and result['output_path'].exists():
                 with open(result['output_path'], 'rb') as f:
                     entry['file_data'] = f.read()
                 entry['file_name'] = result['output_path'].name
+
+            # 加点判定の結果
+            if task_name == 'bonus' and result.get('result'):
+                br = result['result']
+                entry['bonus_result'] = {
+                    'bonus1_eligible': br.bonus1_eligible,
+                    'bonus1_months_met': br.bonus1_months_met,
+                    'bonus1_details': br.bonus1_details,
+                    'bonus2_eligible': br.bonus2_eligible,
+                    'bonus2_min_wage_july': br.bonus2_min_wage_july,
+                    'bonus2_min_wage_latest': br.bonus2_min_wage_latest,
+                    'bonus2_diff': br.bonus2_diff,
+                    'prefecture': br.prefecture,
+                    'min_wage_r6': br.min_wage_r6,
+                    'min_wage_r7': br.min_wage_r7,
+                    'employee_count': len(br.employees),
+                }
+                # 加点シートのファイルデータ
+                for key, path in result.get('output_files', {}).items():
+                    if path.exists():
+                        with open(path, 'rb') as f:
+                            entry['bonus_files'][key] = {
+                                'data': f.read(),
+                                'name': path.name,
+                            }
+
             session_results[task_name] = entry
 
         st.session_state['last_results'] = session_results
@@ -531,10 +656,15 @@ if 'last_results' in st.session_state:
         st.code(st.session_state.get('last_detector_summary', ''))
 
     for task_name, result in st.session_state['last_results'].items():
-        task_display = '📝 申請書作成' if task_name == 'application' else '💰 給与支給総額計算'
+        task_display_map = {
+            'application': '📝 申請書作成',
+            'wage': '💰 給与支給総額計算',
+            'bonus': '📊 加点判定',
+        }
+        task_display = task_display_map.get(task_name, task_name)
 
         if result['status'] == '完了':
-            st.success(f'{task_display}: 完了')
+            st.success(f'{task_display}: 完了 — {result["message"]}')
 
             if result['file_data']:
                 st.download_button(
@@ -545,6 +675,47 @@ if 'last_results' in st.session_state:
                     use_container_width=True,
                     key=f'download_{task_name}',
                 )
+
+            # 加点判定の結果表示
+            if task_name == 'bonus' and result.get('bonus_result'):
+                br = result['bonus_result']
+
+                st.markdown(f"**事業場所在地:** {br['prefecture']}（R6最低賃金: {br['min_wage_r6']}円 → R7: {br['min_wage_r7']}円）")
+
+                # 加点措置①
+                col_b1, col_b2 = st.columns(2)
+                with col_b1:
+                    if br['bonus1_eligible']:
+                        st.success(f"**加点措置①: 対象** ({len(br['bonus1_months_met'])}か月が条件達成)")
+                    else:
+                        st.warning(f"**加点措置①: 対象外** ({len(br['bonus1_months_met'])}か月/3か月必要)")
+
+                    with st.expander('月別詳細'):
+                        for d in br['bonus1_details']:
+                            if d['total'] > 0:
+                                mark = '○' if d['meets_30pct'] else '×'
+                                st.text(f"{d['month']}: {d['under_r7']}/{d['total']}名 = {d['ratio']*100:.1f}% {mark}")
+
+                # 加点措置②
+                with col_b2:
+                    if br['bonus2_eligible']:
+                        st.success(f"**加点措置②: 対象** (差額 {br['bonus2_diff']:.0f}円 >= 63円)")
+                    else:
+                        st.warning(f"**加点措置②: 対象外** (差額 {br['bonus2_diff']:.0f}円 < 63円)")
+                    st.text(f"7月最低時給: {br['bonus2_min_wage_july']:.0f}円")
+                    st.text(f"直近月最低時給: {br['bonus2_min_wage_latest']:.0f}円")
+
+                # 加点シートダウンロード
+                for key, file_info in result.get('bonus_files', {}).items():
+                    label_map = {'bonus1': '加点措置①シート', 'bonus2': '加点措置②シート'}
+                    st.download_button(
+                        label=f"⬇️ {label_map.get(key, key)} をダウンロード",
+                        data=file_info['data'],
+                        file_name=file_info['name'],
+                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        use_container_width=True,
+                        key=f'download_{key}',
+                    )
 
             # 空セル表示
             if result.get('empty_cells'):
