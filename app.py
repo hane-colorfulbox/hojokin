@@ -32,6 +32,36 @@ from hojokin.wage_reader import (
     fill_bonus_sheet_1, fill_bonus_sheet_2,
 )
 
+# Drive連携（認証情報がある場合のみ）
+_drive_client = None
+_DRIVE_CREDS = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON', '')
+_DRIVE_PARENT_ID = os.getenv('DRIVE_PARENT_FOLDER_ID', '')
+
+
+def _get_drive_client():
+    global _drive_client
+    if _drive_client is not None:
+        return _drive_client
+
+    from hojokin.drive_client import DriveClient
+
+    # 方法1: ローカルのJSONファイル
+    if _DRIVE_CREDS and Path(_DRIVE_CREDS).exists():
+        _drive_client = DriveClient(credentials_path=_DRIVE_CREDS)
+        return _drive_client
+
+    # 方法2: Streamlit Secrets（Cloud用）
+    try:
+        if 'gcp_service_account' in st.secrets:
+            _drive_client = DriveClient(
+                credentials_dict=dict(st.secrets['gcp_service_account']),
+            )
+            return _drive_client
+    except Exception:
+        pass
+
+    return None
+
 # ── 定数 ──
 TEMPLATE_OPTIONS = {
     '通常枠 2026（法人）': '通常枠_2026',
@@ -367,22 +397,105 @@ with st.sidebar:
 
     st.divider()
 
+    # データソース選択
+    _has_local_creds = bool(_DRIVE_CREDS and Path(_DRIVE_CREDS).exists())
+    _has_cloud_creds = 'gcp_service_account' in st.secrets if hasattr(st, 'secrets') else False
+    drive_available = (_has_local_creds or _has_cloud_creds) and bool(_DRIVE_PARENT_ID)
+    # Secrets経由の場合もPARENT_IDを取得
+    if not _DRIVE_PARENT_ID and _has_cloud_creds:
+        try:
+            drive_available = bool(st.secrets.get('drive_parent_folder_id', ''))
+        except Exception:
+            pass
+    if drive_available:
+        data_source = st.radio(
+            'データソース',
+            ['ファイルアップロード', 'Google Drive'],
+            help='Google Driveから直接ファイルを取得できます。',
+        )
+    else:
+        data_source = 'ファイルアップロード'
+
+    st.divider()
+
     st.markdown('**処理の目安**')
     st.caption('所要時間: 約1〜3分')
     st.caption('API利用料: 約7〜10円/社')
 
-# ── ファイルアップロード ──
+# ── ファイル入力 ──
 st.markdown(
     '<span class="step-number">1</span>'
-    '<span class="step-title">資料をアップロード</span>',
+    '<span class="step-title">資料を準備</span>',
     unsafe_allow_html=True,
 )
-st.caption('ファイルはファイル名のキーワードで自動判別されます。該当キーワードがないファイルは無視されます。')
 
-col1, col2 = st.columns(2)
+# Drive連携用の変数
+drive_folder_id = None
+drive_files_to_download = []
 
-with col1:
-    st.markdown("""
+if data_source == 'Google Drive':
+    # ── Google Drive モード ──
+    st.caption('Google Driveの顧客フォルダからファイルを自動取得します。')
+
+    client = _get_drive_client()
+    if client is None:
+        st.error('Drive接続に失敗しました。認証情報を確認してください。')
+    else:
+        # PARENT_IDをSecretsからも取得
+        parent_id = _DRIVE_PARENT_ID
+        if not parent_id:
+            try:
+                parent_id = st.secrets.get('drive_parent_folder_id', '')
+            except Exception:
+                pass
+
+        @st.cache_data(ttl=60)
+        def _list_customer_folders():
+            c = _get_drive_client()
+            return c.list_folders(parent_id) if c else []
+
+        folders = _list_customer_folders()
+        folder_names = ['（選択してください）'] + [f['name'] for f in folders]
+
+        selected_folder_name = st.selectbox(
+            '顧客フォルダを選択',
+            folder_names,
+            help='Driveの2026フォルダ直下の顧客フォルダ一覧です。',
+        )
+
+        if selected_folder_name != '（選択してください）':
+            selected_folder = next(f for f in folders if f['name'] == selected_folder_name)
+            drive_folder_id = selected_folder['id']
+
+            # フォルダ内のファイル一覧（サブフォルダ含む）
+            @st.cache_data(ttl=30)
+            def _list_folder_files(folder_id):
+                c = _get_drive_client()
+                return c.list_files_recursive(folder_id) if c else []
+
+            all_files = _list_folder_files(drive_folder_id)
+
+            if all_files:
+                st.success(f'{len(all_files)}件のファイルが見つかりました')
+                with st.expander('ファイル一覧', expanded=True):
+                    for f in all_files:
+                        loc = f.get('folder_name', 'ルート')
+                        st.text(f'  [{loc}] {f["name"]}')
+                drive_files_to_download = all_files
+            else:
+                st.warning('このフォルダにはファイルがありません。')
+
+    uploaded_files = None
+    template_file = None
+
+else:
+    # ── ファイルアップロードモード ──
+    st.caption('ファイルはファイル名のキーワードで自動判別されます。該当キーワードがないファイルは無視されます。')
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("""
 <div class="file-card file-required">
 <span class="badge-required">必須</span><br>
 <strong>ヒアリングシート</strong>（Excel）<br>
@@ -405,8 +518,8 @@ with col1:
 </div>
 """, unsafe_allow_html=True)
 
-with col2:
-    st.markdown("""
+    with col2:
+        st.markdown("""
 <div class="file-card file-optional">
 <span class="badge-optional">あれば</span><br>
 <strong>納税証明書</strong>（PDF）<br>
@@ -429,84 +542,80 @@ with col2:
 </div>
 """, unsafe_allow_html=True)
 
-with st.expander('その他の注意事項'):
-    st.markdown("""
+    with st.expander('その他の注意事項'):
+        st.markdown("""
 - キーワードが含まれないファイルは**無視されます**（エラーにはなりません）
 - 決算書が2期分ある場合、**サイズの大きい方**が自動選択されます
 - 関係ないファイルが混ざっていても問題ありません
 - テンプレート選択（通常枠/インボイス枠）とテンプレート原本の種類を**一致**させてください
-    """)
+        """)
 
-uploaded_files = st.file_uploader(
-    'ここにファイルをまとめてドラッグ&ドロップ（複数選択可）',
-    accept_multiple_files=True,
-    type=['pdf', 'xlsx', 'xls'],
-    key='file_uploader',
-)
+    uploaded_files = st.file_uploader(
+        'ここにファイルをまとめてドラッグ&ドロップ（複数選択可）',
+        accept_multiple_files=True,
+        type=['pdf', 'xlsx', 'xls'],
+        key='file_uploader',
+    )
 
-# アップロード済みファイルのチェックリスト
-if uploaded_files:
-    # ファイル判別ルール: (カテゴリ, 表示名, キーワードリスト, 必須フラグ)
-    FILE_CHECKS = [
-        ('hearing',     'ヒアリングシート',     ['ヒアリング'],                          True),
-        ('registry',    '履歴事項全部証明書',   ['履歴事項'],                            True),
-        ('pl',          '損益計算書 / 決算報告書', ['損益計算書', '決算報告書', '決算書'], True),
-        ('tax',         '納税証明書',           ['納税証明'],                            False),
-        ('estimate',    '見積書',               ['見積'],                                False),
-        ('wage_report', '賃金状況報告シート',   ['賃金状況報告'],                        False),
-    ]
+    # アップロード済みファイルのチェックリスト
+    if uploaded_files:
+        FILE_CHECKS = [
+            ('hearing',     'ヒアリングシート',     ['ヒアリング'],                          True),
+            ('registry',    '履歴事項全部証明書',   ['履歴事項'],                            True),
+            ('pl',          '損益計算書 / 決算報告書', ['損益計算書', '決算報告書', '決算書'], True),
+            ('tax',         '納税証明書',           ['納税証明'],                            False),
+            ('estimate',    '見積書',               ['見積'],                                False),
+            ('wage_report', '賃金状況報告シート',   ['賃金状況報告'],                        False),
+        ]
 
-    # 各カテゴリにマッチしたファイルを集計
-    detected = {cat: [] for cat, *_ in FILE_CHECKS}
-    unmatched = []
-    for f in uploaded_files:
-        matched = False
-        for cat, _, keywords, _ in FILE_CHECKS:
-            if any(kw in f.name for kw in keywords):
-                detected[cat].append(f.name)
-                matched = True
-                break
-        if not matched:
-            unmatched.append(f.name)
+        detected = {cat: [] for cat, *_ in FILE_CHECKS}
+        unmatched = []
+        for f in uploaded_files:
+            matched = False
+            for cat, _, keywords, _ in FILE_CHECKS:
+                if any(kw in f.name for kw in keywords):
+                    detected[cat].append(f.name)
+                    matched = True
+                    break
+            if not matched:
+                unmatched.append(f.name)
 
-    # 必須チェック
-    missing_required = [
-        display for cat, display, _, required in FILE_CHECKS
-        if required and not detected[cat]
-    ]
-    all_required_ok = len(missing_required) == 0
+        missing_required = [
+            display for cat, display, _, required in FILE_CHECKS
+            if required and not detected[cat]
+        ]
+        all_required_ok = len(missing_required) == 0
 
-    # チェック結果を表示
-    if all_required_ok:
-        st.success(f'ファイルチェック OK — 必須ファイルがすべて揃っています（{len(uploaded_files)}件アップロード済み）')
-    else:
-        st.error(f'必須ファイルが不足しています: **{"、".join(missing_required)}**')
+        if all_required_ok:
+            st.success(f'ファイルチェック OK — 必須ファイルがすべて揃っています（{len(uploaded_files)}件アップロード済み）')
+        else:
+            st.error(f'必須ファイルが不足しています: **{"、".join(missing_required)}**')
 
-    with st.expander('ファイル判別結果（詳細）', expanded=not all_required_ok):
-        for cat, display, _, required in FILE_CHECKS:
-            files = detected[cat]
-            if files:
-                st.markdown(f'✅ **{display}** → `{"`, `".join(files)}`')
-            elif required:
-                st.markdown(f'❌ **{display}** — **未検出（必須）** ファイル名にキーワードが含まれているか確認してください')
-            else:
-                st.markdown(f'➖ {display} — なし（任意）')
+        with st.expander('ファイル判別結果（詳細）', expanded=not all_required_ok):
+            for cat, display, _, required in FILE_CHECKS:
+                files = detected[cat]
+                if files:
+                    st.markdown(f'✅ **{display}** → `{"`, `".join(files)}`')
+                elif required:
+                    st.markdown(f'❌ **{display}** — **未検出（必須）** ファイル名にキーワードが含まれているか確認してください')
+                else:
+                    st.markdown(f'➖ {display} — なし（任意）')
 
-        if unmatched:
-            st.markdown('---')
-            st.markdown('**判別できなかったファイル:**')
-            for name in unmatched:
-                st.markdown(f'&ensp; ⚠️ `{name}`（キーワードなし → 処理対象外）')
+            if unmatched:
+                st.markdown('---')
+                st.markdown('**判別できなかったファイル:**')
+                for name in unmatched:
+                    st.markdown(f'&ensp; ⚠️ `{name}`（キーワードなし → 処理対象外）')
 
-# テンプレート原本
-st.markdown('---')
-template_file = st.file_uploader(
-    'テンプレート原本（初回のみ必要。サーバーに保存されるので2回目以降は不要です）',
-    accept_multiple_files=False,
-    type=['xlsx'],
-    key='template_uploader',
-    help='「【原本_法人】企業名_○○枠_法人2026.xlsx」のファイルをアップロードしてください。',
-)
+    # テンプレート原本
+    st.markdown('---')
+    template_file = st.file_uploader(
+        'テンプレート原本（初回のみ必要。サーバーに保存されるので2回目以降は不要です）',
+        accept_multiple_files=False,
+        type=['xlsx'],
+        key='template_uploader',
+        help='「【原本_法人】企業名_○○枠_法人2026.xlsx」のファイルをアップロードしてください。',
+    )
 
 # ── 処理実行 ──
 st.markdown(
@@ -533,34 +642,54 @@ def _check_required(files):
     return True
 
 has_files = bool(uploaded_files)
+has_drive_files = bool(drive_files_to_download)
 has_required = _check_required(uploaded_files) if has_files else False
-# 加点判定の場合はExcelファイルがあればOK（申請書の必須ファイルは不要）
-if task_type == 'bonus':
-    can_run = bool(company_name) and has_files and bool(prefecture)
+
+if data_source == 'Google Drive':
+    if task_type == 'bonus':
+        can_run = bool(company_name) and has_drive_files and bool(prefecture)
+    else:
+        can_run = bool(company_name) and has_drive_files
 else:
-    can_run = bool(company_name) and has_files
+    if task_type == 'bonus':
+        can_run = bool(company_name) and has_files and bool(prefecture)
+    else:
+        can_run = bool(company_name) and has_files
 
 if not company_name:
     st.warning('⬅️ サイドバーで会社名を入力してください')
 elif task_type == 'bonus' and not prefecture:
     st.warning('⬅️ サイドバーで事業場の都道府県を選択してください')
-elif not has_files:
+elif data_source == 'Google Drive' and not has_drive_files:
+    st.warning('⬅️ サイドバーで顧客フォルダを選択してください')
+elif data_source != 'Google Drive' and not has_files:
     st.warning('⬆️ 資料ファイルをアップロードしてください')
-elif task_type != 'bonus' and not has_required:
+elif data_source != 'Google Drive' and task_type != 'bonus' and not has_required:
     st.warning('⬆️ 必須ファイルが不足しています。ファイル判別結果を確認してください')
 else:
+    source_label = 'Google Drive' if data_source == 'Google Drive' else 'アップロード'
     if task_type == 'bonus':
-        st.info(f'**{company_name}** の賃金台帳を分析して加点判定を行います — 準備OKです')
+        st.info(f'**{company_name}** の賃金台帳を分析して加点判定を行います（{source_label}）— 準備OKです')
     else:
-        st.info(f'**{company_name}** の書類を **{template_label}** で作成します — 準備OKです')
+        st.info(f'**{company_name}** の書類を **{template_label}** で作成します（{source_label}）— 準備OKです')
 
 if st.button('処理開始', type='primary', disabled=not can_run, use_container_width=True):
     # 一時ディレクトリに保存
     with tempfile.TemporaryDirectory() as tmpdir:
         work_dir = Path(tmpdir)
 
-        # ファイル保存
-        saved = save_uploaded_files(uploaded_files, work_dir)
+        # ファイル保存（データソースに応じて）
+        if data_source == 'Google Drive' and drive_files_to_download:
+            with st.spinner('Google Driveからファイルをダウンロード中...'):
+                client = _get_drive_client()
+                saved = []
+                for f in drive_files_to_download:
+                    dest = work_dir / f['name']
+                    client.download_file(f['id'], dest)
+                    saved.append(f['name'])
+                st.caption(f'{len(saved)}件のファイルをダウンロードしました')
+        else:
+            saved = save_uploaded_files(uploaded_files, work_dir)
 
         # テンプレートディレクトリ
         template_dir = Path(__file__).parent
