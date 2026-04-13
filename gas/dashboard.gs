@@ -68,6 +68,15 @@ function updateDashboard() {
   // 全データを結合: [支援事業者名, 公募回]
   const combinedRows = [];
 
+  // 案件管理表の公募回一覧を先に収集（マッチング用）
+  const mainRounds = [];
+  for (const row of allRows) {
+    const round = row[4] || '（未設定）';
+    if (!mainRounds.includes(round)) {
+      mainRounds.push(round);
+    }
+  }
+
   for (const row of allRows) {
     combinedRows.push({
       vendor: row[2] || '（未設定）',  // C列: 支援事業者名
@@ -76,9 +85,11 @@ function updateDashboard() {
   }
 
   for (const row of cbRows) {
+    // クラフトバンクの「1次」を案件管理表の「1次（5/12締切）」にマッチさせる
+    const matched = mainRounds.find(r => r.startsWith(row.round));
     combinedRows.push({
       vendor: DASHBOARD_CONFIG.CB_VENDOR_NAME,
-      round: row.round,
+      round: matched || row.round,
     });
   }
 
