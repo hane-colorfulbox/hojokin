@@ -1,7 +1,7 @@
 function onFormSubmit(e) {
   // --- 設定エリア ---
   const targetSsId = '1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU';
-  const targetSheetName = 'シート1'; // 転記先のシート名
+  const targetSheetName = '2026案件一覧'; // 転記先のシート名
   // ----------------
 
   const responses = e.values;
