@@ -1,45 +1,36 @@
 /**
  * フォーム送信時 → Driveフォルダ自動作成 + リンク記録
  *
- * 機能:
- *   1. フォーム送信時に顧客用Driveフォルダを自動作成
- *   2. サブフォルダ（1.交付申請 / 2.実績報告）を作成
- *   3. シート1の該当行B列（お客様企業名）にフォルダURLをハイパーリンクとして設定
- *
- * ※ フォーム回答の転記は既存GASが行っているため、
- *   このスクリプトではフォルダ作成とリンク記録のみ行う
- *
- * 注意:
- *   既存の onFormSubmit と関数名が衝突するため、
- *   この関数は onFormSubmitFolder という別名にしている。
- *   トリガー設定時は onFormSubmitFolder を選択すること。
+ * フォルダ構造:
+ *   2026/
+ *     支援事業者名/
+ *       001.顧客企業名_申請枠/
+ *         1.交付申請/
+ *         2.実績報告/
  *
  * トリガー設定:
- *   1. 案件管理スプレッドシートのApps Scriptエディタを開く
- *   2. このコードを新しいファイルとして追加
- *   3. 時計アイコン（トリガー）→「トリガーを追加」
- *   4. 関数: onFormSubmitFolder
- *   5. イベントソース: スプレッドシートから → フォーム送信時
+ *   関数: onFormSubmitFolder
+ *   イベントソース: スプレッドシートから → フォーム送信時
  */
 
 // ============================================================
 // 設定
 // ============================================================
 const FOLDER_CONFIG = {
-  // 顧客フォルダの親フォルダID
+  // 2026年度の親フォルダID
   // https://drive.google.com/drive/folders/1L_nt38A9IFbZLaDZl1_nKxcbSrUlwKjX
   PARENT_FOLDER_ID: '1L_nt38A9IFbZLaDZl1_nKxcbSrUlwKjX',
 
-  // サブフォルダ名（実際の運用ルールに合わせる）
+  // サブフォルダ名
   SUB_FOLDERS: ['1.交付申請', '2.実績報告'],
 
   // フォーム回答の列インデックス（0始まり、e.valuesの添字）
-  // Form_Responses シートの列構成
-  COL_COMPANY_NAME: 11,   // L列: お客様企業名
-  COL_TEMPLATE_TYPE: 10,  // K列: IT導入補助金の申請枠（インボイス枠/通常枠）
+  COL_COMPANY_NAME: 11,    // L列: お客様企業名
+  COL_TEMPLATE_TYPE: 10,   // K列: IT導入補助金の申請枠
+  COL_SUPPORT_COMPANY: 6,  // G列: 支援事業者名（貴社名）
 
   // シート1の列番号（1始まり）
-  SHEET1_COL_COMPANY: 2,  // B列: お客様企業名（ここにリンクを埋め込む）
+  SHEET1_COL_COMPANY: 2,   // B列: お客様企業名
 
   // 転記先シート名
   TARGET_SHEET_NAME: 'シート1',
@@ -52,7 +43,6 @@ const FOLDER_CONFIG = {
 
 /**
  * フォーム送信時にフォルダを作成する関数
- * ※ 既存の onFormSubmit とは別の関数名にしている
  * @param {Object} e - フォーム送信イベント
  */
 function onFormSubmitFolder(e) {
@@ -60,16 +50,17 @@ function onFormSubmitFolder(e) {
     const row = e.values;
     const companyName = row[FOLDER_CONFIG.COL_COMPANY_NAME];
     const templateType = row[FOLDER_CONFIG.COL_TEMPLATE_TYPE] || '';
+    const supportCompany = row[FOLDER_CONFIG.COL_SUPPORT_COMPANY] || '';
 
     if (!companyName) {
       Logger.log('会社名が空です');
       return;
     }
 
-    Logger.log(`新規送客: ${companyName} (${templateType})`);
+    Logger.log(`新規送客: ${companyName} (${templateType}) / 支援事業者: ${supportCompany}`);
 
-    // 1. Driveフォルダ作成
-    const result = createClientFolder(companyName, templateType);
+    // 1. Driveフォルダ作成（支援事業者フォルダの下に顧客フォルダ）
+    const result = createClientFolder(companyName, templateType, supportCompany);
     Logger.log(`フォルダ: ${result.url}`);
 
     // 2. シート1のB列にハイパーリンクを設定
@@ -90,21 +81,26 @@ function onFormSubmitFolder(e) {
 /**
  * 顧客用Driveフォルダを作成
  *
- * 命名規則（実際の運用に合わせる）:
- *   親フォルダ/
- *     01.㈱〇〇〇〇_インボイス枠/
- *       1.交付申請/
- *       2.実績報告/
+ * 構造:
+ *   親フォルダ(2026)/
+ *     支援事業者名/
+ *       001.顧客企業名_申請枠/
+ *         1.交付申請/
+ *         2.実績報告/
  *
- * @param {string} companyName - 会社名
+ * @param {string} companyName - 顧客企業名
  * @param {string} templateType - 申請枠（インボイス枠/通常枠）
+ * @param {string} supportCompany - 支援事業者名
  * @returns {Object} { url, folderName }
  */
-function createClientFolder(companyName, templateType) {
+function createClientFolder(companyName, templateType, supportCompany) {
   const parentFolder = DriveApp.getFolderById(FOLDER_CONFIG.PARENT_FOLDER_ID);
 
-  // 既存フォルダに同じ会社名が含まれていないかチェック
-  const allFolders = parentFolder.getFolders();
+  // 1. 支援事業者フォルダを取得 or 作成
+  const vendorFolder = getOrCreateVendorFolder_(parentFolder, supportCompany);
+
+  // 2. 支援事業者フォルダ内で既存の顧客フォルダをチェック
+  const allFolders = vendorFolder.getFolders();
   let maxNumber = 0;
 
   while (allFolders.hasNext()) {
@@ -116,7 +112,7 @@ function createClientFolder(companyName, templateType) {
       return { url: folder.getUrl(), folderName: name };
     }
 
-    // 連番の最大値を取得（例: "02.clipLine" → 2）
+    // 連番の最大値を取得（例: "002.〇〇株式会社" → 2）
     const numMatch = name.match(/^(\d+)[._]/);
     if (numMatch) {
       const num = parseInt(numMatch[1], 10);
@@ -126,22 +122,49 @@ function createClientFolder(companyName, templateType) {
     }
   }
 
-  // フォルダ名: 連番.会社名_申請枠
-  const nextNumber = String(maxNumber + 1).padStart(2, '0');
+  // 3. 顧客フォルダ作成: 連番.企業名_申請枠
+  const nextNumber = String(maxNumber + 1).padStart(3, '0');
   let folderName = `${nextNumber}.${companyName}`;
   if (templateType) {
     folderName += `_${templateType}`;
   }
 
-  const clientFolder = parentFolder.createFolder(folderName);
+  const clientFolder = vendorFolder.createFolder(folderName);
 
-  // サブフォルダ作成
+  // 4. サブフォルダ作成
   for (const subName of FOLDER_CONFIG.SUB_FOLDERS) {
     clientFolder.createFolder(subName);
   }
 
-  Logger.log(`フォルダ作成完了: ${folderName}`);
+  Logger.log(`フォルダ作成完了: ${supportCompany}/${folderName}`);
   return { url: clientFolder.getUrl(), folderName: folderName };
+}
+
+
+/**
+ * 支援事業者フォルダを取得（なければ作成）
+ * @param {Folder} parentFolder - 親フォルダ（2026）
+ * @param {string} supportCompany - 支援事業者名
+ * @returns {Folder} 支援事業者フォルダ
+ */
+function getOrCreateVendorFolder_(parentFolder, supportCompany) {
+  // 支援事業者名が空の場合は「その他」フォルダに入れる
+  const vendorName = supportCompany ? supportCompany.trim() : 'その他';
+
+  // 既存フォルダを検索
+  const folders = parentFolder.getFolders();
+  while (folders.hasNext()) {
+    const folder = folders.next();
+    if (folder.getName() === vendorName) {
+      Logger.log(`支援事業者フォルダ既存: ${vendorName}`);
+      return folder;
+    }
+  }
+
+  // なければ作成
+  const newFolder = parentFolder.createFolder(vendorName);
+  Logger.log(`支援事業者フォルダ作成: ${vendorName}`);
+  return newFolder;
 }
 
 
@@ -166,7 +189,6 @@ function setFolderLink(companyName, folderUrl) {
       if (cellValue === companyName.trim()) {
         const row = i + 2;
         const cell = sheet.getRange(row, FOLDER_CONFIG.SHEET1_COL_COMPANY);
-        // RichTextValueでハイパーリンクを設定（テキストは会社名のまま）
         const richText = SpreadsheetApp.newRichTextValue()
           .setText(companyName)
           .setLinkUrl(folderUrl)
@@ -181,17 +203,4 @@ function setFolderLink(companyName, folderUrl) {
   } catch (e) {
     Logger.log(`リンク設定エラー: ${e.message}`);
   }
-}
-
-
-// ============================================================
-// テスト
-// ============================================================
-
-/**
- * テスト用: フォルダ作成のみテスト（実行後に手動削除してください）
- */
-function testCreateFolder() {
-  const result = createClientFolder('テスト株式会社_削除OK', 'インボイス枠');
-  Logger.log(`作成されたフォルダ: ${result.url}`);
 }
