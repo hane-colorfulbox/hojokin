@@ -28,7 +28,7 @@ const NOTIFY_CONFIG = {
   COL_STATUS: 6,         // F列: ステータス
 
   // 対象シート名
-  SHEET_NAME: 'シート1',
+  SHEET_NAME: '2026案件一覧',
 
   // ヘッダー行
   HEADER_ROW: 2,

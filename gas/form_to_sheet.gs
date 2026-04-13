@@ -33,7 +33,7 @@ const FOLDER_CONFIG = {
   SHEET1_COL_COMPANY: 2,   // B列: お客様企業名
 
   // 転記先シート名
-  TARGET_SHEET_NAME: 'シート1',
+  TARGET_SHEET_NAME: '2026案件一覧',
 };
 
 
