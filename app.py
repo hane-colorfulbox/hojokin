@@ -688,7 +688,7 @@ elif data_source == 'Google Drive' and not has_drive_files:
     st.warning('⬅️ サイドバーで顧客フォルダを選択してください')
 elif data_source != 'Google Drive' and not has_files:
     st.warning('⬆️ 資料ファイルをアップロードしてください')
-elif data_source != 'Google Drive' and task_type != 'bonus' and not has_required:
+elif data_source != 'Google Drive' and not has_required:
     st.warning('⬆️ 必須ファイルが不足しています。ファイル判別結果を確認してください')
 else:
     source_label = 'Google Drive' if data_source == 'Google Drive' else 'アップロード'
