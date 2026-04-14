@@ -11,7 +11,11 @@ from .models import ExtractionResult, ProcessingStatus
 from .ai_extractor import create_extractor, BaseExtractor, StubExtractor
 from .hearing_reader import read_hearing_sheet
 from .template_filler import fill_template
-from .wage_calculator import create_wage_calculation
+from .wage_calculator import (
+    create_wage_calculation,
+    PayrollEmployee,
+    calculate_per_capita_wage,
+)
 from .pdf_reader import pdf_to_images
 
 logger = logging.getLogger(__name__)
@@ -25,8 +29,10 @@ class FileDetector:
         'registry': ['履歴事項'],
         'tax': ['納税証明'],
         'pl': ['損益計算書', '決算報告書', '決算書'],
+        'cost_report': ['製造原価報告書', '原価報告書'],
         'estimate': ['見積', 'お見積'],
         'wage_report': ['賃金状況報告'],
+        'wage_ledger': ['賃金台帳'],
         'wage_data': ['支給控除一覧', '給与データ'],
     }
 
@@ -142,9 +148,14 @@ def run_application_transfer(
             logger.info(f'履歴事項: {extraction.company.name}')
 
         # 損益計算書PDF → FinancialData
+        # 製造原価報告書がある場合は画像を結合してAIに送る
         pl_path = detector.get_pl_latest()
         if pl_path:
             images = pdf_to_images(pl_path)
+            cost_report_path = detector.get('cost_report')
+            if cost_report_path:
+                images += pdf_to_images(cost_report_path)
+                logger.info(f'製造原価報告書も読取: {cost_report_path.name}')
             extraction.financial = extractor.extract_pl(images)
             logger.info(f'損益計算書: 売上{extraction.financial.revenue:,}')
 
@@ -203,6 +214,9 @@ def run_application_transfer(
             hearing_data=hearing_data,
         )
 
+        # 賃金台帳 → 1人当たり給与支給総額の計画値
+        wage_plan = _calc_wage_plan_from_ledger(detector, extraction.financial)
+
         # テンプレート転記
         empty_cells = fill_template(
             template_path=template_path,
@@ -210,6 +224,7 @@ def run_application_transfer(
             mapping=mapping,
             hearing_data=hearing_data,
             extraction=extraction,
+            wage_plan=wage_plan,
         )
 
         status.status = '完了'
@@ -313,6 +328,76 @@ def run_wage_calculation(
         logger.error(f'エラー: {e}', exc_info=True)
 
     return status
+
+
+def _calc_wage_plan_from_ledger(
+    detector: FileDetector,
+    financial: 'FinancialData',
+) -> dict[str, float] | None:
+    """
+    賃金台帳から1人当たり給与支給総額を算出し、年3%の計画値を返す。
+
+    賃金台帳がない場合はNoneを返す（C191:C195は空欄のまま）。
+
+    Returns:
+        {'year_0': 基準年, 'year_1': 1年目, 'year_2': 2年目, 'year_3': 3年目}
+    """
+    from .wage_reader import read_wage_ledger
+
+    ledger_path = detector.get('wage_ledger')
+    if ledger_path is None:
+        logger.info('賃金台帳が見つかりません → 計画値転記をスキップ')
+        return None
+
+    try:
+        employees_raw = read_wage_ledger(ledger_path)
+        if not employees_raw:
+            logger.warning('賃金台帳からデータを読み取れませんでした')
+            return None
+
+        logger.info(f'賃金台帳: {len(employees_raw)}名読取 ({ledger_path.name})')
+
+        # WageEmployee → PayrollEmployee に変換
+        payroll_list = []
+        for emp in employees_raw:
+            is_officer = '役員' in emp.employment_type
+            emp_type = emp.employment_type if emp.employment_type else '正社員'
+
+            # 全月分の給与を受けたか判定
+            full_year = emp.is_full_year
+
+            monthly_salary = [
+                w if w is not None else 0.0 for w in emp.monthly_wages
+            ]
+            monthly_hours = []
+            if emp.monthly_avg_hours > 0:
+                monthly_hours = [emp.monthly_avg_hours] * 12
+
+            payroll_list.append(PayrollEmployee(
+                name=emp.name,
+                employment_type=emp_type,
+                monthly_salary=monthly_salary,
+                monthly_hours=monthly_hours,
+                is_officer=is_officer,
+                full_year=full_year,
+            ))
+
+        result = calculate_per_capita_wage(payroll_list)
+
+        if result.per_person_salary <= 0:
+            logger.warning('1人当たり給与支給総額が0以下 → 計画値転記をスキップ')
+            return None
+
+        plan = result.plan_values()
+        logger.info(
+            f'1人当たり給与支給総額: {result.per_person_salary:,.0f}円 '
+            f'(従業員FTE: {result.employee_count_fte:.1f}人, 年3%成長)'
+        )
+        return plan
+
+    except Exception as e:
+        logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}')
+        return None
 
 
 def _read_wage_report(path: Path) -> tuple[list[dict], int, int, int]:

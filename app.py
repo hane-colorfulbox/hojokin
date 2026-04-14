@@ -563,9 +563,11 @@ else:
             ('hearing',     'ヒアリングシート',     ['ヒアリング'],                          True),
             ('registry',    '履歴事項全部証明書',   ['履歴事項'],                            True),
             ('pl',          '損益計算書 / 決算報告書', ['損益計算書', '決算報告書', '決算書'], True),
+            ('cost_report', '製造原価報告書',       ['製造原価報告書', '原価報告書'],         False),
             ('tax',         '納税証明書',           ['納税証明'],                            False),
             ('estimate',    '見積書',               ['見積'],                                False),
             ('wage_report', '賃金状況報告シート',   ['賃金状況報告'],                        False),
+            ('wage_ledger', '賃金台帳',             ['賃金台帳'],                            False),
         ]
 
         detected = {cat: [] for cat, *_ in FILE_CHECKS}

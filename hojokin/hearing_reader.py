@@ -96,6 +96,8 @@ def transfer_hearing_to_tenki(hearing_data: dict, ws_tenki, mapping: list[tuple[
     mapping: [(ヒアリング行, 転記行, 電話番号変換フラグ), ...]
     転記した件数を返す。
     """
+    from .template_filler import _safe_write_cell
+
     count = 0
     for h_row, t_row, is_phone in mapping:
         if h_row not in hearing_data:
@@ -107,7 +109,7 @@ def transfer_hearing_to_tenki(hearing_data: dict, ws_tenki, mapping: list[tuple[
         if is_phone:
             value = normalize_phone(value)
 
-        ws_tenki.cell(row=t_row, column=2).value = value
+        _safe_write_cell(ws_tenki, t_row, 2, value)
         count += 1
         logger.debug(f'転記: ヒアリング行{h_row} → 転記行{t_row}: {value!r}')
 
