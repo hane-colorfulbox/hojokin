@@ -493,37 +493,39 @@ else:
     st.caption('ファイルはファイル名のキーワードで自動判別されます。該当キーワードがないファイルは無視されます。')
 
     # タスク別にファイルカードを表示
+    # (カテゴリ, 表示名, 形式, キーワード, 例, 表示するタスク, 必須のタスク)
     _file_cards = [
-        ('hearing',     '必須', 'ヒアリングシート', 'Excel', ['ヒアリング'],
-         'ヒアリングシート_○○株式会社.xlsx', {'application', 'all'}),
-        ('registry',    '必須', '履歴事項全部証明書', 'PDF', ['履歴事項'],
-         '履歴事項全部証明書_○○様.pdf', {'application', 'all'}),
-        ('pl',          '必須', '損益計算書 / 決算報告書', 'PDF', ['損益計算書', '決算報告書', '決算書'],
-         '42期 決算報告書.pdf', {'application', 'wage', 'all'}),
-        ('wage_ledger', '必須', '賃金台帳', 'Excel', ['賃金台帳'],
-         '賃金台帳_2025年度.xlsx', {'wage', 'bonus'}),
-        ('cost_report', 'あれば', '製造原価報告書', 'PDF', ['製造原価報告書', '原価報告書'],
-         '製造原価報告書.pdf', {'application', 'wage', 'all'}),
-        ('tax',         'あれば', '納税証明書', 'PDF', ['納税証明'],
-         '納税証明書(その1)_○○様.pdf', {'application', 'all'}),
-        ('estimate',    'あれば', '見積書', 'Excel/PDF', ['見積'],
-         'お見積書_○○.pdf', {'application', 'all'}),
-        ('wage_report', 'あれば', '賃金状況報告シート', 'Excel', ['賃金状況報告'],
-         '賃金状況報告シート.xlsx', {'wage', 'all'}),
+        ('hearing',     'ヒアリングシート',        'Excel',     ['ヒアリング'],
+         'ヒアリングシート_○○株式会社.xlsx',       {'application', 'all'},          {'application', 'all'}),
+        ('registry',    '履歴事項全部証明書',      'PDF',       ['履歴事項'],
+         '履歴事項全部証明書_○○様.pdf',           {'application', 'all'},          {'application', 'all'}),
+        ('pl',          '損益計算書 / 決算報告書', 'PDF',       ['損益計算書', '決算報告書', '決算書'],
+         '42期 決算報告書.pdf',                    {'application', 'wage', 'all'},  {'application', 'all'}),
+        ('wage_ledger', '賃金台帳',               'Excel',     ['賃金台帳'],
+         '賃金台帳_2025年度.xlsx',                 {'wage', 'bonus'},              {'wage', 'bonus'}),
+        ('cost_report', '製造原価報告書',          'PDF',       ['製造原価報告書', '原価報告書'],
+         '製造原価報告書.pdf',                     {'application', 'wage', 'all'},  set()),
+        ('tax',         '納税証明書',              'PDF',       ['納税証明'],
+         '納税証明書(その1)_○○様.pdf',            {'application', 'all'},          set()),
+        ('estimate',    '見積書',                  'Excel/PDF', ['見積'],
+         'お見積書_○○.pdf',                       {'application', 'all'},          set()),
+        ('wage_report', '賃金状況報告シート',      'Excel',     ['賃金状況報告'],
+         '賃金状況報告シート.xlsx',                 {'wage', 'all'},                set()),
     ]
 
     # 現在のタスクに関連するカードのみ表示
-    visible_cards = [c for c in _file_cards if task_type in c[6]]
-    # 必須カードとオプションカードに分割
-    required_cards = [c for c in visible_cards if c[1] == '必須']
-    optional_cards = [c for c in visible_cards if c[1] != '必須']
+    visible_cards = [c for c in _file_cards if task_type in c[5]]
+    # タスクに応じて必須/任意を判定して分割
+    required_cards = [c for c in visible_cards if task_type in c[6]]
+    optional_cards = [c for c in visible_cards if task_type not in c[6]]
 
     col1, col2 = st.columns(2)
 
-    def _render_card(card):
-        badge, name, fmt, keywords, example = card[1], card[2], card[3], card[4], card[5]
-        css_class = 'file-required' if badge == '必須' else 'file-optional'
-        badge_class = 'badge-required' if badge == '必須' else 'badge-optional'
+    def _render_card(card, is_required):
+        name, fmt, keywords, example = card[1], card[2], card[3], card[4]
+        badge = '必須' if is_required else 'あれば'
+        css_class = 'file-required' if is_required else 'file-optional'
+        badge_class = 'badge-required' if is_required else 'badge-optional'
         kw_html = ' '.join(f'<span class="keyword-tag">{kw}</span>' for kw in keywords)
         return (
             f'<div class="file-card {css_class}">'
@@ -535,10 +537,10 @@ else:
         )
 
     with col1:
-        st.markdown('\n'.join(_render_card(c) for c in required_cards), unsafe_allow_html=True)
+        st.markdown('\n'.join(_render_card(c, True) for c in required_cards), unsafe_allow_html=True)
 
     with col2:
-        st.markdown('\n'.join(_render_card(c) for c in optional_cards), unsafe_allow_html=True)
+        st.markdown('\n'.join(_render_card(c, False) for c in optional_cards), unsafe_allow_html=True)
 
     with st.expander('その他の注意事項'):
         st.markdown("""
@@ -560,7 +562,7 @@ else:
         # タスク別の必須カテゴリ
         _REQUIRED_BY_TASK = {
             'application': {'hearing', 'registry', 'pl'},
-            'wage':        {'pl', 'wage_ledger'},
+            'wage':        {'wage_ledger'},
             'bonus':       {'wage_ledger'},
             'all':         {'hearing', 'registry', 'pl'},
         }
@@ -641,7 +643,6 @@ _REQUIRED_KEYWORDS_BY_TASK = {
         'pl': ['損益計算書', '決算報告書', '決算書'],
     },
     'wage': {
-        'pl': ['損益計算書', '決算報告書', '決算書'],
         'wage_ledger': ['賃金台帳'],
     },
     'bonus': {
