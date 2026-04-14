@@ -5,7 +5,7 @@
 2026年度要件:
 - 指標: 1人当たり給与支給総額（非常勤を含む全従業員）
 - 計算: 給与支給総額（役員報酬除く）÷ 従業員数（パートは正社員換算）
-- 年平均成長率: 3.5%以上
+- 年平均成長率: 3%以上
 
 対象給与: 給料、賃金、賞与、各種手当（残業手当、休日出勤手当、
          職務手当、地域手当、家族手当、住宅手当）等
@@ -54,10 +54,10 @@ class PerCapitaWageResult:
     included: list[PayrollEmployee] = dc_field(default_factory=list)
     excluded_names: list[str] = dc_field(default_factory=list)
 
-    GROWTH_RATE = 0.035  # 3.5%
+    GROWTH_RATE = 0.03  # 3%
 
     def plan_values(self) -> dict[str, float]:
-        """3年分の計画数値（3.5%成長）"""
+        """3年分の計画数値（3%成長）"""
         b = self.per_person_salary
         r = self.GROWTH_RATE
         return {
@@ -362,7 +362,7 @@ def create_wage_calculation(
         _cell(ws3, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
         ws3.cell(r, 2 + i).alignment = Alignment(horizontal='center', wrap_text=True)
 
-    growth = 0.015
+    growth = 0.03
     projections = [total_wage_pl]
     for _ in range(3):
         projections.append(round(projections[-1] * (1 + growth)))

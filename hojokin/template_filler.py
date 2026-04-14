@@ -7,10 +7,31 @@ import shutil
 from pathlib import Path
 import openpyxl
 
+from openpyxl.cell.cell import MergedCell
+
 from .models import ExtractionResult
 from .config import TemplateMapping, get_min_wage
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_write_cell(ws, row: int, col: int, value):
+    """結合セルに対応した安全な書き込み。
+
+    openpyxl では結合範囲の左上以外のセルに書き込むと
+    ``'MergedCell' object attribute 'value' is read-only`` が出る。
+    そのため、対象セルが MergedCell の場合は結合範囲の左上セルに書き込む。
+    """
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        for merged_range in ws.merged_cells.ranges:
+            if cell.coordinate in merged_range:
+                ws.cell(
+                    row=merged_range.min_row,
+                    column=merged_range.min_col,
+                ).value = value
+                return
+    cell.value = value
 
 
 def clear_manual_cells(wb: openpyxl.Workbook, mapping: TemplateMapping) -> int:
@@ -69,7 +90,7 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
         # Excelが数式と誤認する文字列を防止
         if isinstance(value, str) and value.startswith('='):
             value = ' ' + value
-        ws.cell(row=m[field], column=3).value = value
+        _safe_write_cell(ws, m[field], 3, value)
         writes.append(f'行{m[field]:3d} [{label or field}]: {str(value)[:50]}')
 
     # ── 履歴事項全部証明書 ──
@@ -131,6 +152,10 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
     if data.estimate.tool_name:
         write('tool_name', data.estimate.tool_name, 'ツール名')
 
+    # ── 1人当たり給与支給総額の計画値（賃金台帳から算出時のみ）──
+    # wage_plan は fill_template() から渡される場合のみ有効
+    # （この関数のスコープ外で処理される）
+
     return writes
 
 
@@ -144,7 +169,7 @@ def fill_kyuyo_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> li
         if field not in m:
             return
         row, col = m[field]
-        ws.cell(row=row, column=col).value = value
+        _safe_write_cell(ws, row, col, value)
         col_letter = chr(64 + col)
         writes.append(f'給与計算 行{row:3d} {col_letter}列 [{label}]: {value:,}')
 
@@ -190,10 +215,10 @@ def check_empty_cells(wb: openpyxl.Workbook) -> list[str]:
         'IT戦略ナビ', '省力化ナビ',
         # 別添資料（ファイル添付）
         '履歴事項全部証明書', '納税証明書', '決算書', 'その他資料',
-        # 給与計画（別途実装予定）
+        # 給与計画（賃金台帳がある場合に自動入力、なければスキップ）
         '給与支給総額', '従業員数（全期間', '賃上げを行いますか',
         '事業計画期間における', '計画数値',
-        # 賃金状況関連（別途実装予定）
+        # 賃金状況関連（手動確認）
         '賃金状況', '最低賃金近傍', '最低賃金未満',
         '事業実施年度内', '交付申請の直近月',
         # 従業員がいない場合の項目
@@ -242,10 +267,14 @@ def fill_template(
     hearing_data: dict,
     extraction: ExtractionResult,
     tenki_texts: dict[int, str] | None = None,
+    wage_plan: dict[str, float] | None = None,
 ) -> list[str]:
     """
     テンプレートをコピーし、全データを転記して保存。
     空セルのリストを返す。
+
+    wage_plan: 1人当たり給与支給総額の計画値
+        {'year_0': 基準年, 'year_1': 1年目, 'year_2': 2年目, 'year_3': 3年目}
     """
     from .hearing_reader import transfer_hearing_to_tenki
 
@@ -269,7 +298,7 @@ def fill_template(
     if tenki_texts and '転記' in wb.sheetnames:
         ws_t = wb['転記']
         for row, text in tenki_texts.items():
-            ws_t.cell(row=row, column=2).value = text
+            _safe_write_cell(ws_t, row, 2, text)
 
     # STEP 3: PDF → 申請内容 + 給与計算
     if '申請内容' in wb.sheetnames:
@@ -281,6 +310,23 @@ def fill_template(
         kyuyo_writes = fill_kyuyo_sheet(wb[mapping.kyuyo_sheet_name], mapping, extraction)
         for w in kyuyo_writes:
             logger.info(f'STEP 3: {w}')
+
+    # STEP 3.5: 1人当たり給与支給総額の計画値を申請内容シートに転記
+    if wage_plan and '申請内容' in wb.sheetnames:
+        ws_shinsei = wb['申請内容']
+        m = mapping.shinsei
+        plan_fields = [
+            ('wage_per_capita_base', 'year_0', '1人当たり(基準年)'),
+            ('wage_per_capita_y1', 'year_1', '1人当たり(1年目)'),
+            ('wage_per_capita_y2', 'year_2', '1人当たり(2年目)'),
+            ('wage_per_capita_y3', 'year_3', '1人当たり(3年目)'),
+            ('wage_per_capita_end', 'year_3', '1人当たり(計画終了時)'),
+        ]
+        for field, plan_key, label in plan_fields:
+            if field in m and plan_key in wage_plan:
+                val = round(wage_plan[plan_key])
+                _safe_write_cell(ws_shinsei, m[field], 3, val)
+                logger.info(f'STEP 3.5: 行{m[field]:3d} [{label}]: {val:,}円')
 
     # STEP 4: 空セル確認
     empty = check_empty_cells(wb)
