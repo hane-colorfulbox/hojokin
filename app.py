@@ -492,55 +492,53 @@ else:
     # ── ファイルアップロードモード ──
     st.caption('ファイルはファイル名のキーワードで自動判別されます。該当キーワードがないファイルは無視されます。')
 
+    # タスク別にファイルカードを表示
+    _file_cards = [
+        ('hearing',     '必須', 'ヒアリングシート', 'Excel', ['ヒアリング'],
+         'ヒアリングシート_○○株式会社.xlsx', {'application', 'all'}),
+        ('registry',    '必須', '履歴事項全部証明書', 'PDF', ['履歴事項'],
+         '履歴事項全部証明書_○○様.pdf', {'application', 'all'}),
+        ('pl',          '必須', '損益計算書 / 決算報告書', 'PDF', ['損益計算書', '決算報告書', '決算書'],
+         '42期 決算報告書.pdf', {'application', 'wage', 'all'}),
+        ('wage_ledger', '必須', '賃金台帳', 'Excel', ['賃金台帳'],
+         '賃金台帳_2025年度.xlsx', {'wage', 'bonus'}),
+        ('cost_report', 'あれば', '製造原価報告書', 'PDF', ['製造原価報告書', '原価報告書'],
+         '製造原価報告書.pdf', {'application', 'wage', 'all'}),
+        ('tax',         'あれば', '納税証明書', 'PDF', ['納税証明'],
+         '納税証明書(その1)_○○様.pdf', {'application', 'all'}),
+        ('estimate',    'あれば', '見積書', 'Excel/PDF', ['見積'],
+         'お見積書_○○.pdf', {'application', 'all'}),
+        ('wage_report', 'あれば', '賃金状況報告シート', 'Excel', ['賃金状況報告'],
+         '賃金状況報告シート.xlsx', {'wage', 'all'}),
+    ]
+
+    # 現在のタスクに関連するカードのみ表示
+    visible_cards = [c for c in _file_cards if task_type in c[6]]
+    # 必須カードとオプションカードに分割
+    required_cards = [c for c in visible_cards if c[1] == '必須']
+    optional_cards = [c for c in visible_cards if c[1] != '必須']
+
     col1, col2 = st.columns(2)
 
+    def _render_card(card):
+        badge, name, fmt, keywords, example = card[1], card[2], card[3], card[4], card[5]
+        css_class = 'file-required' if badge == '必須' else 'file-optional'
+        badge_class = 'badge-required' if badge == '必須' else 'badge-optional'
+        kw_html = ' '.join(f'<span class="keyword-tag">{kw}</span>' for kw in keywords)
+        return (
+            f'<div class="file-card {css_class}">'
+            f'<span class="{badge_class}">{badge}</span><br>'
+            f'<strong>{name}</strong>（{fmt}）<br>'
+            f'{kw_html} がファイル名に含まれること<br>'
+            f'<small>例: {example}</small>'
+            f'</div>'
+        )
+
     with col1:
-        st.markdown("""
-<div class="file-card file-required">
-<span class="badge-required">必須</span><br>
-<strong>ヒアリングシート</strong>（Excel）<br>
-<span class="keyword-tag">ヒアリング</span> がファイル名に含まれること<br>
-<small>例: ヒアリングシート_○○株式会社.xlsx</small>
-</div>
-
-<div class="file-card file-required">
-<span class="badge-required">必須</span><br>
-<strong>履歴事項全部証明書</strong>（PDF）<br>
-<span class="keyword-tag">履歴事項</span> がファイル名に含まれること<br>
-<small>例: 履歴事項全部証明書_○○様.pdf</small>
-</div>
-
-<div class="file-card file-required">
-<span class="badge-required">必須</span><br>
-<strong>損益計算書 / 決算報告書</strong>（PDF）<br>
-<span class="keyword-tag">損益計算書</span> <span class="keyword-tag">決算報告書</span> <span class="keyword-tag">決算書</span> のいずれか<br>
-<small>例: 42期 決算報告書.pdf</small>
-</div>
-""", unsafe_allow_html=True)
+        st.markdown('\n'.join(_render_card(c) for c in required_cards), unsafe_allow_html=True)
 
     with col2:
-        st.markdown("""
-<div class="file-card file-optional">
-<span class="badge-optional">あれば</span><br>
-<strong>納税証明書</strong>（PDF）<br>
-<span class="keyword-tag">納税証明</span> がファイル名に含まれること<br>
-<small>例: 納税証明書(その1)_○○様.pdf</small>
-</div>
-
-<div class="file-card file-optional">
-<span class="badge-optional">あれば</span><br>
-<strong>見積書</strong>（Excel/PDF）<br>
-<span class="keyword-tag">見積</span> がファイル名に含まれること<br>
-<small>例: お見積書_○○.pdf</small>
-</div>
-
-<div class="file-card file-optional">
-<span class="badge-optional">あれば</span><br>
-<strong>賃金状況報告シート</strong>（Excel）<br>
-<span class="keyword-tag">賃金状況報告</span> がファイル名に含まれること<br>
-<small>例: 賃金状況報告シート.xlsx</small>
-</div>
-""", unsafe_allow_html=True)
+        st.markdown('\n'.join(_render_card(c) for c in optional_cards), unsafe_allow_html=True)
 
     with st.expander('その他の注意事項'):
         st.markdown("""
@@ -557,17 +555,26 @@ else:
         key='file_uploader',
     )
 
-    # アップロード済みファイルのチェックリスト
+    # アップロード済みファイルのチェックリスト（タスク別に必須/任意を切り替え）
     if uploaded_files:
+        # タスク別の必須カテゴリ
+        _REQUIRED_BY_TASK = {
+            'application': {'hearing', 'registry', 'pl'},
+            'wage':        {'pl', 'wage_ledger'},
+            'bonus':       {'wage_ledger'},
+            'all':         {'hearing', 'registry', 'pl'},
+        }
+        _required_cats = _REQUIRED_BY_TASK.get(task_type, set())
+
         FILE_CHECKS = [
-            ('hearing',     'ヒアリングシート',     ['ヒアリング'],                          True),
-            ('registry',    '履歴事項全部証明書',   ['履歴事項'],                            True),
-            ('pl',          '損益計算書 / 決算報告書', ['損益計算書', '決算報告書', '決算書'], True),
+            ('hearing',     'ヒアリングシート',     ['ヒアリング'],                          'hearing' in _required_cats),
+            ('registry',    '履歴事項全部証明書',   ['履歴事項'],                            'registry' in _required_cats),
+            ('pl',          '損益計算書 / 決算報告書', ['損益計算書', '決算報告書', '決算書'], 'pl' in _required_cats),
             ('cost_report', '製造原価報告書',       ['製造原価報告書', '原価報告書'],         False),
             ('tax',         '納税証明書',           ['納税証明'],                            False),
             ('estimate',    '見積書',               ['見積'],                                False),
-            ('wage_report', '賃金状況報告シート',   ['賃金状況報告'],                        False),
-            ('wage_ledger', '賃金台帳',             ['賃金台帳'],                            False),
+            ('wage_report', '賃金状況報告シート',   ['賃金状況報告'],                        'wage_report' in _required_cats),
+            ('wage_ledger', '賃金台帳',             ['賃金台帳'],                            'wage_ledger' in _required_cats),
         ]
 
         detected = {cat: [] for cat, *_ in FILE_CHECKS}
@@ -626,26 +633,41 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 必須ファイルチェック（アップロード済みの場合のみ）
-_required_keywords = {
-    'hearing': ['ヒアリング'],
-    'registry': ['履歴事項'],
-    'pl': ['損益計算書', '決算報告書', '決算書'],
+# 必須ファイルチェック（タスク別）
+_REQUIRED_KEYWORDS_BY_TASK = {
+    'application': {
+        'hearing': ['ヒアリング'],
+        'registry': ['履歴事項'],
+        'pl': ['損益計算書', '決算報告書', '決算書'],
+    },
+    'wage': {
+        'pl': ['損益計算書', '決算報告書', '決算書'],
+        'wage_ledger': ['賃金台帳'],
+    },
+    'bonus': {
+        'wage_ledger': ['賃金台帳'],
+    },
+    'all': {
+        'hearing': ['ヒアリング'],
+        'registry': ['履歴事項'],
+        'pl': ['損益計算書', '決算報告書', '決算書'],
+    },
 }
 
-def _check_required(files):
-    """必須ファイルが全て揃っているかチェック"""
+def _check_required(files, task):
+    """タスクに応じた必須ファイルが全て揃っているかチェック"""
     if not files:
         return False
+    required = _REQUIRED_KEYWORDS_BY_TASK.get(task, {})
     names = [f.name for f in files]
-    for cat, keywords in _required_keywords.items():
+    for cat, keywords in required.items():
         if not any(any(kw in name for kw in keywords) for name in names):
             return False
     return True
 
 has_files = bool(uploaded_files)
 has_drive_files = bool(drive_files_to_download)
-has_required = _check_required(uploaded_files) if has_files else False
+has_required = _check_required(uploaded_files, task_type) if has_files else False
 
 if data_source == 'Google Drive':
     if task_type == 'bonus':
