@@ -359,16 +359,15 @@ MAPPING_2026_INVOICE = TemplateMapping(
         'invoice_related_work': 165,
 
         # 計画数値入力 ※+9
-        # 1人当たり給与支給総額の計画値（C191:C195）
-        'wage_per_capita_base': 191,  # 直近事業年度（基準年）
-        'wage_per_capita_y1': 192,    # 事業計画1年目
-        'wage_per_capita_y2': 193,    # 事業計画2年目
-        'wage_per_capita_y3': 194,    # 事業計画3年目
-        'wage_per_capita_end': 195,   # 事業計画終了時
+        # 給与支給総額の計画値（C200:C204）
+        'employee_count_fte': 200,    # 従業員数（FTE換算）
+        'wage_total_base': 201,       # 直近決算期の給与支給総額
+        'wage_total_y1': 202,         # 1年目計画（2025/4〜2026/3）
+        'wage_total_y2': 203,         # 2年目計画（2026/4〜2027/3）
+        'wage_total_y3': 204,         # 3年目計画（2027/4〜2028/3）
 
         'min_wage': 198,
         'min_wage_hourly': 199,
-        'employee_count_fte': 200,
         'wage_raise_declaration': 207,
         'wage_raise_amount': 208,
         'wage_raise_method': 209,
