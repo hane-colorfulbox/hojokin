@@ -335,12 +335,17 @@ def _calc_wage_plan_from_ledger(
     financial: 'FinancialData',
 ) -> dict[str, float] | None:
     """
-    賃金台帳から1人当たり給与支給総額を算出し、年3%の計画値を返す。
+    賃金台帳から給与支給総額を算出し、年3%成長の計画値を返す。
 
-    賃金台帳がない場合はNoneを返す（C191:C195は空欄のまま）。
+    賃金台帳がない場合はNoneを返す（C200:C204は空欄のまま）。
 
     Returns:
-        {'year_0': 基準年, 'year_1': 1年目, 'year_2': 2年目, 'year_3': 3年目}
+        {
+            'employee_count_fte': FTE換算従業員数,
+            'wage_total_base': 基準年の給与支給総額,
+            'wage_total_y1': 1年目計画, 'wage_total_y2': 2年目計画,
+            'wage_total_y3': 3年目計画,
+        }
     """
     from .wage_reader import read_wage_ledger
 
@@ -384,13 +389,22 @@ def _calc_wage_plan_from_ledger(
 
         result = calculate_per_capita_wage(payroll_list)
 
-        if result.per_person_salary <= 0:
-            logger.warning('1人当たり給与支給総額が0以下 → 計画値転記をスキップ')
+        if result.total_salary <= 0:
+            logger.warning('給与支給総額が0以下 → 計画値転記をスキップ')
             return None
 
-        plan = result.plan_values()
+        # 給与支給総額ベースで年3%成長の計画値を算出
+        base = result.total_salary
+        rate = result.GROWTH_RATE
+        plan = {
+            'employee_count_fte': result.employee_count_fte,
+            'wage_total_base': base,
+            'wage_total_y1': base * (1 + rate),
+            'wage_total_y2': base * (1 + rate) ** 2,
+            'wage_total_y3': base * (1 + rate) ** 3,
+        }
         logger.info(
-            f'1人当たり給与支給総額: {result.per_person_salary:,.0f}円 '
+            f'給与支給総額: {base:,.0f}円 '
             f'(従業員FTE: {result.employee_count_fte:.1f}人, 年3%成長)'
         )
         return plan

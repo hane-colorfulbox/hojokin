@@ -311,16 +311,21 @@ def fill_template(
         for w in kyuyo_writes:
             logger.info(f'STEP 3: {w}')
 
-    # STEP 3.5: 1人当たり給与支給総額の計画値を申請内容シートに転記
+    # STEP 3.5: 給与支給総額の計画値を申請内容シートに転記
     if wage_plan and '申請内容' in wb.sheetnames:
         ws_shinsei = wb['申請内容']
         m = mapping.shinsei
+        # 従業員数（FTE換算）
+        if 'employee_count_fte' in m and 'employee_count_fte' in wage_plan:
+            fte = wage_plan['employee_count_fte']
+            _safe_write_cell(ws_shinsei, m['employee_count_fte'], 3, round(fte, 1))
+            logger.info(f'STEP 3.5: 行{m["employee_count_fte"]:3d} [従業員数FTE]: {fte:.1f}人')
+        # 給与支給総額（基準年 + 3年計画）
         plan_fields = [
-            ('wage_per_capita_base', 'year_0', '1人当たり(基準年)'),
-            ('wage_per_capita_y1', 'year_1', '1人当たり(1年目)'),
-            ('wage_per_capita_y2', 'year_2', '1人当たり(2年目)'),
-            ('wage_per_capita_y3', 'year_3', '1人当たり(3年目)'),
-            ('wage_per_capita_end', 'year_3', '1人当たり(計画終了時)'),
+            ('wage_total_base', 'wage_total_base', '給与支給総額(基準年)'),
+            ('wage_total_y1', 'wage_total_y1', '給与支給総額(1年目)'),
+            ('wage_total_y2', 'wage_total_y2', '給与支給総額(2年目)'),
+            ('wage_total_y3', 'wage_total_y3', '給与支給総額(3年目)'),
         ]
         for field, plan_key, label in plan_fields:
             if field in m and plan_key in wage_plan:
