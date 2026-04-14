@@ -263,7 +263,7 @@ def run_wage_calculation(
         detector = FileDetector(resource_folder)
         logger.info(detector.summary())
 
-        # 損益計算書
+        # 損益計算書（任意: あれば精度向上）
         financial = None
         pl_path = detector.get_pl_latest()
         if pl_path:
@@ -271,13 +271,10 @@ def run_wage_calculation(
             financial = extractor.extract_pl(images)
 
         if financial is None or financial.revenue == 0:
-            if isinstance(extractor, StubExtractor):
-                logger.warning('StubExtractor使用中 → 損益計算書データなしで続行')
-                if financial is None:
-                    from .models import FinancialData
-                    financial = FinancialData()
-            else:
-                raise ValueError('損益計算書が読み取れませんでした')
+            from .models import FinancialData
+            if financial is None:
+                financial = FinancialData()
+            logger.info('損益計算書なし → 賃金台帳ベースで計算')
 
         # 賃金状況報告シートから従業員データ読取（あれば）
         employees_detail = None
