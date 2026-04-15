@@ -45,17 +45,27 @@ def setup_logging(verbose: bool = False):
 
 
 def find_template(base_dir: Path, template_type: str) -> Path | None:
-    """テンプレートファイルを検索"""
+    """テンプレートファイルを検索（v2を優先）"""
     keywords = {
         '通常枠_2026': ['原本', '通常枠', '2026'],
         'インボイス枠_2026': ['原本', 'インボイス', '2026'],
     }
     kws = keywords.get(template_type, [])
-
-    for p in base_dir.iterdir():
-        if p.suffix == '.xlsx' and all(kw in p.name for kw in kws) and not p.name.startswith('~$'):
-            return p
-    return None
+    candidates = []
+    search_dirs = [base_dir]
+    tool_dir = base_dir / 'ツール'
+    if tool_dir.exists():
+        search_dirs.append(tool_dir)
+    for d in search_dirs:
+        for p in d.iterdir():
+            if p.suffix == '.xlsx' and all(kw in p.name for kw in kws) and not p.name.startswith('~$'):
+                candidates.append(p)
+    if not candidates:
+        return None
+    for c in candidates:
+        if 'v2' in c.name:
+            return c
+    return candidates[0]
 
 
 def cmd_local(args):

@@ -182,6 +182,7 @@ def fill_kyuyo_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> li
     write('misc_wages', fi.misc_wages, '雑給')
     write('bonus', fi.bonus, '賞与手当')
     write('officer_comp', fi.officer_compensation, '役員報酬')
+    write('travel_expense', fi.travel_expense, '旅費交通費')
 
     return writes
 

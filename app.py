@@ -166,7 +166,10 @@ st.markdown("""
 
 
 def find_template(base_dir: Path, template_type: str) -> Path | None:
-    """テンプレートファイルを検索（v2を優先）"""
+    """テンプレートファイルを検索（v2を優先）
+
+    ルートとツール/の両方から候補を集め、v2を優先して返す。
+    """
     import unicodedata
     keywords = {
         '通常枠_2026': ['原本', '通常枠', '2026'],
@@ -174,18 +177,16 @@ def find_template(base_dir: Path, template_type: str) -> Path | None:
     }
     kws = keywords.get(template_type, [])
     candidates = []
-    for p in base_dir.iterdir():
-        name = unicodedata.normalize('NFC', p.name)
-        if p.suffix == '.xlsx' and all(kw in name for kw in kws) and not name.startswith('~$'):
-            candidates.append(p)
-    if not candidates:
-        # ツール/サブフォルダも探す
-        tool_dir = base_dir / 'ツール'
-        if tool_dir.exists():
-            for p in tool_dir.iterdir():
-                name = unicodedata.normalize('NFC', p.name)
-                if p.suffix == '.xlsx' and all(kw in name for kw in kws) and not name.startswith('~$'):
-                    candidates.append(p)
+    # ルートとツール/の両方から候補を集める
+    search_dirs = [base_dir]
+    tool_dir = base_dir / 'ツール'
+    if tool_dir.exists():
+        search_dirs.append(tool_dir)
+    for d in search_dirs:
+        for p in d.iterdir():
+            name = unicodedata.normalize('NFC', p.name)
+            if p.suffix == '.xlsx' and all(kw in name for kw in kws) and not name.startswith('~$'):
+                candidates.append(p)
     if not candidates:
         return None
     # v2を優先（ファイル名に'v2'が含まれるものを優先）
