@@ -237,6 +237,7 @@ MAPPING_2026_TSUJO = TemplateMapping(
         'misc_wages':       (6,  5),  # E6:  雑給
         'bonus':            (7,  5),  # E7:  賞与手当
         'officer_comp':     (4,  5),  # E4:  役員報酬（D4ラベル参照）
+        'travel_expense':   (9,  5),  # E9:  旅費交通費
     },
     shinsei_clear_range=(5, 270),
     tenki_text_range=(15, 26),
@@ -383,6 +384,7 @@ MAPPING_2026_INVOICE = TemplateMapping(
         'salary':           (5,  5),  # E5:  給料手当
         'misc_wages':       (6,  5),  # E6:  雑給
         'bonus':            (7,  5),  # E7:  賞与手当
+        'travel_expense':   (9,  5),  # E9:  旅費交通費
     },
     shinsei_clear_range=(5, 270),
     tenki_text_range=(16, 26),
