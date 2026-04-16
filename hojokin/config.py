@@ -202,6 +202,13 @@ MAPPING_2026_TSUJO = TemplateMapping(
 
         # 財務情報入力 ※+9
         'officer_count_prev': 154,
+        'fin_revenue': 156,
+        'fin_gross_profit': 157,
+        'fin_operating_profit': 158,
+        'fin_ordinary_profit': 159,
+        'fin_depreciation': 160,
+        'fin_personnel': 161,
+        'fin_capital': 162,
 
         # 経営状況 ※+9
         'management_intent': 168,
@@ -350,6 +357,13 @@ MAPPING_2026_INVOICE = TemplateMapping(
 
         # 財務情報入力 ※+9
         'officer_count_prev': 146,
+        'fin_revenue': 148,
+        'fin_gross_profit': 149,
+        'fin_operating_profit': 150,
+        'fin_ordinary_profit': 151,
+        'fin_depreciation': 152,
+        'fin_personnel': 153,
+        'fin_capital': 154,
 
         # 経営状況 ※+9
         'management_intent': 160,

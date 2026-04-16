@@ -152,6 +152,16 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
     if data.estimate.tool_name:
         write('tool_name', data.estimate.tool_name, 'ツール名')
 
+    # ── 財務情報（数式参照を直接値で上書き）──
+    write('fin_revenue', fi.revenue, '売上高')
+    write('fin_gross_profit', fi.gross_profit, '粗利益')
+    write('fin_operating_profit', fi.operating_profit, '営業利益')
+    write('fin_ordinary_profit', fi.ordinary_profit, '経常利益')
+    write('fin_depreciation', fi.depreciation, '減価償却費')
+    personnel = (fi.salary or 0) + (fi.misc_wages or 0) + (fi.bonus or 0) + (fi.travel_expense or 0)
+    write('fin_personnel', personnel, '人件費')
+    write('fin_capital', co.capital, '資本金(財務)')
+
     # ── 1人当たり給与支給総額の計画値（賃金台帳から算出時のみ）──
     # wage_plan は fill_template() から渡される場合のみ有効
     # （この関数のスコープ外で処理される）
