@@ -535,6 +535,99 @@ def read_wage_ledger(file_path: Path) -> list[WageEmployee]:
 
 
 # ============================================================
+# 賃金台帳一覧Excel出力（チェック用）
+# ============================================================
+
+def export_wage_ledger_summary(
+    employees: list[WageEmployee],
+    output_path: Path,
+    company_name: str = '',
+) -> Path:
+    """
+    賃金台帳から読み取ったデータを一覧Excelに出力（チェック用）
+
+    出力内容: 従業員名、雇用形態、月ごとの課税対象額、月平均労働時間、年間合計
+    """
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = '賃金台帳一覧'
+
+    # スタイル定義
+    header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+    header_font_white = Font(bold=True, size=10, color='FFFFFF')
+    number_fmt = '#,##0'
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin'),
+    )
+
+    # タイトル行
+    row = 1
+    title = '賃金台帳 読取データ一覧'
+    if company_name:
+        title = f'{company_name} — {title}'
+    ws.cell(row=row, column=1, value=title).font = Font(bold=True, size=12)
+    ws.cell(row=row + 1, column=1, value='※この一覧は賃金台帳から機械的に読み取ったデータです（AI生成ではありません）')
+    ws.cell(row=row + 1, column=1).font = Font(size=9, color='666666')
+
+    # ヘッダー
+    row = 4
+    headers = ['No', '従業員名', '雇用形態'] + MONTH_NAMES + ['年間合計', '月平均労働時間']
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(row=row, column=c, value=h)
+        cell.font = header_font_white
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.border = thin_border
+
+    # データ行
+    for i, emp in enumerate(employees):
+        r = row + 1 + i
+        ws.cell(row=r, column=1, value=emp.no).border = thin_border
+        ws.cell(row=r, column=2, value=emp.name).border = thin_border
+        ws.cell(row=r, column=3, value=emp.employment_type).border = thin_border
+
+        annual_total = 0
+        for m in range(12):
+            cell = ws.cell(row=r, column=4 + m)
+            cell.border = thin_border
+            val = emp.monthly_wages[m]
+            if val is not None:
+                cell.value = val
+                cell.number_format = number_fmt
+                annual_total += val
+
+        # 年間合計
+        total_cell = ws.cell(row=r, column=16, value=annual_total)
+        total_cell.number_format = number_fmt
+        total_cell.font = Font(bold=True)
+        total_cell.border = thin_border
+
+        # 月平均労働時間
+        hours_cell = ws.cell(row=r, column=17, value=emp.monthly_avg_hours)
+        hours_cell.number_format = '#,##0.0'
+        hours_cell.border = thin_border
+
+    # 列幅調整
+    ws.column_dimensions['A'].width = 5
+    ws.column_dimensions['B'].width = 14
+    ws.column_dimensions['C'].width = 14
+    for c in range(4, 17):
+        ws.column_dimensions[get_column_letter(c)].width = 12
+    ws.column_dimensions['Q'].width = 14
+
+    wb.save(str(output_path))
+    wb.close()
+    logger.info(f'賃金台帳一覧出力: {output_path} ({len(employees)}名)')
+    return output_path
+
+
+# ============================================================
 # 加点措置判定
 # ============================================================
 

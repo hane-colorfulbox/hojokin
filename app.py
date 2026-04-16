@@ -246,11 +246,20 @@ def run_processing(
                 output_path=output_path,
                 extractor=extractor,
             )
+            # 追加出力ファイル（賃金台帳一覧等）を収集
+            extra_files = {}
+            if status.status == '完了':
+                for fname in status.output_files:
+                    fpath = work_dir / fname
+                    if fpath.exists() and fpath != output_path:
+                        extra_files[fname] = fpath
+
             results['application'] = {
                 'status': status.status,
                 'message': status.message,
                 'output_path': output_path if status.status == '完了' else None,
                 'empty_cells': status.empty_cells,
+                'extra_files': extra_files,
             }
 
     if task_type in ('wage', 'all'):
@@ -619,15 +628,8 @@ else:
                 for name in unmatched:
                     st.markdown(f'&ensp; ⚠️ `{name}`（キーワードなし → 処理対象外）')
 
-    # テンプレート原本
-    st.markdown('---')
-    template_file = st.file_uploader(
-        'テンプレート原本（初回のみ必要。サーバーに保存されるので2回目以降は不要です）',
-        accept_multiple_files=False,
-        type=['xlsx'],
-        key='template_uploader',
-        help='「【原本_法人】企業名_○○枠_法人2026.xlsx」のファイルをアップロードしてください。',
-    )
+    # テンプレート原本（ツール/に同梱済みのため通常はアップロード不要）
+    template_file = None
 
 # ── 処理実行 ──
 st.markdown(
@@ -752,6 +754,7 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 'empty_cells': result.get('empty_cells', []),
                 'file_data': None,
                 'file_name': None,
+                'extra_files': {},
                 'bonus_result': None,
                 'bonus_files': {},
             }
@@ -759,6 +762,12 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 with open(result['output_path'], 'rb') as f:
                     entry['file_data'] = f.read()
                 entry['file_name'] = result['output_path'].name
+
+            # 追加ファイル（賃金台帳一覧等）
+            for fname, fpath in result.get('extra_files', {}).items():
+                if fpath.exists():
+                    with open(fpath, 'rb') as f:
+                        entry['extra_files'][fname] = f.read()
 
             # 加点判定の結果
             if task_name == 'bonus' and result.get('result'):
@@ -829,6 +838,17 @@ if 'last_results' in st.session_state:
                     mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                     use_container_width=True,
                     key=f'download_{task_name}',
+                )
+
+            # 追加ファイル（賃金台帳一覧等）
+            for fname, fdata in result.get('extra_files', {}).items():
+                st.download_button(
+                    label=f'⬇️ {fname} をダウンロード',
+                    data=fdata,
+                    file_name=fname,
+                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    use_container_width=True,
+                    key=f'download_extra_{fname}',
                 )
 
             # 加点判定の結果表示
