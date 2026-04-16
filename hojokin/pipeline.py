@@ -16,6 +16,7 @@ from .wage_calculator import (
     PayrollEmployee,
     calculate_per_capita_wage,
 )
+from .wage_reader import read_wage_ledger, export_wage_ledger_summary
 from .pdf_reader import pdf_to_images
 
 logger = logging.getLogger(__name__)
@@ -214,7 +215,7 @@ def run_application_transfer(
             hearing_data=hearing_data,
         )
 
-        # 賃金台帳 → 1人当たり給与支給総額の計画値
+        # 賃金台帳 → 1人当たり給与支給総額の計画値 + 一覧Excel出力
         wage_plan = _calc_wage_plan_from_ledger(detector, extraction.financial)
 
         # テンプレート転記
@@ -232,6 +233,16 @@ def run_application_transfer(
         status.empty_cells = empty_cells
         status.message = f'完了。空欄{len(empty_cells)}件'
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件)')
+
+        # 賃金台帳一覧Excel出力（チェック用）
+        ledger_path = detector.get('wage_ledger')
+        if ledger_path:
+            ledger_employees = read_wage_ledger(ledger_path)
+            if ledger_employees:
+                company = output_path.stem.split('_')[0]
+                ledger_output = output_path.parent / f'{company}_賃金台帳一覧.xlsx'
+                export_wage_ledger_summary(ledger_employees, ledger_output, company)
+                status.output_files.append(ledger_output.name)
 
     except Exception as e:
         status.status = 'エラー'
