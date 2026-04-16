@@ -430,7 +430,7 @@ with st.sidebar:
 
     st.markdown('**処理の目安**')
     st.caption('所要時間: 約1〜3分')
-    st.caption('API利用料: 約7〜10円/社')
+    st.caption('API利用料: 約7〜15円/社')
 
 # ── ファイル入力 ──
 st.markdown(
