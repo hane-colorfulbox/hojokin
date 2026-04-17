@@ -68,8 +68,39 @@ function onFormSubmitFolder(e) {
       setFolderLink(companyName, result.url);
     }
 
+    // 3. 補助金連絡チャットに送客通知
+    sendFormSubmitNotification_(companyName, supportCompany, templateType);
+
   } catch (error) {
     Logger.log(`エラー: ${error.message}`);
+  }
+}
+
+
+/**
+ * フォーム送信時に補助金連絡チャットへ通知
+ * @param {string} companyName - 顧客企業名
+ * @param {string} supportCompany - 支援事業者名
+ * @param {string} templateType - 申請枠
+ */
+function sendFormSubmitNotification_(companyName, supportCompany, templateType) {
+  try {
+    let message = `📨 *新規送客がありました*\n`;
+    message += `*企業名:* ${companyName || '（不明）'}\n`;
+    message += `*支援事業者:* ${supportCompany || '（不明）'}\n`;
+    message += `*申請枠:* ${templateType || '（不明）'}`;
+
+    const payload = { text: message };
+    const options = {
+      method: 'post',
+      contentType: 'application/json; charset=UTF-8',
+      payload: JSON.stringify(payload),
+    };
+
+    UrlFetchApp.fetch(CHAT_WEBHOOK_URL, options);
+    Logger.log(`送客通知送信: ${companyName}`);
+  } catch (e) {
+    Logger.log(`送客通知エラー: ${e.message}`);
   }
 }
 
