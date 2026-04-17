@@ -353,16 +353,16 @@ class ClaudeExtractor(BaseExtractor):
                 pass
 
         return CompanyInfo(
-            name=data.get('name', ''),
-            name_kana=data.get('name_kana', ''),
-            address=data.get('address', ''),
-            postal_code=data.get('postal_code', ''),
+            name=data.get('name') or '',
+            name_kana=data.get('name_kana') or '',
+            address=data.get('address') or '',
+            postal_code=data.get('postal_code') or '',
             established_date=est,
             capital=data.get('capital', 0) or 0,
-            representative_name=data.get('representative_name', ''),
-            representative_title=data.get('representative_title', ''),
+            representative_name=data.get('representative_name') or '',
+            representative_title=data.get('representative_title') or '',
             officers=officers,
-            business_purposes=data.get('business_purposes', []),
+            business_purposes=data.get('business_purposes') or [],
         )
 
     def extract_pl(self, images: list[bytes]) -> FinancialData:
