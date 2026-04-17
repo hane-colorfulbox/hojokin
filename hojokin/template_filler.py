@@ -93,26 +93,38 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
         _safe_write_cell(ws, m[field], 3, value)
         writes.append(f'行{m[field]:3d} [{label or field}]: {str(value)[:50]}')
 
-    # ── 履歴事項全部証明書 ──
-    write('headquarters_address', co.address, '本店所在地')
-    write('established_date', co.established_date, '設立年月日')
-    write('capital', co.capital, '資本金')
-    write('fiscal_month', fi.fiscal_month, '決算月')
+    # ── 履歴事項全部証明書 or 本人確認資料 ──
+    if mapping.is_kojin:
+        # 個人事業主は履歴事項がないため固定値で埋める。
+        # 現住所・氏名・生年月日は坂平さんが本人確認資料から手書き記入する前提。
+        write('headquarters_address', co.address, '現在住所')
+        write('established_date', co.established_date, '事業開始年月日')
+        write('capital', 0, '資本金')
+        write('fin_capital', 0, '資本金(財務)')
+        write('fiscal_month', '12月', '決算月')
+        write('officer_count_prev', 1, '役員数(前期)')
+        write('rep_name', co.representative_name, '代表者氏名')
+        write('rep_kana', co.representative_kana, '代表者氏名(フリガナ)')
+    else:
+        write('headquarters_address', co.address, '本店所在地')
+        write('established_date', co.established_date, '設立年月日')
+        write('capital', co.capital, '資本金')
+        write('fiscal_month', fi.fiscal_month, '決算月')
 
-    # 代表者
-    officer_count = 1 + len(co.officers)
-    write('officer_count', officer_count, '役員数(申請時)')
-    write('officer_count_prev', officer_count, '役員数(前期)')
-    write('rep_title', co.representative_title, '代表者役職')
-    write('rep_name', co.representative_name, '代表者氏名')
-    write('rep_kana', co.representative_kana, '代表者フリガナ')
+        # 代表者（法人）
+        officer_count = 1 + len(co.officers)
+        write('officer_count', officer_count, '役員数(申請時)')
+        write('officer_count_prev', officer_count, '役員数(前期)')
+        write('rep_title', co.representative_title, '代表者役職')
+        write('rep_name', co.representative_name, '代表者氏名')
+        write('rep_kana', co.representative_kana, '代表者フリガナ')
 
-    # 役員 (最大10名)
-    for i, officer in enumerate(co.officers[:10]):
-        idx = i + 1
-        write(f'officer_{idx}_title', officer.get('title'), f'役員({idx})役職')
-        write(f'officer_{idx}_name', officer.get('name'), f'役員({idx})氏名')
-        write(f'officer_{idx}_kana', officer.get('kana'), f'役員({idx})フリガナ')
+        # 役員 (最大10名)
+        for i, officer in enumerate(co.officers[:10]):
+            idx = i + 1
+            write(f'officer_{idx}_title', officer.get('title'), f'役員({idx})役職')
+            write(f'officer_{idx}_name', officer.get('name'), f'役員({idx})氏名')
+            write(f'officer_{idx}_kana', officer.get('kana'), f'役員({idx})フリガナ')
 
     # ── 認定・補助金系 ──
     write('past_subsidies', 'なし', '過年度交付決定')
@@ -160,7 +172,9 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
     write('fin_depreciation', fi.depreciation, '減価償却費')
     personnel = (fi.salary or 0) + (fi.misc_wages or 0) + (fi.bonus or 0) + (fi.travel_expense or 0)
     write('fin_personnel', personnel, '人件費')
-    write('fin_capital', co.capital, '資本金(財務)')
+    # fin_capital は個人事業主の場合、上部で0固定済み。法人のみ co.capital を転記
+    if not mapping.is_kojin:
+        write('fin_capital', co.capital, '資本金(財務)')
 
     # ── 1人当たり給与支給総額の計画値（賃金台帳から算出時のみ）──
     # wage_plan は fill_template() から渡される場合のみ有効
@@ -226,6 +240,8 @@ def check_empty_cells(wb: openpyxl.Workbook) -> list[str]:
         'IT戦略ナビ', '省力化ナビ',
         # 別添資料（ファイル添付）
         '履歴事項全部証明書', '納税証明書', '決算書', 'その他資料',
+        # 個人事業主の別添資料
+        '身分証明書', '確定申告書', '収支内訳書', '青色申告',
         # 給与計画（賃金台帳がある場合に自動入力、なければスキップ）
         '給与支給総額', '従業員数（全期間', '賃上げを行いますか',
         '事業計画期間における', '計画数値',
@@ -250,16 +266,30 @@ def check_empty_cells(wb: openpyxl.Workbook) -> list[str]:
         import re
         return bool(re.match(r'役員（[0-9０-９]+）', label_str))
 
+    # 「⬇︎従業員がいない場合」セクション配下は空セルを報告しない
+    # （従業員がいる場合は上部の賃上げ項目を埋めれば十分）
+    in_no_employee_section = False
+
     for row in ws.iter_rows(min_row=35, max_row=250):
         row_num = row[0].row
         label = row[1].value if len(row) > 1 else None
         value = row[2].value if len(row) > 2 else None
+
+        if label is not None:
+            label_str_raw = str(label).strip()
+            if '従業員がいない場合' in label_str_raw:
+                in_no_employee_section = True
+            elif '賃金状況' in label_str_raw or '最低賃金近傍' in label_str_raw:
+                in_no_employee_section = False
 
         if label is None or value is not None:
             continue
 
         label_str = str(label).strip()
         if any(kw in label_str for kw in skip_keywords):
+            continue
+
+        if in_no_employee_section:
             continue
 
         # 使われていない役員枠はスキップ

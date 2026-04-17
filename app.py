@@ -66,6 +66,7 @@ def _get_drive_client():
 TEMPLATE_OPTIONS = {
     '通常枠 2026（法人）': '通常枠_2026',
     'インボイス枠 2026（法人）': 'インボイス枠_2026',
+    'インボイス枠 2026（個人）': 'インボイス枠_個人_2026',
 }
 
 TASK_OPTIONS = {
@@ -173,7 +174,8 @@ def find_template(base_dir: Path, template_type: str) -> Path | None:
     import unicodedata
     keywords = {
         '通常枠_2026': ['原本', '通常枠', '2026'],
-        'インボイス枠_2026': ['原本', 'インボイス', '2026'],
+        'インボイス枠_2026': ['原本', 'インボイス', '法人', '2026'],
+        'インボイス枠_個人_2026': ['原本', 'インボイス', '個人', '2026'],
     }
     kws = keywords.get(template_type, [])
     candidates = []

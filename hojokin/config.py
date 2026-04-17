@@ -90,6 +90,9 @@ class TemplateMapping:
     # 転記テキスト行の範囲
     tenki_text_range: tuple[int, int] = (15, 26)
 
+    # 個人事業主向けテンプレートか（役員セクションなし、固定値あり）
+    is_kojin: bool = False
+
 
 # ── 2026 通常枠テンプレート ──
 # テンプレート原本: ツール/【原本_法人】企業名_通常枠_法人2026.xlsx
@@ -405,12 +408,151 @@ MAPPING_2026_INVOICE = TemplateMapping(
 )
 
 
+# ── 2026 インボイス枠（個人事業主）──
+# テンプレート原本: ツール/【原本_個人】企業名_インボイス枠_個人2026.xlsx
+# ヒアリングシート: ツール/ヒアリングシート2026_インボイス個人.xlsx
+# 法人版との主な差分:
+#   - 役員セクションなし（申請内容R71-R106が存在しない → 全体-30行シフト）
+#   - ヒアリングに現住所・事業所所在地・生年月日・事業開始年月日を追加
+#   - 企業名→屋号、履歴事項全部証明書→本人確認資料（運転免許証等）
+#   - 資本金=0、決算月=12月、代表者・役員数=1 が固定
+#   - 計画年度: 2027/1〜2029/12（暦年）、年平均成長率3.0%以上
+MAPPING_2026_INVOICE_KOJIN = TemplateMapping(
+    hearing_to_tenki=[
+        # (ヒアリング行, 転記行, 電話番号変換)
+        (8,  8,  False),   # 屋号・商号
+        (10, 10, False),   # 屋号・商号フリガナ
+        (12, 12, False),   # 現住所:郵便番号
+        (14, 14, False),   # 現住所
+        (16, 16, False),   # 生年月日
+        (18, 18, False),   # 事業所所在地:郵便番号
+        (20, 20, False),   # 事業所所在地
+        (22, 22, False),   # 事業開始年月日
+        (24, 24, False),   # 店舗事業所数
+        (26, 26, False),   # 事業者URL
+        (29, 28, False),   # 主な事業内容
+        (30, 29, False),   # 強み
+        (31, 30, False),   # 時間がかかっている業務
+        (32, 31, False),   # 月間何時間
+        (33, 32, False),   # どの機能で楽にしたいか
+        (34, 33, False),   # 何%削減
+        (35, 34, False),   # 浮いた時間の活用
+        (36, 35, False),   # 3年後の売上目標
+        (37, 36, False),   # 取引先属性
+        (40, 38, True),    # 代表電話番号
+        (42, 40, False),   # 担当者氏名
+        (44, 42, False),   # 担当者氏名フリガナ
+        (46, 44, False),   # 担当者メールアドレス
+        (48, 46, True),    # 担当者電話番号
+        (50, 48, True),    # 担当者携帯番号
+        (52, 50, False),   # 正規雇用
+        (54, 52, False),   # 契約社員
+        (56, 54, False),   # パートアルバイト
+        (58, 56, False),   # 派遣社員
+        (60, 58, False),   # その他
+        (62, 60, False),   # 過去に補助金
+        (64, 62, False),   # 申請年度
+        (65, 63, False),   # 申請枠
+        (66, 64, False),   # 申請回
+        (70, 68, False),   # えるぼし認定
+        (73, 71, False),   # くるみん認定
+        (75, 73, False),   # SECURITY ACTION ID
+        (78, 76, False),   # 正規雇用(前期)
+        (79, 77, False),   # 契約社員(前期)
+        (80, 78, False),   # パート(前期)
+        (81, 79, False),   # 年間平均労働時間
+        (84, 82, False),   # 事業所内最低賃金時給
+        (86, 84, False),   # 賃金引上げ表明
+        (88, 86, False),   # 賃金引上げ幅
+        (91, 88, False),   # 従業員代表者
+        (92, 89, False),   # 給与担当者
+        (93, 90, False),   # 事業所内最低賃金者
+        (96, 93, False),   # インボイス登録状況
+        (98, 95, False),   # インボイス登録予定
+    ],
+    shinsei={
+        # 基本情報入力（役員セクションがないため法人-30行）
+        # R45 現在住所（本人確認資料から。AI抽出は未対応のため坂平さん手書き）
+        'headquarters_address': 45,
+        'industry_code': 46,
+        'industry_text': 47,
+        # R48 生年月日、R49 事業所所在地郵便、R50 事業所所在地、R51 事業開始年月日は転記参照
+        'capital': 52,                # 個人事業主は「0」固定
+        # R53 店舗事業所数、R54 URL、R55-63 事業詳細は転記参照
+        'tool_name': 64,
+        'business_description': 66,
+        'fiscal_month': 67,           # 「12月」固定
+        'rep_name': 68,               # 個人事業主の氏名
+        'rep_kana': 69,               # 代表者氏名（フリガナ）
+        # R70 代表電話、R71 担当部署、R72-76 担当者、R77-81 従業員数は転記参照
+        'past_subsidies': 82,
+        # R83-85 申請年度/枠/回は転記参照
+        'eruboshi': 86,
+        'kurumin': 87,
+        # R94 SECURITY ACTION は転記参照
+        'business_types': 107,
+
+        # 財務情報入力
+        # R113-115 前期従業員数は転記参照
+        'officer_count_prev': 116,    # 個人事業主は「1」固定
+        # R117 年間平均労働時間は転記参照
+        'fin_revenue': 118,
+        'fin_gross_profit': 119,
+        'fin_operating_profit': 120,
+        'fin_ordinary_profit': 121,
+        'fin_depreciation': 122,
+        'fin_personnel': 123,
+        'fin_capital': 124,           # 個人事業主は「0」固定
+
+        # 経営状況
+        'management_intent': 130,
+        'security_status': 131,
+        'future_goals': 132,
+        'it_investment_status': 133,
+        'it_utilization_scope': 134,
+        'invoice_related_work': 135,
+
+        # 計画数値入力
+        'min_wage': 170,              # 主たる事業場の所在地/地域別最低賃金
+        'min_wage_hourly': 171,
+        'employee_count_fte': 172,
+        'wage_total_base': 173,
+        'wage_total_y1': 174,         # 2027/1〜2027/12計画
+        'wage_total_y2': 175,         # 2028/1〜2028/12計画
+        'wage_total_y3': 176,         # 2029/1〜2029/12計画
+        'wage_raise_declaration': 179,
+        'wage_raise_amount': 180,
+        'wage_raise_method': 181,
+        'wage_raise_date': 182,
+    },
+    kyuyo_sheet_name='給与支給総額計算',
+    kyuyo={
+        # シート構造は法人版と完全に同じ。申請内容シートからの参照先のみ異なる
+        'revenue':          (10, 2),  # B10: 売上高
+        'gross_profit':     (11, 2),  # B11: 粗利益
+        'operating_profit': (12, 2),  # B12: 営業利益
+        'ordinary_profit':  (13, 2),  # B13: 経常利益
+        'depreciation':     (16, 5),  # E16: 減価償却費
+        'salary':           (5,  5),  # E5:  給料手当
+        'misc_wages':       (6,  5),  # E6:  雑給
+        'bonus':            (7,  5),  # E7:  賞与手当
+        'travel_expense':   (9,  5),  # E9:  旅費交通費
+    },
+    shinsei_clear_range=(5, 230),
+    tenki_text_range=(16, 26),
+    is_kojin=True,
+)
+
+
 def get_mapping(template_type: str) -> TemplateMapping:
     """テンプレートタイプからマッピングを取得"""
     mappings = {
         '通常枠_2026': MAPPING_2026_TSUJO,
         'インボイス枠_2026': MAPPING_2026_INVOICE,
+        'インボイス枠_個人_2026': MAPPING_2026_INVOICE_KOJIN,
     }
     if template_type not in mappings:
         raise ValueError(f'未対応のテンプレートタイプ: {template_type}。対応: {list(mappings.keys())}')
     return mappings[template_type]
+
+
