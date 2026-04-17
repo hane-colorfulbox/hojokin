@@ -37,6 +37,8 @@ MIN_WAGE_MAP = {
 
 def detect_prefecture(address: str) -> str | None:
     """住所から都道府県を判定"""
+    if not address:
+        return None
     for pref in MIN_WAGE_MAP:
         if pref in address:
             return pref
