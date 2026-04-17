@@ -98,13 +98,15 @@ function updateDashboard() {
     return;
   }
 
-  // 公募回（締め切り）の一覧を取得（出現順）
+  // 公募回（締め切り）の一覧を取得し、回次昇順にソート
+  // 例: "1次（5/12締切）" < "2次（6/15締切）" < "3次" < ... < "（未設定）"
   const roundSet = [];
   for (const row of combinedRows) {
     if (!roundSet.includes(row.round)) {
       roundSet.push(row.round);
     }
   }
+  roundSet.sort((a, b) => getRoundOrder_(a) - getRoundOrder_(b));
 
   // 支援事業者名の一覧を取得（出現順）
   const vendorSet = [];
@@ -299,4 +301,16 @@ function parseRoundFromTemplate_(template) {
     return match[1] + '次';
   }
   return '（未設定）';
+}
+
+
+/**
+ * 公募回文字列から並び順（回次番号）を取得
+ * 例: "1次（5/12締切）" → 1, "3次" → 3, "（未設定）" → 9999（末尾）
+ * @param {string} round - 公募回文字列
+ * @returns {number} 並び順キー（小さいほど左）
+ */
+function getRoundOrder_(round) {
+  const match = round.match(/(\d+)次/);
+  return match ? parseInt(match[1], 10) : 9999;
 }
