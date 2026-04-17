@@ -4,15 +4,24 @@
  * トリガー設定:
  *   関数: onEditNotify
  *   イベントソース: スプレッドシートから → 編集時
+ *
+ * 【2026-04-17】村上さん依頼で通知を一旦停止中。
+ * 再開する場合は NOTIFY_CONFIG.ENABLED を true に戻す。
  */
+
+// ============================================================
+// Google Chat Webhook URL（補助金連絡スペース「案件通知」）
+// 送客通知（form_to_sheet.gs）からも参照する
+// ============================================================
+const CHAT_WEBHOOK_URL = 'https://chat.googleapis.com/v1/spaces/AAAAJyNY9qM/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=K6-A-G82-5OYY-cvseY5PJTALjjpknyHicVO-eZarRQ';
+
 
 // ============================================================
 // 設定
 // ============================================================
 const NOTIFY_CONFIG = {
-  // Google Chat Webhook URL（補助金連絡スペース）
-  // 補助金連絡スペース「案件通知」Webhook
-  WEBHOOK_URL: 'https://chat.googleapis.com/v1/spaces/AAAAJyNY9qM/messages?key=AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI&token=K6-A-G82-5OYY-cvseY5PJTALjjpknyHicVO-eZarRQ',
+  // 通知の有効/無効（2026-04-17 村上さん依頼で一旦停止）
+  ENABLED: false,
 
   // 通知するステータス
   NOTIFY_STATUSES: ['申請_準備完了'],
@@ -45,6 +54,9 @@ const NOTIFY_CONFIG = {
  */
 function onEditNotify(e) {
   try {
+    // 通知が無効化されている場合は即終了
+    if (!NOTIFY_CONFIG.ENABLED) return;
+
     const sheet = e.source.getActiveSheet();
 
     // シート1以外は無視
@@ -97,11 +109,6 @@ function onEditNotify(e) {
  * Google Chatにメッセージを送信
  */
 function sendChatNotification_(companyName, vendor, template, cbStaff, status, folderUrl) {
-  if (NOTIFY_CONFIG.WEBHOOK_URL === 'YOUR_WEBHOOK_URL_HERE') {
-    Logger.log('Webhook URLが未設定です');
-    return;
-  }
-
   let message = `📋 *案件ステータス更新*\n\n`;
   message += `*企業名:* ${companyName}\n`;
   message += `*支援事業者:* ${vendor}\n`;
@@ -123,7 +130,7 @@ function sendChatNotification_(companyName, vendor, template, cbStaff, status, f
     payload: JSON.stringify(payload),
   };
 
-  UrlFetchApp.fetch(NOTIFY_CONFIG.WEBHOOK_URL, options);
+  UrlFetchApp.fetch(CHAT_WEBHOOK_URL, options);
   Logger.log(`Chat通知送信: ${companyName} → ${status}`);
 }
 
