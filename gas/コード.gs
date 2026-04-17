@@ -45,6 +45,9 @@ function onFormSubmit(e) {
     // 実際にデータが入っているB列で判定する
     const newRow = getLastDataRow_(targetSheet, 2) + 1;
 
+    // 既存の入力規則をクリア（フォームデータがドロップダウン候補外だと違反エラーになるため）
+    targetSheet.getRange(newRow, 1, 1, rowData.length).clearDataValidations();
+
     // データを書き込み
     targetSheet.getRange(newRow, 1, 1, rowData.length).setValues([rowData]);
 
