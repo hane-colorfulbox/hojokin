@@ -333,6 +333,25 @@ def run_wage_calculation(
                 _read_wage_report(wage_report_path)
             logger.info(f'賃金状況報告シート: 正社員{seishain_count}, パート{part_count}')
 
+        # フォールバック: 賃金状況報告シートで人数が取れなかった場合、賃金台帳から補完
+        if seishain_count + part_count == 0:
+            ledger_paths = detector.get_all('wage_ledger')
+            if ledger_paths:
+                ledger_emps = read_wage_ledgers(ledger_paths)
+                if ledger_emps:
+                    employees_detail = _build_employees_detail_from_ledger(ledger_emps)
+                    seishain_count = sum(
+                        1 for e in employees_detail if e['type'] == '正社員'
+                    )
+                    part_count = sum(
+                        1 for e in employees_detail
+                        if e['type'] in ('パート・アルバイト', '契約社員')
+                    )
+                    logger.info(
+                        f'賃金台帳フォールバック: 正社員{seishain_count}, '
+                        f'パート・契約{part_count} ({len(ledger_paths)}ファイル)'
+                    )
+
         # 給与データPDFから読取（APIが必要）
         wage_pdfs = detector.get_all('wage_data')
         if wage_pdfs and not employees_detail:
@@ -453,6 +472,49 @@ def _calc_wage_plan_from_ledger(
     except Exception as e:
         logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}')
         return None
+
+
+def _classify_emp_type(emp_type: str) -> str:
+    """賃金台帳の雇用形態文字列を4分類に正規化"""
+    t = (emp_type or '').strip()
+    if '役員' in t or '取締役' in t:
+        return '役員'
+    if 'パート' in t or 'アルバイト' in t or '非常勤' in t:
+        return 'パート・アルバイト'
+    if '契約' in t:
+        return '契約社員'
+    # 雇用形態が空/不明な場合は正社員として集計（台帳に区分列が無い一般的なケース）
+    return '正社員'
+
+
+def _build_employees_detail_from_ledger(employees) -> list[dict]:
+    """賃金台帳の読取結果 → create_wage_calculation が期待する employees_detail 形式に変換。
+    役員はカウント対象外として除外する。"""
+    detail = []
+    for emp in employees:
+        classified = _classify_emp_type(emp.employment_type)
+        if classified == '役員':
+            continue
+
+        # 直近データのある3ヶ月を m1/m2/m3 に割り当て
+        months_with_data = [m for m, w in enumerate(emp.monthly_wages) if w is not None]
+        last_three = months_with_data[-3:]
+        m_vals = [emp.monthly_wages[m] or 0 for m in last_three]
+        while len(m_vals) < 3:
+            m_vals.append(0)
+
+        detail.append({
+            'no': len(detail) + 1,
+            'name': emp.name,
+            'type': classified,
+            'm1': m_vals[0],
+            'm2': m_vals[1],
+            'm3': m_vals[2],
+            'hr': emp.hourly_rate,
+            'monthly_hours': emp.monthly_avg_hours,
+            'judge': '',
+        })
+    return detail
 
 
 def _read_wage_report(path: Path) -> tuple[list[dict], int, int, int]:
