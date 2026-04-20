@@ -38,9 +38,26 @@ class FileDetector:
         'wage_data': ['支給控除一覧', '給与データ'],
     }
 
+    # カテゴリ別の許可拡張子（小文字で比較）
+    # openpyxl系のカテゴリに .csv が混入すると読み込み時に例外が出て pipeline が全滅するため、
+    # 検出段階で弾く。拡張子は後段の読み取り処理に合わせて絞っている。
+    ALLOWED_EXTS = {
+        'hearing':     {'.xlsx', '.xlsm'},
+        'registry':    {'.pdf'},
+        'identity':    {'.pdf'},
+        'tax':         {'.pdf'},
+        'pl':          {'.pdf'},
+        'cost_report': {'.pdf'},
+        'estimate':    {'.xlsx', '.xlsm', '.pdf'},
+        'wage_report': {'.xlsx', '.xlsm'},
+        'wage_ledger': {'.xlsx', '.xlsm'},
+        'wage_data':   {'.pdf'},
+    }
+
     def __init__(self, folder: Path):
         self.folder = folder
         self.files: dict[str, list[Path]] = {k: [] for k in self.PATTERNS}
+        self.skipped: list[tuple[str, str, str]] = []  # (category, filename, reason)
         self._scan()
 
     def _scan(self):
@@ -50,6 +67,11 @@ class FileDetector:
                 continue
             for category, keywords in self.PATTERNS.items():
                 if any(kw in p.name for kw in keywords):
+                    allowed = self.ALLOWED_EXTS.get(category)
+                    if allowed is not None and p.suffix.lower() not in allowed:
+                        self.skipped.append((category, p.name, f'拡張子{p.suffix}は{category}では非対応'))
+                        logger.info(f'除外: [{category}] {p.name} (許可拡張子: {sorted(allowed)})')
+                        break
                     self.files[category].append(p)
                     logger.debug(f'検出: [{category}] {p.name}')
                     break
@@ -95,6 +117,11 @@ class FileDetector:
                 lines.append(f'  {cat}: {", ".join(names)}')
             else:
                 lines.append(f'  {cat}: なし')
+        if self.skipped:
+            lines.append('')
+            lines.append('除外されたファイル（拡張子不一致）:')
+            for cat, name, reason in self.skipped:
+                lines.append(f'  [{cat}] {name} — {reason}')
         return '\n'.join(lines)
 
 
