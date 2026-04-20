@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+import unicodedata
 from pathlib import Path
 
 from .config import get_mapping, CLAUDE_API_KEY
@@ -65,8 +66,12 @@ class FileDetector:
         for p in self._iter_files(self.folder):
             if p.name.startswith('~$'):
                 continue
+            # Google Drive等で作成されたファイル名はNFD分解形式(例: グ=ク+濁点)で
+            # 保存されていることがあり、NFCのキーワードと素直にin比較すると一致しない。
+            # 正規化してから判定する。
+            name_nfc = unicodedata.normalize('NFC', p.name)
             for category, keywords in self.PATTERNS.items():
-                if any(kw in p.name for kw in keywords):
+                if any(kw in name_nfc for kw in keywords):
                     allowed = self.ALLOWED_EXTS.get(category)
                     if allowed is not None and p.suffix.lower() not in allowed:
                         self.skipped.append((category, p.name, f'拡張子{p.suffix}は{category}では非対応'))
