@@ -17,7 +17,7 @@ from .wage_calculator import (
     PayrollEmployee,
     calculate_per_capita_wage,
 )
-from .wage_reader import read_wage_ledger, export_wage_ledger_summary
+from .wage_reader import read_wage_ledger, read_wage_ledgers, export_wage_ledger_summary
 from .pdf_reader import pdf_to_images
 
 logger = logging.getLogger(__name__)
@@ -268,9 +268,9 @@ def run_application_transfer(
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件)')
 
         # 賃金台帳一覧Excel出力（チェック用）
-        ledger_path = detector.get('wage_ledger')
-        if ledger_path:
-            ledger_employees = read_wage_ledger(ledger_path)
+        ledger_paths = detector.get_all('wage_ledger')
+        if ledger_paths:
+            ledger_employees = read_wage_ledgers(ledger_paths)
             if ledger_employees:
                 company = output_path.stem.split('_')[0]
                 ledger_output = output_path.parent / f'{company}_賃金台帳一覧.xlsx'
@@ -388,20 +388,20 @@ def _calc_wage_plan_from_ledger(
             'wage_total_y3': 3年目計画,
         }
     """
-    from .wage_reader import read_wage_ledger
+    from .wage_reader import read_wage_ledgers
 
-    ledger_path = detector.get('wage_ledger')
-    if ledger_path is None:
+    ledger_paths = detector.get_all('wage_ledger')
+    if not ledger_paths:
         logger.info('賃金台帳が見つかりません → 計画値転記をスキップ')
         return None
 
     try:
-        employees_raw = read_wage_ledger(ledger_path)
+        employees_raw = read_wage_ledgers(ledger_paths)
         if not employees_raw:
             logger.warning('賃金台帳からデータを読み取れませんでした')
             return None
 
-        logger.info(f'賃金台帳: {len(employees_raw)}名読取 ({ledger_path.name})')
+        logger.info(f'賃金台帳: {len(employees_raw)}名読取 ({len(ledger_paths)}ファイル)')
 
         # WageEmployee → PayrollEmployee に変換
         payroll_list = []

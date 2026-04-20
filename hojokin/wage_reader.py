@@ -2,10 +2,14 @@
 """
 賃金台帳Excel読み取り + 加点措置判定
 
-3つのフォーマットに対応:
-  1. 集計表型: 1行1人、列=月（No, 氏名, 雇用形態, 月間平均時間, 時給, 1月～12月）
-  2. 月別行型: 1人×12行、列=項目（従業員番号, 氏名, 対象年月, 基本給, 所定労働時間...）
-  3. 個人台帳型: 行=項目、列=月、1人1ブロック（給与ソフト出力形式）
+対応方針:
+  ヘッダー別名辞書で正規化マッチ → 月の並び方を値ベースで自動判定する
+  柔軟パーサー(_read_flexible) を採用。複数の実フォーマット差異を1本で吸収する。
+  配置パターン:
+    (a) 1月〜12月が列見出し   … 集計表型（1行1人）
+    (b) 対象年月/給与年月列あり … 月別行型（1人×N行、月は明示列）
+    (c) 先頭列に YYYYMM 値     … YYYYMM月次型（給与ソフト出力・1ファイル1人のケース）
+  個人台帳型（行=項目、列=月、月度給与ブロック）は別ルートで温存。
 
 加点措置の判定ロジック:
   ①用（インボイス枠/セキュリティ枠）:
@@ -19,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -100,214 +105,262 @@ class BonusPointResult:
 
 
 # ============================================================
-# フォーマット自動検出
+# 柔軟パーサー（集計表型 / 月別行型 / YYYYMM月次型を統一処理）
 # ============================================================
 
-def _detect_format(wb: openpyxl.Workbook) -> str:
-    """
-    賃金台帳のフォーマットを自動検出
-
-    Returns:
-        'summary'      - 集計表型（1行1人）
-        'monthly_rows' - 月別行型（1人×12行）
-        'individual'   - 個人台帳型（行=項目、列=月）
-    """
-    for ws in wb.worksheets:
-        for r in range(1, min(10, ws.max_row + 1)):
-            for c in range(1, min(30, ws.max_column + 1)):
-                val = str(ws.cell(r, c).value or '')
-                if '対象年月' in val:
-                    return 'monthly_rows'
-                if '月度給与' in val:
-                    return 'individual'
-    return 'summary'
+# ヘッダー別名辞書（正規化後に部分一致 or 完全一致で判定）
+_HEADER_ALIASES = {
+    'name':       ['氏名', '従業員氏名', '社員氏名', '名前'],
+    'emp_id':     ['従業員番号', '従業員コード', '社員番号', 'no', 'ＮＯ', 'Ｎｏ'],
+    'emp_type':   ['雇用形態', '区分', '従業員区分'],
+    'base_wage':  ['基本給'],
+    'hourly_wage':['基本給(時給)', '時給', '時間給'],
+    'hours':      ['所定労働時間', '労働時間', '月間平均時間', '平均時間'],
+    'total':      ['支給合計額', '支給合計', '総支給額', '総支給',
+                   '課税支給合計', '差引支給合計'],
+    'paid_date':  ['支給日', '支払日'],
+    'month_col':  ['対象年月', '給与年月', '支給年月', '年月'],
+}
 
 
-# ============================================================
-# フォーマット1: 集計表型（既存）
-# ============================================================
-
-# 列オフセット（B列=2始まり）
-_F1_COL_NO = 2       # B
-_F1_COL_NAME = 3     # C
-_F1_COL_TYPE = 4     # D
-_F1_COL_HOURS = 5    # E: 月間平均時間
-_F1_COL_HOURLY = 6   # F: 時給
-_F1_COL_M1 = 7       # G: 1月
+def _norm(val) -> str:
+    """文字列を正規化（NFKC・空白除去・小文字化）"""
+    if val is None:
+        return ''
+    s = unicodedata.normalize('NFKC', str(val))
+    s = s.replace('\u3000', '').replace(' ', '').strip()
+    return s.lower()
 
 
-def _read_summary_table(wb: openpyxl.Workbook) -> list[WageEmployee]:
-    """フォーマット1: 1行1人、列=月"""
-    # シート選択
-    ws = None
-    for name in wb.sheetnames:
-        if '従業員' in name or '明細' in name or '給与' in name:
-            ws = wb[name]
-            break
-    if ws is None:
-        ws = wb[wb.sheetnames[0]]
+def _match_alias(val: str, aliases: list[str]) -> bool:
+    v = _norm(val)
+    if not v:
+        return False
+    for a in aliases:
+        na = _norm(a)
+        if v == na or (len(na) >= 2 and na in v):
+            return True
+    return False
 
-    # ヘッダー行を探す
-    header_row = None
-    col_offset = 0
-    for row_idx in range(1, min(10, ws.max_row + 1)):
-        for col_idx in range(1, min(10, ws.max_column + 1)):
-            val = ws.cell(row=row_idx, column=col_idx).value
-            if val == 'No':
-                header_row = row_idx
-                col_offset = col_idx - _F1_COL_NO
-                break
-        if header_row:
-            break
 
-    if header_row is None:
-        logger.warning('ヘッダー行が見つかりません（集計表型）')
-        return []
-
-    employees = []
-    for row_idx in range(header_row + 1, ws.max_row + 1):
-        no_val = ws.cell(row=row_idx, column=_F1_COL_NO + col_offset).value
-        if no_val is None or not isinstance(no_val, (int, float)):
+def _detect_field_map(ws, header_row: int) -> dict[str, int]:
+    """指定行をヘッダーと見なし、各フィールドの列番号を割り出す"""
+    fmap: dict[str, int] = {}
+    month_cols: dict[int, int] = {}
+    for c in range(1, min(ws.max_column + 1, 80)):
+        val = ws.cell(header_row, c).value
+        s = _norm(val)
+        if not s:
             continue
-
-        name = str(ws.cell(row=row_idx, column=_F1_COL_NAME + col_offset).value or '')
-        emp_type = str(ws.cell(row=row_idx, column=_F1_COL_TYPE + col_offset).value or '')
-        hours = ws.cell(row=row_idx, column=_F1_COL_HOURS + col_offset).value or 0
-        hourly = ws.cell(row=row_idx, column=_F1_COL_HOURLY + col_offset).value or 0
-
-        monthly = []
-        for m in range(12):
-            val = ws.cell(row=row_idx, column=_F1_COL_M1 + col_offset + m).value
-            monthly.append(float(val) if val is not None else None)
-
-        name = name.replace('\u3000', ' ').strip()
-        hourly_f = float(hourly)
-
-        employees.append(WageEmployee(
-            no=int(no_val),
-            name=name,
-            employment_type=emp_type,
-            monthly_avg_hours=float(hours),
-            hourly_rate=hourly_f,
-            monthly_wages=monthly,
-            # 集計表型はF列の時給を全月に適用
-            monthly_hourly_rates=[hourly_f if w is not None else None for w in monthly],
-        ))
-
-    return employees
+        # 1月〜12月 → 集計表型
+        m = re.fullmatch(r'(\d{1,2})月', s)
+        if m:
+            idx = int(m.group(1)) - 1
+            if 0 <= idx <= 11:
+                month_cols[idx] = c
+                continue
+        for key, aliases in _HEADER_ALIASES.items():
+            if key in fmap:
+                continue
+            if _match_alias(val, aliases):
+                fmap[key] = c
+                break
+    if month_cols:
+        fmap['_month_cols'] = month_cols  # type: ignore[assignment]
+    return fmap
 
 
-# ============================================================
-# フォーマット2: 月別行型
-# ============================================================
+def _find_header_rows(ws) -> list[tuple[int, dict]]:
+    """シート内のヘッダー行を全て発見（給与/賞与セクション両方を取るため）"""
+    rows = []
+    for r in range(1, min(ws.max_row + 1, 40)):
+        fmap = _detect_field_map(ws, r)
+        has_name = 'name' in fmap
+        has_total = 'total' in fmap
+        has_month_cols = '_month_cols' in fmap
+        if has_name and (has_total or has_month_cols):
+            rows.append((r, fmap))
+    return rows
 
-def _parse_year_month(text: str) -> int | None:
-    """'2024年4月' や '2025年10月' → 月インデックス (0=1月)"""
-    m = re.search(r'(\d+)月', str(text))
-    if m:
-        month = int(m.group(1))
-        if 1 <= month <= 12:
-            return month - 1
+
+def _parse_month(val, paid_date_val=None) -> int | None:
+    """セル値から月インデックス(0-11)を抽出。YYYYMM数値/'〇年〇月'/支給日まで対応"""
+    if val is not None:
+        # YYYYMM 数値（例: 202503 → 3月=index2）
+        if isinstance(val, (int, float)):
+            n = int(val)
+            if 100000 <= n <= 999999:
+                month = n % 100
+                if 1 <= month <= 12:
+                    return month - 1
+        s = str(val)
+        # '2025年3月' 等
+        m = re.search(r'(\d{4})[年/\-](\d{1,2})', s)
+        if m:
+            month = int(m.group(2))
+            if 1 <= month <= 12:
+                return month - 1
+        # '3月' 単独
+        m = re.search(r'(\d{1,2})月', s)
+        if m:
+            month = int(m.group(1))
+            if 1 <= month <= 12:
+                return month - 1
+        # 純粋なYYYYMM文字列
+        m = re.fullmatch(r'\d{6}', s.strip())
+        if m:
+            month = int(s.strip()) % 100
+            if 1 <= month <= 12:
+                return month - 1
+    # フォールバック: 支給日（例: 2025/07/10）
+    if paid_date_val is not None:
+        s = str(paid_date_val)
+        m = re.search(r'\d{4}[/\-年](\d{1,2})', s)
+        if m:
+            month = int(m.group(1))
+            if 1 <= month <= 12:
+                return month - 1
     return None
 
 
-def _read_monthly_rows(wb: openpyxl.Workbook) -> list[WageEmployee]:
-    """フォーマット2: 1人×12行、列=項目"""
-    # 全シートからデータを集める（後のシートが優先）
-    emp_data: dict[str, dict] = {}
+def _to_float(val) -> float | None:
+    if val is None:
+        return None
+    try:
+        f = float(val)
+        return f
+    except (ValueError, TypeError):
+        return None
 
-    for ws in wb.worksheets:
-        # ヘッダー行を探す
-        header_map = {}
-        header_row = None
-        for r in range(1, min(10, ws.max_row + 1)):
-            for c in range(1, min(30, ws.max_column + 1)):
-                val = str(ws.cell(r, c).value or '').strip()
-                if val in ('氏名', '従業員番号', '対象年月', '基本給',
-                           '所定労働時間', '雇用形態', '支給合計'):
-                    header_map[val] = c
-                    header_row = r
 
-        if header_row is None or '氏名' not in header_map:
+def _new_emp_record(name: str, emp_type: str = '') -> dict:
+    return {
+        'name': name,
+        'employment_type': emp_type,
+        'monthly_wages': [None] * 12,
+        'monthly_hourly_rates': [None] * 12,
+        'monthly_hours': [None] * 12,
+        'hourly_rate_flat': 0.0,
+        'avg_hours_flat': 0.0,
+    }
+
+
+def _parse_section_rowwise(ws, header_row: int, end_row: int,
+                           fmap: dict, emp_data: dict) -> None:
+    """月別行型 or YYYYMM月次型 のデータ行を処理（月=行方向）"""
+    col_name = fmap['name']
+    col_total = fmap.get('total')
+    col_type = fmap.get('emp_type')
+    col_month = fmap.get('month_col')
+    col_base = fmap.get('base_wage')
+    col_hours = fmap.get('hours')
+    col_paid = fmap.get('paid_date')
+
+    for r in range(header_row + 1, end_row):
+        name_val = ws.cell(r, col_name).value
+        if not name_val:
+            continue
+        name = str(name_val).replace('\u3000', ' ').strip()
+        if not name:
             continue
 
-        col_id = header_map.get('従業員番号', 1)
-        col_name = header_map['氏名']
-        col_type = header_map.get('雇用形態')
-        col_month = header_map.get('対象年月')
-        col_base = header_map.get('基本給')
-        col_hours = header_map.get('所定労働時間')
-        col_total = header_map.get('支給合計')
+        # 月を特定: month_col > 先頭列YYYYMM > 支給日
+        month_idx = None
+        if col_month:
+            month_idx = _parse_month(ws.cell(r, col_month).value)
+        if month_idx is None:
+            # 先頭列がYYYYMM(例: 202503)
+            month_idx = _parse_month(ws.cell(r, 1).value)
+        if month_idx is None and col_paid:
+            month_idx = _parse_month(None, ws.cell(r, col_paid).value)
+        if month_idx is None:
+            continue
 
-        for r in range(header_row + 1, ws.max_row + 1):
-            name_val = ws.cell(r, col_name).value
-            if not name_val:
-                continue
+        if name not in emp_data:
+            et = ''
+            if col_type:
+                et = str(ws.cell(r, col_type).value or '')
+            emp_data[name] = _new_emp_record(name, et)
 
-            name = str(name_val).replace('\u3000', ' ').strip()
-            emp_id = str(ws.cell(r, col_id).value or '').strip()
-            key = f"{emp_id}_{name}"
+        rec = emp_data[name]
 
-            if key not in emp_data:
-                emp_type = ''
-                if col_type:
-                    emp_type = str(ws.cell(r, col_type).value or '')
-                emp_data[key] = {
-                    'emp_id': emp_id,
-                    'name': name,
-                    'employment_type': emp_type,
-                    'monthly_wages': [None] * 12,
-                    'monthly_hourly_rates': [None] * 12,
-                    'monthly_hours': [None] * 12,
-                }
+        if col_total:
+            t = _to_float(ws.cell(r, col_total).value)
+            if t is not None:
+                # 給与＋賞与セクション両方が来たら加算（同月の別セクション）
+                existing = rec['monthly_wages'][month_idx]
+                rec['monthly_wages'][month_idx] = (existing or 0) + t
 
-            # 月を特定
-            month_idx = None
-            if col_month:
-                month_idx = _parse_year_month(
-                    str(ws.cell(r, col_month).value or '')
-                )
-            if month_idx is None:
-                continue
+        if col_base and col_hours:
+            base = _to_float(ws.cell(r, col_base).value)
+            hours = _to_float(ws.cell(r, col_hours).value)
+            if base is not None and hours is not None and hours > 0:
+                rec['monthly_hours'][month_idx] = hours
+                rec['monthly_hourly_rates'][month_idx] = base / hours
 
-            # 支給合計
-            if col_total:
-                total = ws.cell(r, col_total).value
-                if total is not None:
-                    emp_data[key]['monthly_wages'][month_idx] = float(total)
 
-            # 時給計算: 基本給 / 所定労働時間
-            if col_base and col_hours:
-                base = ws.cell(r, col_base).value
-                hours = ws.cell(r, col_hours).value
-                if base and hours:
-                    base_f = float(base)
-                    hours_f = float(hours)
-                    emp_data[key]['monthly_hours'][month_idx] = hours_f
-                    if hours_f > 0:
-                        emp_data[key]['monthly_hourly_rates'][month_idx] = (
-                            base_f / hours_f
-                        )
+def _parse_section_summary(ws, header_row: int, fmap: dict,
+                           emp_data: dict) -> None:
+    """集計表型（列=月）のデータ行を処理"""
+    col_name = fmap['name']
+    col_type = fmap.get('emp_type')
+    col_hours = fmap.get('hours')
+    col_hourly = fmap.get('hourly_wage')
+    month_cols: dict[int, int] = fmap['_month_cols']  # type: ignore[assignment]
 
-    # WageEmployeeリストに変換
-    employees = []
-    for i, (key, data) in enumerate(emp_data.items()):
-        hourly_rates = [h for h in data['monthly_hourly_rates'] if h is not None]
-        avg_hourly = sum(hourly_rates) / len(hourly_rates) if hourly_rates else 0
-        hours_list = [h for h in data['monthly_hours'] if h is not None]
-        avg_hours = sum(hours_list) / len(hours_list) if hours_list else 0
+    for r in range(header_row + 1, ws.max_row + 1):
+        name_val = ws.cell(r, col_name).value
+        if not name_val:
+            continue
+        name = str(name_val).replace('\u3000', ' ').strip()
+        if not name:
+            continue
 
-        employees.append(WageEmployee(
-            no=i + 1,
-            name=data['name'],
-            employment_type=data['employment_type'],
-            monthly_avg_hours=round(avg_hours, 1),
-            hourly_rate=round(avg_hourly, 1),
-            monthly_wages=data['monthly_wages'],
-            monthly_hourly_rates=data['monthly_hourly_rates'],
-        ))
+        if name not in emp_data:
+            et = ''
+            if col_type:
+                et = str(ws.cell(r, col_type).value or '')
+            emp_data[name] = _new_emp_record(name, et)
+        rec = emp_data[name]
 
-    return employees
+        if col_hours:
+            h = _to_float(ws.cell(r, col_hours).value)
+            if h is not None:
+                rec['avg_hours_flat'] = h
+        if col_hourly:
+            hr = _to_float(ws.cell(r, col_hourly).value)
+            if hr is not None:
+                rec['hourly_rate_flat'] = hr
+
+        for midx, c in month_cols.items():
+            v = _to_float(ws.cell(r, c).value)
+            if v is not None:
+                existing = rec['monthly_wages'][midx]
+                rec['monthly_wages'][midx] = (existing or 0) + v
+                if rec['hourly_rate_flat'] > 0:
+                    rec['monthly_hourly_rates'][midx] = rec['hourly_rate_flat']
+
+
+def _read_flexible(wb: openpyxl.Workbook,
+                   emp_data: dict | None = None) -> dict:
+    """柔軟パーサー本体（emp_dataに蓄積）"""
+    if emp_data is None:
+        emp_data = {}
+
+    for ws in wb.worksheets:
+        header_rows = _find_header_rows(ws)
+        if not header_rows:
+            continue
+
+        for i, (hr, fmap) in enumerate(header_rows):
+            end = (header_rows[i + 1][0]
+                   if i + 1 < len(header_rows) else ws.max_row + 1)
+            if '_month_cols' in fmap:
+                _parse_section_summary(ws, hr, fmap, emp_data)
+            else:
+                _parse_section_rowwise(ws, hr, end, fmap, emp_data)
+
+    return emp_data
 
 
 # ============================================================
@@ -508,29 +561,108 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
 # メイン読み取り関数
 # ============================================================
 
+def _is_individual_ledger(wb: openpyxl.Workbook) -> bool:
+    """個人台帳型（月度給与ブロック）かどうか判定"""
+    for ws in wb.worksheets:
+        for r in range(1, min(ws.max_row + 1, 30)):
+            for c in range(1, min(ws.max_column + 1, 30)):
+                val = str(ws.cell(r, c).value or '')
+                if '月度給与' in val:
+                    return True
+    return False
+
+
+def _emp_dict_to_list(emp_data: dict) -> list[WageEmployee]:
+    """内部dict表現 → WageEmployeeリスト変換"""
+    employees = []
+    for i, (name, data) in enumerate(emp_data.items()):
+        hourly_rates = [h for h in data['monthly_hourly_rates'] if h is not None]
+        hours_list = [h for h in data['monthly_hours'] if h is not None]
+        if hourly_rates:
+            avg_hourly = sum(hourly_rates) / len(hourly_rates)
+        else:
+            avg_hourly = data.get('hourly_rate_flat', 0.0)
+        if hours_list:
+            avg_hours = sum(hours_list) / len(hours_list)
+        else:
+            avg_hours = data.get('avg_hours_flat', 0.0)
+
+        employees.append(WageEmployee(
+            no=i + 1,
+            name=data['name'],
+            employment_type=data['employment_type'],
+            monthly_avg_hours=round(avg_hours, 1),
+            hourly_rate=round(avg_hourly, 1),
+            monthly_wages=data['monthly_wages'],
+            monthly_hourly_rates=data['monthly_hourly_rates'],
+        ))
+    return employees
+
+
 def read_wage_ledger(file_path: Path) -> list[WageEmployee]:
     """
-    賃金台帳Excelを読み取り（フォーマット自動検出）
-
-    対応フォーマット:
-      1. 集計表型: 1行1人、列=月
-      2. 月別行型: 1人×12行、列=項目
-      3. 個人台帳型: 行=項目、列=月
+    単一の賃金台帳Excelを読み取る。
+    個人台帳型（月度給与ブロック）は専用パーサー、それ以外は柔軟パーサーで統一処理。
     """
     wb = openpyxl.load_workbook(str(file_path), data_only=True)
 
-    fmt = _detect_format(wb)
-    logger.info(f'賃金台帳フォーマット検出: {fmt}')
-
-    if fmt == 'monthly_rows':
-        employees = _read_monthly_rows(wb)
-    elif fmt == 'individual':
+    if _is_individual_ledger(wb):
         employees = _read_individual_ledger(wb)
+        fmt = 'individual'
     else:
-        employees = _read_summary_table(wb)
+        emp_data = _read_flexible(wb)
+        employees = _emp_dict_to_list(emp_data)
+        fmt = 'flexible'
 
     wb.close()
-    logger.info(f'賃金台帳読み取り完了: {len(employees)}名 ({fmt})')
+    logger.info(f'賃金台帳読み取り完了: {file_path.name} → {len(employees)}名 ({fmt})')
+    return employees
+
+
+def read_wage_ledgers(file_paths: list[Path]) -> list[WageEmployee]:
+    """
+    複数の賃金台帳ファイルを読み、同名の従業員をマージして返す。
+    1人1ファイル運用（給与ソフト出力）と、1ファイルに全員を入れる運用の両方に対応。
+    """
+    if not file_paths:
+        return []
+
+    individual_ledger_paths = []
+    merged_emp_data: dict = {}
+
+    for path in file_paths:
+        try:
+            wb = openpyxl.load_workbook(str(path), data_only=True)
+        except Exception as e:
+            logger.warning(f'賃金台帳読込失敗: {path.name} ({e})')
+            continue
+
+        if _is_individual_ledger(wb):
+            individual_ledger_paths.append(path)
+            wb.close()
+            continue
+
+        before = len(merged_emp_data)
+        _read_flexible(wb, merged_emp_data)
+        wb.close()
+        logger.info(
+            f'賃金台帳読み取り: {path.name} '
+            f'→ 追加/更新 {len(merged_emp_data) - before}名 (累計{len(merged_emp_data)}名)'
+        )
+
+    employees = _emp_dict_to_list(merged_emp_data)
+
+    # 個人台帳型ファイルは別途パース（統合が複雑なためファイル単位で結合）
+    for path in individual_ledger_paths:
+        wb = openpyxl.load_workbook(str(path), data_only=True)
+        extra = _read_individual_ledger(wb)
+        wb.close()
+        logger.info(f'賃金台帳読み取り(個人台帳型): {path.name} → {len(extra)}名')
+        for e in extra:
+            e.no = len(employees) + 1
+            employees.append(e)
+
+    logger.info(f'賃金台帳合算結果: {len(employees)}名 ({len(file_paths)}ファイル)')
     return employees
 
 
