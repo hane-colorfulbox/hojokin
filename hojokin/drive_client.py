@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
+# Google Docs Editors 形式 → Office 形式へのエクスポートマッピング
+GOOGLE_EXPORT_MAP = {
+    'application/vnd.google-apps.spreadsheet': (
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx',
+    ),
+    'application/vnd.google-apps.document': (
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx',
+    ),
+    'application/vnd.google-apps.presentation': (
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation', '.pptx',
+    ),
+}
+
 
 class DriveClient:
     """Google Drive 読み取り専用クライアント"""
@@ -107,14 +120,45 @@ class DriveClient:
 
         return all_files
 
-    def download_file(self, file_id: str, dest_path: str | Path) -> Path:
-        """ファイルをダウンロード"""
-        dest = Path(dest_path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+    def _build_download_request(self, file_id: str, mime_type: str | None):
+        """mimeTypeに応じて get_media / export_media のリクエストを返す。
+
+        Returns:
+            (request, export_ext): Google形式なら補正すべき拡張子、それ以外はNone
+        """
+        if mime_type is None:
+            meta = self.service.files().get(
+                fileId=file_id, fields='mimeType',
+                supportsAllDrives=True,
+            ).execute()
+            mime_type = meta.get('mimeType', '')
+
+        if mime_type in GOOGLE_EXPORT_MAP:
+            export_mime, ext = GOOGLE_EXPORT_MAP[mime_type]
+            request = self.service.files().export_media(
+                fileId=file_id, mimeType=export_mime,
+            )
+            return request, ext
+
+        if mime_type.startswith('application/vnd.google-apps.'):
+            raise ValueError(f'未対応のGoogle形式ファイルです: {mime_type}')
 
         request = self.service.files().get_media(
             fileId=file_id, supportsAllDrives=True,
         )
+        return request, None
+
+    def download_file(
+        self, file_id: str, dest_path: str | Path, mime_type: str | None = None,
+    ) -> Path:
+        """ファイルをダウンロード。Google形式は自動でOffice形式にエクスポート。"""
+        dest = Path(dest_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        request, export_ext = self._build_download_request(file_id, mime_type)
+        if export_ext and dest.suffix.lower() != export_ext:
+            dest = dest.with_suffix(export_ext)
+
         with open(dest, 'wb') as f:
             downloader = MediaIoBaseDownload(f, request)
             done = False
@@ -124,11 +168,9 @@ class DriveClient:
         logger.info(f'ダウンロード完了: {dest}')
         return dest
 
-    def download_to_bytes(self, file_id: str) -> bytes:
+    def download_to_bytes(self, file_id: str, mime_type: str | None = None) -> bytes:
         """ファイルをバイト列としてダウンロード（一時ファイル不要）"""
-        request = self.service.files().get_media(
-            fileId=file_id, supportsAllDrives=True,
-        )
+        request, _ = self._build_download_request(file_id, mime_type)
         buffer = io.BytesIO()
         downloader = MediaIoBaseDownload(buffer, request)
         done = False

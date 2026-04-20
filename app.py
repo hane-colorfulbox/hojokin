@@ -730,8 +730,10 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 saved = []
                 for f in drive_files_to_download:
                     dest = work_dir / f['name']
-                    client.download_file(f['id'], dest)
-                    saved.append(f['name'])
+                    saved_path = client.download_file(
+                        f['id'], dest, mime_type=f.get('mimeType'),
+                    )
+                    saved.append(saved_path.name)
                 st.caption(f'{len(saved)}件のファイルをダウンロードしました')
         else:
             saved = save_uploaded_files(uploaded_files, work_dir)
