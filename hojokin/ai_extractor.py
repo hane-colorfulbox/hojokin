@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
+from typing import Callable, Optional
 
 from .models import (
     CompanyInfo, FinancialData, TaxCertificate,
@@ -16,6 +18,30 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── リトライ設定 ──
+# 初回+2回リトライ = 最大3回試行、バックオフは 2s → 5s
+MAX_API_ATTEMPTS = 3
+API_BACKOFF_SECONDS = [2, 5]
+
+# リトライ対象のHTTPステータス（APIStatusError系の一時的失敗）
+# 422: "context reduction is suggested" 等のflakyエラー
+# 429: rate_limit
+# 500/502/503/504: サーバ側の一時障害
+# 529: overloaded_error
+RETRYABLE_STATUS_CODES = {422, 429, 500, 502, 503, 504, 529}
+
+# 残高切れ判定用の文字列（400 invalid_request_error の message に含まれる）
+CREDIT_BALANCE_MARKER = 'credit balance is too low'
+
+# 進捗コールバックの型: (attempt, max_attempts, wait_seconds, error_summary) -> None
+RetryCallback = Callable[[int, int, float, str], None]
+
+
+class APICreditExhaustedError(RuntimeError):
+    """API残高切れ（400 credit_balance_too_low）を表す専用例外"""
+    pass
 
 
 # ── プロンプトテンプレート ──
@@ -277,7 +303,12 @@ class StubExtractor(BaseExtractor):
 class ClaudeExtractor(BaseExtractor):
     """Claude API による実データ抽出"""
 
-    def __init__(self, api_key: str, model: str = 'claude-sonnet-4-6'):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = 'claude-sonnet-4-6',
+        retry_callback: Optional[RetryCallback] = None,
+    ):
         try:
             import anthropic
         except ImportError:
@@ -285,7 +316,86 @@ class ClaudeExtractor(BaseExtractor):
 
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
+        self.retry_callback = retry_callback
         logger.info(f'Claude API 初期化完了 (model={model})')
+
+    def _messages_create_with_retry(self, *, caller: str, stats: str, **kwargs):
+        """messages.create を指数バックオフ付きで呼び出す。
+
+        - 422/429/5xx/529/timeout/connection エラーは最大3回まで再試行
+        - 400 credit_balance_too_low は APICreditExhaustedError に変換して即失敗
+        - その他の 400/401/403/404/413 は即失敗
+        - 再試行時は retry_callback(attempt, max_attempts, wait, err_summary) を呼ぶ
+        """
+        import anthropic
+
+        last_error: Optional[Exception] = None
+        for attempt in range(1, MAX_API_ATTEMPTS + 1):
+            try:
+                return self.client.messages.create(**kwargs)
+
+            except anthropic.BadRequestError as e:
+                # 400: 残高切れだけは専用例外に、それ以外は即失敗（リトライしても無駄）
+                if CREDIT_BALANCE_MARKER in str(e).lower():
+                    logger.error(f'[API残高切れ] caller={caller} {stats}')
+                    raise APICreditExhaustedError(
+                        'APIの残高が不足しています。村上さんにチャージを依頼してください。'
+                    ) from e
+                logger.error(f'[API失敗/400] caller={caller} {stats} error={e}')
+                raise
+
+            except (anthropic.AuthenticationError,
+                    anthropic.PermissionDeniedError,
+                    anthropic.NotFoundError) as e:
+                # 401/403/404: 設定ミス系、リトライ無意味
+                logger.error(f'[API失敗/非リトライ] caller={caller} {stats} error={type(e).__name__}: {e}')
+                raise
+
+            except anthropic.APIStatusError as e:
+                # 422/429/5xx/529 などステータスコード付きエラー
+                status = getattr(e, 'status_code', None)
+                if status in RETRYABLE_STATUS_CODES and attempt < MAX_API_ATTEMPTS:
+                    last_error = e
+                    wait = API_BACKOFF_SECONDS[attempt - 1]
+                    err_summary = f'{status} {type(e).__name__}'
+                    logger.warning(
+                        f'[API再試行] caller={caller} {attempt}/{MAX_API_ATTEMPTS} '
+                        f'wait={wait}s error={err_summary}: {e}'
+                    )
+                    if self.retry_callback:
+                        try:
+                            self.retry_callback(attempt, MAX_API_ATTEMPTS, wait, err_summary)
+                        except Exception as cb_err:
+                            logger.warning(f'retry_callback実行失敗: {cb_err}')
+                    time.sleep(wait)
+                    continue
+                logger.error(f'[API失敗/確定] caller={caller} {stats} status={status} error={e}')
+                raise
+
+            except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
+                # ネットワーク系の一時障害もリトライ
+                if attempt < MAX_API_ATTEMPTS:
+                    last_error = e
+                    wait = API_BACKOFF_SECONDS[attempt - 1]
+                    err_summary = type(e).__name__
+                    logger.warning(
+                        f'[API再試行] caller={caller} {attempt}/{MAX_API_ATTEMPTS} '
+                        f'wait={wait}s error={err_summary}: {e}'
+                    )
+                    if self.retry_callback:
+                        try:
+                            self.retry_callback(attempt, MAX_API_ATTEMPTS, wait, err_summary)
+                        except Exception as cb_err:
+                            logger.warning(f'retry_callback実行失敗: {cb_err}')
+                    time.sleep(wait)
+                    continue
+                logger.error(f'[API失敗/確定] caller={caller} {stats} error={e}')
+                raise
+
+        # ループを抜けた = リトライ全敗（通常到達しない。安全網）
+        if last_error:
+            raise last_error
+        raise RuntimeError('API呼出しリトライが想定外に終了しました')
 
     def _call_api(self, images: list[bytes], prompt: str, max_tokens: int = 4096) -> str:
         """画像+プロンプトでAPIを呼び出し、テキストを返す"""
@@ -313,29 +423,19 @@ class ClaudeExtractor(BaseExtractor):
         raw_max = max(raw_sizes) / 1_000_000 if raw_sizes else 0
         prompt_chars = len(prompt)
         caller = traceback.extract_stack()[-2].name  # extract_tax 等、どのメソッドからの呼び出しか
-        logger.warning(
-            f'[API送信] caller={caller} '
-            f'images={n}枚 '
-            f'raw合計={raw_mb:.2f}MB raw最大={raw_max:.2f}MB '
-            f'base64合計={b64_mb:.2f}MB '
-            f'prompt={prompt_chars}chars '
-            f'max_tokens={max_tokens}'
+        stats = (
+            f'images={n}枚 raw合計={raw_mb:.2f}MB raw最大={raw_max:.2f}MB '
+            f'base64合計={b64_mb:.2f}MB prompt={prompt_chars}chars max_tokens={max_tokens}'
         )
+        logger.warning(f'[API送信] caller={caller} {stats}')
 
-        try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                messages=[{'role': 'user', 'content': content}],
-            )
-        except Exception as e:
-            # 失敗時も同じ統計をエラーと紐付けて残す（後から原因を突き止められるように）
-            logger.error(
-                f'[API失敗] caller={caller} '
-                f'images={n}枚 base64合計={b64_mb:.2f}MB prompt={prompt_chars}chars '
-                f'error={type(e).__name__}: {e}'
-            )
-            raise
+        response = self._messages_create_with_retry(
+            caller=caller,
+            stats=stats,
+            model=self.model,
+            max_tokens=max_tokens,
+            messages=[{'role': 'user', 'content': content}],
+        )
 
         text = response.content[0].text
         logger.warning(
@@ -528,12 +628,21 @@ class ClaudeExtractor(BaseExtractor):
         )
 
         # AI判断はテキストのみ（画像なし）
-        response = self.client.messages.create(
+        stats = f'images=0枚 prompt={len(prompt)}chars max_tokens=4096'
+        logger.warning(f'[API送信] caller=generate_ai_judgment {stats}')
+        response = self._messages_create_with_retry(
+            caller='generate_ai_judgment',
+            stats=stats,
             model=self.model,
             max_tokens=4096,
             messages=[{'role': 'user', 'content': prompt}],
         )
         text = response.content[0].text
+        logger.warning(
+            f'[API成功] caller=generate_ai_judgment '
+            f'応答={len(text)}chars '
+            f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
+        )
         d = self._parse_json(text)
 
         # 最低賃金はconfig.pyから取得
@@ -557,11 +666,14 @@ class ClaudeExtractor(BaseExtractor):
         )
 
 
-def create_extractor(api_key: str = '') -> BaseExtractor:
+def create_extractor(
+    api_key: str = '',
+    retry_callback: Optional[RetryCallback] = None,
+) -> BaseExtractor:
     """APIキーの有無に応じて適切なExtractorを返す"""
     if api_key:
         logger.info('Claude API Extractor を使用')
-        return ClaudeExtractor(api_key)
+        return ClaudeExtractor(api_key, retry_callback=retry_callback)
     else:
         logger.warning('APIキー未設定 → StubExtractor を使用（PDF読取不可）')
         return StubExtractor()
