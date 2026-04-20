@@ -223,7 +223,17 @@ def run_processing(
     # Extractor作成（加点判定のみの場合はAPI不要）
     extractor = None
     if task_type in ('application', 'wage', 'all'):
-        extractor = create_extractor(CLAUDE_API_KEY)
+        def _on_api_retry(attempt: int, max_attempts: int, wait: float, err: str):
+            # Anthropic APIの一時エラー（422/429/5xx/529/timeout等）時の再試行をユーザーに通知
+            try:
+                st.toast(
+                    f'API一時エラー ({err}) — {wait}秒後に再試行します（試行 {attempt}/{max_attempts}）',
+                    icon='⚠️',
+                )
+            except Exception:
+                pass  # UI表示に失敗しても処理は継続
+
+        extractor = create_extractor(CLAUDE_API_KEY, retry_callback=_on_api_retry)
 
     if task_type in ('application', 'all'):
         if progress_callback:
