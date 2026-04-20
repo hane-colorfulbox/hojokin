@@ -290,10 +290,15 @@ class ClaudeExtractor(BaseExtractor):
     def _call_api(self, images: list[bytes], prompt: str, max_tokens: int = 4096) -> str:
         """画像+プロンプトでAPIを呼び出し、テキストを返す"""
         import base64
+        import traceback
         content = []
 
+        raw_sizes = []
+        b64_sizes = []
         for img in images:
             b64 = base64.standard_b64encode(img).decode('ascii')
+            raw_sizes.append(len(img))
+            b64_sizes.append(len(b64))
             content.append({
                 'type': 'image',
                 'source': {'type': 'base64', 'media_type': 'image/png', 'data': b64}
@@ -301,14 +306,43 @@ class ClaudeExtractor(BaseExtractor):
 
         content.append({'type': 'text', 'text': prompt})
 
-        response = self.client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            messages=[{'role': 'user', 'content': content}],
+        # 送信直前のペイロード統計（422/413/529 の原因切り分け用）
+        n = len(images)
+        raw_mb = sum(raw_sizes) / 1_000_000
+        b64_mb = sum(b64_sizes) / 1_000_000
+        raw_max = max(raw_sizes) / 1_000_000 if raw_sizes else 0
+        prompt_chars = len(prompt)
+        caller = traceback.extract_stack()[-2].name  # extract_tax 等、どのメソッドからの呼び出しか
+        logger.warning(
+            f'[API送信] caller={caller} '
+            f'images={n}枚 '
+            f'raw合計={raw_mb:.2f}MB raw最大={raw_max:.2f}MB '
+            f'base64合計={b64_mb:.2f}MB '
+            f'prompt={prompt_chars}chars '
+            f'max_tokens={max_tokens}'
         )
 
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{'role': 'user', 'content': content}],
+            )
+        except Exception as e:
+            # 失敗時も同じ統計をエラーと紐付けて残す（後から原因を突き止められるように）
+            logger.error(
+                f'[API失敗] caller={caller} '
+                f'images={n}枚 base64合計={b64_mb:.2f}MB prompt={prompt_chars}chars '
+                f'error={type(e).__name__}: {e}'
+            )
+            raise
+
         text = response.content[0].text
-        logger.debug(f'API応答: {len(text)} chars, {response.usage.input_tokens}+{response.usage.output_tokens} tokens')
+        logger.warning(
+            f'[API成功] caller={caller} '
+            f'応答={len(text)}chars '
+            f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
+        )
         return text
 
     def _parse_json(self, text: str) -> dict | list:
