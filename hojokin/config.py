@@ -233,6 +233,11 @@ MAPPING_2026_TSUJO = TemplateMapping(
         'min_wage': 213,
         'min_wage_hourly': 214,
         'employee_count_fte': 215,
+        # 給与支給総額の計画値（C216:C219）
+        'wage_total_base': 216,       # 直近決算期の給与支給総額
+        'wage_total_y1': 217,         # 1年目計画（2025/4〜2026/3）
+        'wage_total_y2': 218,         # 2年目計画（2026/4〜2027/3）
+        'wage_total_y3': 219,         # 3年目計画（2027/4〜2028/3）
         'wage_raise_declaration': 222,
         'wage_raise_amount': 223,
         'wage_raise_method': 224,
