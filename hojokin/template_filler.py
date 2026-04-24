@@ -55,11 +55,17 @@ def clear_manual_cells(wb: openpyxl.Workbook, mapping: TemplateMapping) -> int:
     if '申請内容' in wb.sheetnames:
         ws_s = wb['申請内容']
         start, end = mapping.shinsei_clear_range
+        preserve = set(mapping.preserve_rows)
         for row in ws_s.iter_rows(min_row=start, max_row=end):
             cell_c = row[2] if len(row) > 2 else None
-            if cell_c and cell_c.value is not None and not is_formula(cell_c.value):
-                cell_c.value = None
-                cleared += 1
+            if cell_c is None or cell_c.value is None:
+                continue
+            if cell_c.row in preserve:
+                continue
+            if is_formula(cell_c.value):
+                continue
+            cell_c.value = None
+            cleared += 1
 
     # 給与計算シート: マッピング対象セル
     if mapping.kyuyo_sheet_name in wb.sheetnames:
@@ -373,6 +379,20 @@ def fill_template(
                 val = round(wage_plan[plan_key])
                 _safe_write_cell(ws_shinsei, m[field], 3, val)
                 logger.info(f'STEP 3.5: 行{m[field]:3d} [{label}]: {val:,}円')
+
+    # STEP 3.6: 生産性指標シートの総労働時間(B40)を賃金台帳実績で上書き（通常枠）
+    # 通常枠の「事業者あたりの総労働時間」は B38*B39（人数×平均時間）の式だが、
+    # 賃金台帳の実績がある場合は基準年だけ直接値で上書きする。C40-E40(計画年次)は
+    # 既存の `=C38*C39` 等の式を保持する。
+    if (
+        wage_plan
+        and 'total_annual_hours' in wage_plan
+        and '生産性指標給与支給総額計算' in wb.sheetnames
+    ):
+        ws_prod = wb['生産性指標給与支給総額計算']
+        hours = wage_plan['total_annual_hours']
+        _safe_write_cell(ws_prod, 40, 2, hours)
+        logger.info(f'STEP 3.6: 生産性指標 B40 [総労働時間]: {hours:,.1f}時間')
 
     # STEP 4: 空セル確認
     empty = check_empty_cells(wb)
