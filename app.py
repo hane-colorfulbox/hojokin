@@ -630,11 +630,11 @@ if data_source == 'Google Drive':
     if task_type in ('application', 'all'):
         st.markdown('---')
         template_file = st.file_uploader(
-            '申請フォーマット（必須）',
+            '申請フォーマット（任意）',
             accept_multiple_files=False,
             type=['xlsx'],
             key='template_uploader_drive',
-            help='ツール名を選択済みのExcel（【原本_法人】企業名_○○枠_法人2026.xlsx 等）をアップロードしてください。',
+            help='カスタマイズした原本を使う場合のみアップロード。未アップロード時はツール同梱の原本を使用します。',
         )
         if template_file is not None:
             st.caption(f'申請フォーマット: `{template_file.name}`')
@@ -716,17 +716,14 @@ else:
         _render_file_check_result(upload_analysis, len(uploaded_files))
 
     # 申請フォーマット（テンプレート原本）
-    # ツール登録が進行中で都度更新が入るため、毎回アップロードされたものを使う。
-    # 申請書作成を伴うタスク(application / all)でのみ必須。
     if task_type in ('application', 'all'):
         st.markdown('---')
         template_file = st.file_uploader(
-            '申請フォーマット（必須）',
+            '申請フォーマット（任意）',
             accept_multiple_files=False,
             type=['xlsx'],
             key='template_uploader',
-            help='ツール名を選択済みのExcel（【原本_法人】企業名_○○枠_法人2026.xlsx 等）をアップロードしてください。'
-                 'アップロードされたファイルをそのままベースに書き込みます。',
+            help='カスタマイズした原本を使う場合のみアップロード。未アップロード時はツール同梱の原本を使用します。',
         )
         if template_file is not None:
             st.caption(f'申請フォーマット: `{template_file.name}`')
@@ -751,7 +748,6 @@ has_drive_required = (
     if has_drive_files else False
 )
 
-template_required = task_type in ('application', 'all')
 has_template = template_file is not None
 
 if data_source == 'Google Drive':
@@ -759,15 +755,11 @@ if data_source == 'Google Drive':
         can_run = bool(company_name) and has_drive_files and bool(prefecture)
     else:
         can_run = bool(company_name) and has_drive_files
-        if template_required:
-            can_run = can_run and has_template
 else:
     if task_type == 'bonus':
         can_run = bool(company_name) and has_files and bool(prefecture)
     else:
         can_run = bool(company_name) and has_files
-        if template_required:
-            can_run = can_run and has_template
 
 if not company_name:
     st.warning('⬅️ サイドバーで会社名を入力してください')
@@ -780,8 +772,6 @@ elif data_source != 'Google Drive' and not has_files:
 elif (data_source == 'Google Drive' and not has_drive_required) \
         or (data_source != 'Google Drive' and not has_required):
     st.warning('⬆️ 必須ファイルが不足しています。ファイル判別結果を確認してください')
-elif template_required and not has_template:
-    st.warning('⬆️ 申請フォーマット（Excel原本）をアップロードしてください')
 else:
     source_label = 'Google Drive' if data_source == 'Google Drive' else 'アップロード'
     if task_type == 'bonus':
