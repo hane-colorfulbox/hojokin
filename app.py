@@ -444,6 +444,105 @@ with st.sidebar:
     st.caption('所要時間: 約1〜3分')
     st.caption('API利用料: 約7〜15円/社')
 
+# ── ファイル判別ヘルパー（ローカル/Drive 共通） ──
+_FILE_CATEGORIES = [
+    ('hearing',     'ヒアリングシート',        ['ヒアリング']),
+    ('registry',    '履歴事項全部証明書',      ['履歴事項']),
+    ('pl',          '損益計算書 / 決算報告書', ['損益計算書', '決算報告書', '決算書']),
+    ('cost_report', '製造原価報告書',          ['製造原価報告書', '原価報告書']),
+    ('tax',         '納税証明書',              ['納税証明']),
+    ('estimate',    '見積書',                  ['見積']),
+    ('wage_report', '賃金状況報告シート',      ['賃金状況報告']),
+    ('wage_ledger', '賃金台帳',                ['賃金台帳']),
+]
+
+_REQUIRED_CATS_BY_TASK = {
+    'application': {'hearing', 'registry', 'pl'},
+    'wage':        {'wage_ledger'},
+    'bonus':       {'wage_ledger'},
+    'all':         {'hearing', 'registry', 'pl'},
+}
+
+
+def _analyze_files(file_names, task):
+    """ファイル名リストからタスク別の判別結果を計算"""
+    required_cats = _REQUIRED_CATS_BY_TASK.get(task, set())
+
+    detected = {cat: [] for cat, _, _ in _FILE_CATEGORIES}
+    unmatched = []
+    for name in file_names:
+        matched = False
+        for cat, _, keywords in _FILE_CATEGORIES:
+            if any(kw in name for kw in keywords):
+                detected[cat].append(name)
+                matched = True
+                break
+        if not matched:
+            unmatched.append(name)
+
+    checks = [
+        (cat, display, keywords, cat in required_cats)
+        for cat, display, keywords in _FILE_CATEGORIES
+    ]
+    missing_required = [
+        display for cat, display, _, required in checks
+        if required and not detected[cat]
+    ]
+    return {
+        'checks': checks,
+        'detected': detected,
+        'unmatched': unmatched,
+        'missing_required': missing_required,
+        'all_required_ok': len(missing_required) == 0,
+    }
+
+
+def _render_file_check_result(result, total_count):
+    """判別結果の表示（ローカル/Drive 共通）"""
+    if result['all_required_ok']:
+        st.success(
+            f'ファイルチェック OK — 必須ファイルがすべて揃っています'
+            f'（{total_count}件）'
+        )
+    else:
+        st.error(
+            f'必須ファイルが不足しています: '
+            f'**{"、".join(result["missing_required"])}**'
+        )
+
+    with st.expander('ファイル判別結果（詳細）', expanded=not result['all_required_ok']):
+        for cat, display, _, required in result['checks']:
+            files = result['detected'][cat]
+            if files:
+                st.markdown(f'✅ **{display}** → `{"`, `".join(files)}`')
+            elif required:
+                st.markdown(
+                    f'❌ **{display}** — **未検出（必須）** '
+                    'ファイル名にキーワードが含まれているか確認してください'
+                )
+            else:
+                st.markdown(f'➖ {display} — なし（任意）')
+
+        if result['unmatched']:
+            st.markdown('---')
+            st.markdown('**判別できなかったファイル:**')
+            for name in result['unmatched']:
+                st.markdown(f'&ensp; ⚠️ `{name}`（キーワードなし → 処理対象外）')
+
+
+def _check_required_by_names(file_names, task):
+    """タスクに応じた必須ファイルが揃っているかチェック"""
+    if not file_names:
+        return False
+    required_cats = _REQUIRED_CATS_BY_TASK.get(task, set())
+    for cat, _, keywords in _FILE_CATEGORIES:
+        if cat not in required_cats:
+            continue
+        if not any(any(kw in name for kw in keywords) for name in file_names):
+            return False
+    return True
+
+
 # ── ファイル入力 ──
 st.markdown(
     '<span class="step-number">1</span>'
@@ -498,12 +597,15 @@ if data_source == 'Google Drive':
             all_files = _list_folder_files(drive_folder_id)
 
             if all_files:
-                st.success(f'{len(all_files)}件のファイルが見つかりました')
-                with st.expander('ファイル一覧', expanded=True):
+                drive_files_to_download = all_files
+
+                drive_analysis = _analyze_files([f['name'] for f in all_files], task_type)
+                _render_file_check_result(drive_analysis, len(all_files))
+
+                with st.expander('ファイル一覧（Drive上の場所）', expanded=False):
                     for f in all_files:
                         loc = f.get('folder_name', 'ルート')
                         st.text(f'  [{loc}] {f["name"]}')
-                drive_files_to_download = all_files
 
                 csv_wage_ledgers = [
                     f['name'] for f in all_files
@@ -596,64 +698,8 @@ else:
 
     # アップロード済みファイルのチェックリスト（タスク別に必須/任意を切り替え）
     if uploaded_files:
-        # タスク別の必須カテゴリ
-        _REQUIRED_BY_TASK = {
-            'application': {'hearing', 'registry', 'pl'},
-            'wage':        {'wage_ledger'},
-            'bonus':       {'wage_ledger'},
-            'all':         {'hearing', 'registry', 'pl'},
-        }
-        _required_cats = _REQUIRED_BY_TASK.get(task_type, set())
-
-        FILE_CHECKS = [
-            ('hearing',     'ヒアリングシート',     ['ヒアリング'],                          'hearing' in _required_cats),
-            ('registry',    '履歴事項全部証明書',   ['履歴事項'],                            'registry' in _required_cats),
-            ('pl',          '損益計算書 / 決算報告書', ['損益計算書', '決算報告書', '決算書'], 'pl' in _required_cats),
-            ('cost_report', '製造原価報告書',       ['製造原価報告書', '原価報告書'],         False),
-            ('tax',         '納税証明書',           ['納税証明'],                            False),
-            ('estimate',    '見積書',               ['見積'],                                False),
-            ('wage_report', '賃金状況報告シート',   ['賃金状況報告'],                        'wage_report' in _required_cats),
-            ('wage_ledger', '賃金台帳',             ['賃金台帳'],                            'wage_ledger' in _required_cats),
-        ]
-
-        detected = {cat: [] for cat, *_ in FILE_CHECKS}
-        unmatched = []
-        for f in uploaded_files:
-            matched = False
-            for cat, _, keywords, _ in FILE_CHECKS:
-                if any(kw in f.name for kw in keywords):
-                    detected[cat].append(f.name)
-                    matched = True
-                    break
-            if not matched:
-                unmatched.append(f.name)
-
-        missing_required = [
-            display for cat, display, _, required in FILE_CHECKS
-            if required and not detected[cat]
-        ]
-        all_required_ok = len(missing_required) == 0
-
-        if all_required_ok:
-            st.success(f'ファイルチェック OK — 必須ファイルがすべて揃っています（{len(uploaded_files)}件アップロード済み）')
-        else:
-            st.error(f'必須ファイルが不足しています: **{"、".join(missing_required)}**')
-
-        with st.expander('ファイル判別結果（詳細）', expanded=not all_required_ok):
-            for cat, display, _, required in FILE_CHECKS:
-                files = detected[cat]
-                if files:
-                    st.markdown(f'✅ **{display}** → `{"`, `".join(files)}`')
-                elif required:
-                    st.markdown(f'❌ **{display}** — **未検出（必須）** ファイル名にキーワードが含まれているか確認してください')
-                else:
-                    st.markdown(f'➖ {display} — なし（任意）')
-
-            if unmatched:
-                st.markdown('---')
-                st.markdown('**判別できなかったファイル:**')
-                for name in unmatched:
-                    st.markdown(f'&ensp; ⚠️ `{name}`（キーワードなし → 処理対象外）')
+        upload_analysis = _analyze_files([f.name for f in uploaded_files], task_type)
+        _render_file_check_result(upload_analysis, len(uploaded_files))
 
     # テンプレート原本（ツール/に同梱済みのため通常はアップロード不要）
     template_file = None
@@ -665,40 +711,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 必須ファイルチェック（タスク別）
-_REQUIRED_KEYWORDS_BY_TASK = {
-    'application': {
-        'hearing': ['ヒアリング'],
-        'registry': ['履歴事項'],
-        'pl': ['損益計算書', '決算報告書', '決算書'],
-    },
-    'wage': {
-        'wage_ledger': ['賃金台帳'],
-    },
-    'bonus': {
-        'wage_ledger': ['賃金台帳'],
-    },
-    'all': {
-        'hearing': ['ヒアリング'],
-        'registry': ['履歴事項'],
-        'pl': ['損益計算書', '決算報告書', '決算書'],
-    },
-}
-
-def _check_required(files, task):
-    """タスクに応じた必須ファイルが全て揃っているかチェック"""
-    if not files:
-        return False
-    required = _REQUIRED_KEYWORDS_BY_TASK.get(task, {})
-    names = [f.name for f in files]
-    for cat, keywords in required.items():
-        if not any(any(kw in name for kw in keywords) for name in names):
-            return False
-    return True
-
 has_files = bool(uploaded_files)
 has_drive_files = bool(drive_files_to_download)
-has_required = _check_required(uploaded_files, task_type) if has_files else False
+has_required = (
+    _check_required_by_names([f.name for f in uploaded_files], task_type)
+    if has_files else False
+)
+has_drive_required = (
+    _check_required_by_names([f['name'] for f in drive_files_to_download], task_type)
+    if has_drive_files else False
+)
 
 if data_source == 'Google Drive':
     if task_type == 'bonus':
@@ -719,7 +741,8 @@ elif data_source == 'Google Drive' and not has_drive_files:
     st.warning('⬅️ サイドバーで顧客フォルダを選択してください')
 elif data_source != 'Google Drive' and not has_files:
     st.warning('⬆️ 資料ファイルをアップロードしてください')
-elif data_source != 'Google Drive' and not has_required:
+elif (data_source == 'Google Drive' and not has_drive_required) \
+        or (data_source != 'Google Drive' and not has_required):
     st.warning('⬆️ 必須ファイルが不足しています。ファイル判別結果を確認してください')
 else:
     source_label = 'Google Drive' if data_source == 'Google Drive' else 'アップロード'
