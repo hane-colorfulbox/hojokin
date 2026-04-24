@@ -25,3 +25,6 @@ output/
 *.log
 .DS_Store
 Thumbs.db
+
+# ローカル検証用スクラップ
+_debug/
