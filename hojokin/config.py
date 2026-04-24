@@ -95,6 +95,10 @@ class TemplateMapping:
     # 個人事業主向けテンプレートか（役員セクションなし、固定値あり）
     is_kojin: bool = False
 
+    # 申請内容シートで「クリアせず、AIも書き込まない」行
+    # （テンプレの既定値を温存したい行。通常枠173/175 のITツール投資/活用状況など）
+    preserve_rows: list[int] = field(default_factory=list)
+
 
 # ── 2026 通常枠テンプレート ──
 # テンプレート原本: ツール/【原本_法人】企業名_通常枠_法人2026.xlsx
@@ -219,9 +223,9 @@ MAPPING_2026_TSUJO = TemplateMapping(
         'management_intent': 168,
         'strength': 170,
         'weakness': 172,
-        'it_investment_status': 173,
+        # 173 (IT投資状況) / 175 (IT活用状況) はテンプレ既定値を温存するため
+        # マッピングから除外し preserve_rows でクリア対象からも外している
         'it_investment_amount': 174,
-        'it_utilization_status': 175,
         'it_investment_process': 177,
         'security_status': 178,
         'improvement_process': 179,
@@ -258,6 +262,7 @@ MAPPING_2026_TSUJO = TemplateMapping(
     },
     shinsei_clear_range=(5, 270),
     tenki_text_range=(15, 26),
+    preserve_rows=[173, 175],
 )
 
 # ── 2026 インボイス枠 ──
@@ -379,9 +384,9 @@ MAPPING_2026_INVOICE = TemplateMapping(
         'management_intent': 160,
         'security_status': 161,
         'future_goals': 162,
-        'it_investment_status': 163,
-        'it_utilization_scope': 164,
-        'invoice_related_work': 165,
+        # 163 (インボイスに対するIT投資状況) / 164 (IT電子化範囲) /
+        # 165 (インボイス対応に資する業務) はツール選択の関数駆動 or ヒアリングで
+        # 埋める既定値を温存するため、マッピングから除外 + preserve_rows に設定。
 
         # 計画数値入力 ※+9
         # 給与支給総額の計画値（C200:C204）
@@ -412,6 +417,7 @@ MAPPING_2026_INVOICE = TemplateMapping(
     },
     shinsei_clear_range=(5, 270),
     tenki_text_range=(16, 26),
+    preserve_rows=[163, 164, 165],
 )
 
 
@@ -515,9 +521,9 @@ MAPPING_2026_INVOICE_KOJIN = TemplateMapping(
         'management_intent': 130,
         'security_status': 131,
         'future_goals': 132,
-        'it_investment_status': 133,
-        'it_utilization_scope': 134,
-        'invoice_related_work': 135,
+        # 133/134/135 は法人版の 163/164/165 に相当。
+        # ツール選択の関数駆動 or ヒアリング入力の既定値を温存するため、
+        # マッピングから除外 + preserve_rows に設定。
 
         # 計画数値入力
         'min_wage': 170,              # 主たる事業場の所在地/地域別最低賃金
@@ -548,6 +554,7 @@ MAPPING_2026_INVOICE_KOJIN = TemplateMapping(
     shinsei_clear_range=(5, 230),
     tenki_text_range=(16, 26),
     is_kojin=True,
+    preserve_rows=[133, 134, 135],
 )
 
 

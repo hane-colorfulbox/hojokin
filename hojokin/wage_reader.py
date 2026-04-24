@@ -71,6 +71,9 @@ class WageEmployee:
     monthly_hourly_rates: list[float | None] = field(
         default_factory=lambda: [None] * 12
     )
+    monthly_hours: list[float | None] = field(
+        default_factory=lambda: [None] * 12
+    )
 
     @property
     def is_full_year(self) -> bool:
@@ -495,6 +498,7 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
     # 月別データを抽出
     monthly_wages = [None] * 12
     monthly_hourly = [None] * 12
+    monthly_hours_list: list[float | None] = [None] * 12
 
     for m_idx, col in month_cols.items():
         # 支給合計
@@ -505,6 +509,14 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
                     monthly_wages[m_idx] = float(val)
                 except (ValueError, TypeError):
                     pass
+
+        # 月別の労働時間
+        if hours_row:
+            hours_val = ws.cell(hours_row, col).value
+            if hours_val is not None:
+                h = _parse_hours_str(hours_val)
+                if h > 0:
+                    monthly_hours_list[m_idx] = h
 
         # 時給計算
         if base_wage_row and hours_row:
@@ -523,16 +535,9 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
     valid_hourly = [h for h in monthly_hourly if h is not None]
     avg_hourly = sum(valid_hourly) / len(valid_hourly) if valid_hourly else 0
 
-    # 平均労働時間
-    total_hours = []
-    if hours_row:
-        for m_idx, col in month_cols.items():
-            val = ws.cell(hours_row, col).value
-            if val is not None:
-                h = _parse_hours_str(val)
-                if h > 0:
-                    total_hours.append(h)
-    avg_hours = sum(total_hours) / len(total_hours) if total_hours else 0
+    # 平均労働時間（月別データがあればそこから算出）
+    valid_hours = [h for h in monthly_hours_list if h is not None and h > 0]
+    avg_hours = sum(valid_hours) / len(valid_hours) if valid_hours else 0
 
     # 雇用形態の推定（基本給(時給)行にデータがあればパート系）
     emp_type = ''
@@ -554,6 +559,7 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
         hourly_rate=round(avg_hourly, 1),
         monthly_wages=monthly_wages,
         monthly_hourly_rates=monthly_hourly,
+        monthly_hours=monthly_hours_list,
     )
 
 
@@ -595,6 +601,7 @@ def _emp_dict_to_list(emp_data: dict) -> list[WageEmployee]:
             hourly_rate=round(avg_hourly, 1),
             monthly_wages=data['monthly_wages'],
             monthly_hourly_rates=data['monthly_hourly_rates'],
+            monthly_hours=data['monthly_hours'],
         ))
     return employees
 
@@ -678,7 +685,9 @@ def export_wage_ledger_summary(
     """
     賃金台帳から読み取ったデータを一覧Excelに出力（チェック用）
 
-    出力内容: 従業員名、雇用形態、月ごとの課税対象額、月平均労働時間、年間合計
+    出力内容:
+      左ブロック  : 月別課税対象額（12か月）+ 年間合計賃金
+      右ブロック  : 月別労働時間（12か月）+ 年間合計時間 + 月平均労働時間
     """
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
     from openpyxl.utils import get_column_letter
@@ -689,8 +698,10 @@ def export_wage_ledger_summary(
 
     # スタイル定義
     header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+    group_fill = PatternFill(start_color='8FAADC', end_color='8FAADC', fill_type='solid')
     header_font_white = Font(bold=True, size=10, color='FFFFFF')
     number_fmt = '#,##0'
+    hours_fmt = '#,##0.0'
     thin_border = Border(
         left=Side(style='thin'),
         right=Side(style='thin'),
@@ -699,19 +710,47 @@ def export_wage_ledger_summary(
     )
 
     # タイトル行
-    row = 1
     title = '賃金台帳 読取データ一覧'
     if company_name:
         title = f'{company_name} — {title}'
-    ws.cell(row=row, column=1, value=title).font = Font(bold=True, size=12)
-    ws.cell(row=row + 1, column=1, value='※この一覧は賃金台帳から機械的に読み取ったデータです（AI生成ではありません）')
-    ws.cell(row=row + 1, column=1).font = Font(size=9, color='666666')
+    ws.cell(row=1, column=1, value=title).font = Font(bold=True, size=12)
+    ws.cell(row=2, column=1, value='※この一覧は賃金台帳から機械的に読み取ったデータです（AI生成ではありません）')
+    ws.cell(row=2, column=1).font = Font(size=9, color='666666')
 
-    # ヘッダー
-    row = 4
-    headers = ['No', '従業員名', '雇用形態'] + MONTH_NAMES + ['年間合計', '月平均労働時間']
+    # 列レイアウト
+    # 1: No, 2: 従業員名, 3: 雇用形態,
+    # 4-15: 1月〜12月 賃金, 16: 年間合計賃金,
+    # 17-28: 1月〜12月 時間, 29: 年間合計時間, 30: 月平均労働時間
+    wage_start = 4
+    wage_total_col = wage_start + 12  # 16
+    hours_start = wage_total_col + 1  # 17
+    hours_total_col = hours_start + 12  # 29
+    avg_hours_col = hours_total_col + 1  # 30
+
+    # グループヘッダー（4行目）
+    group_row = 4
+    ws.cell(row=group_row, column=wage_start, value='月別課税対象額（円）')
+    ws.merge_cells(start_row=group_row, start_column=wage_start,
+                   end_row=group_row, end_column=wage_total_col)
+    ws.cell(row=group_row, column=hours_start, value='月別労働時間')
+    ws.merge_cells(start_row=group_row, start_column=hours_start,
+                   end_row=group_row, end_column=avg_hours_col)
+    for c in (wage_start, hours_start):
+        cell = ws.cell(row=group_row, column=c)
+        cell.font = header_font_white
+        cell.fill = group_fill
+        cell.alignment = Alignment(horizontal='center')
+        cell.border = thin_border
+
+    # 列ヘッダー（5行目）
+    header_row = 5
+    headers = (
+        ['No', '従業員名', '雇用形態']
+        + MONTH_NAMES + ['年間合計']
+        + MONTH_NAMES + ['年間合計', '月平均']
+    )
     for c, h in enumerate(headers, 1):
-        cell = ws.cell(row=row, column=c, value=h)
+        cell = ws.cell(row=header_row, column=c, value=h)
         cell.font = header_font_white
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal='center')
@@ -719,39 +758,66 @@ def export_wage_ledger_summary(
 
     # データ行
     for i, emp in enumerate(employees):
-        r = row + 1 + i
+        r = header_row + 1 + i
         ws.cell(row=r, column=1, value=emp.no).border = thin_border
         ws.cell(row=r, column=2, value=emp.name).border = thin_border
         ws.cell(row=r, column=3, value=emp.employment_type).border = thin_border
 
-        annual_total = 0
+        annual_wage = 0.0
         for m in range(12):
-            cell = ws.cell(row=r, column=4 + m)
+            cell = ws.cell(row=r, column=wage_start + m)
             cell.border = thin_border
             val = emp.monthly_wages[m]
             if val is not None:
                 cell.value = val
                 cell.number_format = number_fmt
-                annual_total += val
+                annual_wage += val
+        wage_total_cell = ws.cell(row=r, column=wage_total_col, value=annual_wage)
+        wage_total_cell.number_format = number_fmt
+        wage_total_cell.font = Font(bold=True)
+        wage_total_cell.border = thin_border
 
-        # 年間合計
-        total_cell = ws.cell(row=r, column=16, value=annual_total)
-        total_cell.number_format = number_fmt
-        total_cell.font = Font(bold=True)
-        total_cell.border = thin_border
+        annual_hours = 0.0
+        has_any_hours = False
+        for m in range(12):
+            cell = ws.cell(row=r, column=hours_start + m)
+            cell.border = thin_border
+            val = emp.monthly_hours[m] if m < len(emp.monthly_hours) else None
+            if val is not None and val > 0:
+                cell.value = val
+                cell.number_format = hours_fmt
+                annual_hours += val
+                has_any_hours = True
 
-        # 月平均労働時間
-        hours_cell = ws.cell(row=r, column=17, value=emp.monthly_avg_hours)
-        hours_cell.number_format = '#,##0.0'
-        hours_cell.border = thin_border
+        # 年間合計時間（月別データが無ければ 月平均×月数 で代用）
+        hours_total_cell = ws.cell(row=r, column=hours_total_col)
+        hours_total_cell.border = thin_border
+        hours_total_cell.number_format = hours_fmt
+        hours_total_cell.font = Font(bold=True)
+        if has_any_hours:
+            hours_total_cell.value = round(annual_hours, 1)
+        elif emp.monthly_avg_hours > 0:
+            months_with_wage = sum(
+                1 for w in emp.monthly_wages if w is not None
+            )
+            hours_total_cell.value = round(
+                emp.monthly_avg_hours * months_with_wage, 1
+            )
+
+        avg_hours_cell = ws.cell(row=r, column=avg_hours_col,
+                                 value=emp.monthly_avg_hours)
+        avg_hours_cell.number_format = hours_fmt
+        avg_hours_cell.border = thin_border
 
     # 列幅調整
     ws.column_dimensions['A'].width = 5
     ws.column_dimensions['B'].width = 14
     ws.column_dimensions['C'].width = 14
-    for c in range(4, 17):
-        ws.column_dimensions[get_column_letter(c)].width = 12
-    ws.column_dimensions['Q'].width = 14
+    for c in range(wage_start, avg_hours_col + 1):
+        ws.column_dimensions[get_column_letter(c)].width = 11
+    ws.column_dimensions[get_column_letter(wage_total_col)].width = 13
+    ws.column_dimensions[get_column_letter(hours_total_col)].width = 13
+    ws.column_dimensions[get_column_letter(avg_hours_col)].width = 11
 
     wb.save(str(output_path))
     wb.close()

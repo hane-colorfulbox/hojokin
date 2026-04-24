@@ -424,6 +424,7 @@ def _calc_wage_plan_from_ledger(
 
         # WageEmployee → PayrollEmployee に変換
         payroll_list = []
+        total_annual_hours = 0.0
         for emp in employees_raw:
             is_officer = '役員' in emp.employment_type
             emp_type = emp.employment_type if emp.employment_type else '正社員'
@@ -434,9 +435,25 @@ def _calc_wage_plan_from_ledger(
             monthly_salary = [
                 w if w is not None else 0.0 for w in emp.monthly_wages
             ]
-            monthly_hours = []
-            if emp.monthly_avg_hours > 0:
-                monthly_hours = [emp.monthly_avg_hours] * 12
+
+            # 労働時間: 月別実績データがあればそれを優先。なければ月平均で補完
+            has_monthly_hours = any(
+                h is not None and h > 0 for h in emp.monthly_hours
+            )
+            if has_monthly_hours:
+                monthly_hours = [
+                    h if (h is not None and h > 0) else 0.0
+                    for h in emp.monthly_hours
+                ]
+            elif emp.monthly_avg_hours > 0:
+                # 月別データが取れないフォーマットは、在籍月数×月平均で概算
+                months_with_wage = sum(
+                    1 for w in emp.monthly_wages if w is not None
+                )
+                months = months_with_wage if months_with_wage > 0 else 12
+                monthly_hours = [emp.monthly_avg_hours] * months + [0.0] * (12 - months)
+            else:
+                monthly_hours = []
 
             payroll_list.append(PayrollEmployee(
                 name=emp.name,
@@ -446,6 +463,10 @@ def _calc_wage_plan_from_ledger(
                 is_officer=is_officer,
                 full_year=full_year,
             ))
+
+            # 役員を除く全従業員の年間総労働時間を集計
+            if not is_officer and monthly_hours:
+                total_annual_hours += sum(monthly_hours)
 
         result = calculate_per_capita_wage(payroll_list)
 
@@ -463,9 +484,12 @@ def _calc_wage_plan_from_ledger(
             'wage_total_y2': base * (1 + rate) ** 2,
             'wage_total_y3': base * (1 + rate) ** 3,
         }
+        if total_annual_hours > 0:
+            plan['total_annual_hours'] = round(total_annual_hours, 1)
         logger.info(
             f'給与支給総額: {base:,.0f}円 '
-            f'(従業員FTE: {result.employee_count_fte:.1f}人, 年3%成長)'
+            f'(従業員FTE: {result.employee_count_fte:.1f}人, 年3%成長, '
+            f'総労働時間: {total_annual_hours:,.0f}時間)'
         )
         return plan
 
