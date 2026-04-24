@@ -8,7 +8,14 @@
  *   1. 案件管理表（シート1）
  *   2. クラフトバンク管理表（別スプレッドシート）
  *
- * 手動実行 or トリガーで定期更新
+ * 自動更新:
+ *   1. onEditDashboard  : 案件管理表の編集時に即時更新（インストール型トリガー）
+ *   2. updateDashboard  : 時間主導トリガーでバックアップ更新
+ *                         （クラフトバンク側の変更や onEdit 取りこぼしを拾う）
+ *
+ * トリガー設定:
+ *   - 関数: onEditDashboard / イベントソース: スプレッドシート → 編集時
+ *   - 関数: updateDashboard  / イベントソース: 時間主導型 → 5〜10分おき
  */
 
 // ============================================================
@@ -221,6 +228,58 @@ function updateDashboard() {
   tableRange.setBorder(true, true, true, true, true, true);
 
   Logger.log('ダッシュボード更新完了');
+}
+
+
+/**
+ * 案件管理表の編集時にダッシュボードを即時更新
+ * B列（企業名）/ C列（支援事業者名）/ E列（公募回）の変更のみ検知する
+ * @param {Object} e - 編集イベント
+ */
+function onEditDashboard(e) {
+  try {
+    const sheet = e.source.getActiveSheet();
+    if (sheet.getName() !== DASHBOARD_CONFIG.SOURCE_SHEET) return;
+
+    const row = e.range.getRow();
+    const col = e.range.getColumn();
+    if (row <= DASHBOARD_CONFIG.HEADER_ROW) return;
+
+    const relevantCols = [
+      DASHBOARD_CONFIG.COL_COMPANY,
+      DASHBOARD_CONFIG.COL_VENDOR,
+      DASHBOARD_CONFIG.COL_ROUND,
+    ];
+    if (relevantCols.indexOf(col) === -1) return;
+
+    runDashboardUpdateDebounced_();
+  } catch (err) {
+    Logger.log('onEditDashboard エラー: ' + err.message);
+  }
+}
+
+
+/**
+ * ダッシュボード更新をロック＋ダーティフラグで直列化
+ * 連続編集でも取りこぼさず、最新状態を必ず反映する
+ */
+function runDashboardUpdateDebounced_() {
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('DASHBOARD_DIRTY', '1');
+
+  const lock = LockService.getScriptLock();
+  // 別インスタンスが実行中なら抜ける（そちらが DIRTY フラグを見て再実行してくれる）
+  if (!lock.tryLock(100)) return;
+
+  try {
+    let safety = 5;
+    while (safety-- > 0 && props.getProperty('DASHBOARD_DIRTY') === '1') {
+      props.setProperty('DASHBOARD_DIRTY', '0');
+      updateDashboard();
+    }
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 
