@@ -626,20 +626,7 @@ if data_source == 'Google Drive':
 
     uploaded_files = None
 
-    # Driveモードでも申請フォーマットはローカルからアップロード
-    if task_type in ('application', 'all'):
-        st.markdown('---')
-        template_file = st.file_uploader(
-            '申請フォーマット（任意）',
-            accept_multiple_files=False,
-            type=['xlsx'],
-            key='template_uploader_drive',
-            help='カスタマイズした原本を使う場合のみアップロード。未アップロード時はツール同梱の原本を使用します。',
-        )
-        if template_file is not None:
-            st.caption(f'申請フォーマット: `{template_file.name}`')
-    else:
-        template_file = None
+    template_file = None
 
 else:
     # ── ファイルアップロードモード ──
@@ -715,20 +702,7 @@ else:
         upload_analysis = _analyze_files([f.name for f in uploaded_files], task_type)
         _render_file_check_result(upload_analysis, len(uploaded_files))
 
-    # 申請フォーマット（テンプレート原本）
-    if task_type in ('application', 'all'):
-        st.markdown('---')
-        template_file = st.file_uploader(
-            '申請フォーマット（任意）',
-            accept_multiple_files=False,
-            type=['xlsx'],
-            key='template_uploader',
-            help='カスタマイズした原本を使う場合のみアップロード。未アップロード時はツール同梱の原本を使用します。',
-        )
-        if template_file is not None:
-            st.caption(f'申請フォーマット: `{template_file.name}`')
-    else:
-        template_file = None
+    template_file = None
 
 # ── 処理実行 ──
 st.markdown(
@@ -747,8 +721,6 @@ has_drive_required = (
     _check_required_by_names([f['name'] for f in drive_files_to_download], task_type)
     if has_drive_files else False
 )
-
-has_template = template_file is not None
 
 if data_source == 'Google Drive':
     if task_type == 'bonus':
@@ -799,13 +771,7 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
         else:
             saved = save_uploaded_files(uploaded_files, work_dir)
 
-        # テンプレートディレクトリ
-        # アップロードされた原本があれば work_dir に保存し、そちらを優先する。
-        # 未アップロード（加点判定/給与計算のみ等）の場合はプロジェクト同梱の ツール/ を使う。
-        template_dir = work_dir if template_file else Path(__file__).parent
-        if template_file:
-            template_dest = work_dir / template_file.name
-            template_dest.write_bytes(template_file.getvalue())
+        template_dir = Path(__file__).parent
 
         # ファイル検出プレビュー
         detector = FileDetector(work_dir)
