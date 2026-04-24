@@ -21,6 +21,9 @@ output/
 *.xls
 *.pdf
 
+# ツール/ 配下のテンプレ・ヒアリングシート原本は管理対象（Streamlit Cloud で必要）
+!ツール/*.xlsx
+
 # その他
 *.log
 .DS_Store
