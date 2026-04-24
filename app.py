@@ -626,7 +626,19 @@ if data_source == 'Google Drive':
 
     uploaded_files = None
 
-    template_file = None
+    if task_type in ('application', 'all'):
+        st.markdown('---')
+        template_file = st.file_uploader(
+            '申請フォーマット（任意）',
+            accept_multiple_files=False,
+            type=['xlsx'],
+            key='template_uploader_drive',
+            help='ツール名を選択済みの原本をアップロードするとそのファイルを使用します。未アップロード時はツール同梱の原本を使用します。',
+        )
+        if template_file is not None:
+            st.caption(f'申請フォーマット: `{template_file.name}`')
+    else:
+        template_file = None
 
 else:
     # ── ファイルアップロードモード ──
@@ -702,7 +714,19 @@ else:
         upload_analysis = _analyze_files([f.name for f in uploaded_files], task_type)
         _render_file_check_result(upload_analysis, len(uploaded_files))
 
-    template_file = None
+    if task_type in ('application', 'all'):
+        st.markdown('---')
+        template_file = st.file_uploader(
+            '申請フォーマット（任意）',
+            accept_multiple_files=False,
+            type=['xlsx'],
+            key='template_uploader',
+            help='ツール名を選択済みの原本をアップロードするとそのファイルを使用します。未アップロード時はツール同梱の原本を使用します。',
+        )
+        if template_file is not None:
+            st.caption(f'申請フォーマット: `{template_file.name}`')
+    else:
+        template_file = None
 
 # ── 処理実行 ──
 st.markdown(
@@ -771,7 +795,12 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
         else:
             saved = save_uploaded_files(uploaded_files, work_dir)
 
-        template_dir = Path(__file__).parent
+        if template_file is not None:
+            template_dest = work_dir / template_file.name
+            template_dest.write_bytes(template_file.getvalue())
+            template_dir = work_dir
+        else:
+            template_dir = Path(__file__).parent
 
         # ファイル検出プレビュー
         detector = FileDetector(work_dir)
