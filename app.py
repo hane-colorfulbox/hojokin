@@ -670,7 +670,7 @@ else:
          '履歴事項全部証明書_○○様.pdf',           {'application', 'all'},          {'application', 'all'}),
         ('pl',          '損益計算書 / 決算報告書', 'PDF',       ['損益計算書', '決算報告書', '決算書'],
          '42期 決算報告書.pdf',                    {'application', 'wage', 'all'},  {'application', 'all'}),
-        ('wage_ledger', '賃金台帳',               'Excel',     ['賃金台帳'],
+        ('wage_ledger', '賃金台帳',               'Excel/PDF', ['賃金台帳'],
          '賃金台帳_2025年度.xlsx',                 {'wage', 'bonus'},              {'wage', 'bonus'}),
         ('cost_report', '製造原価報告書',          'PDF',       ['製造原価報告書', '原価報告書'],
          '製造原価報告書.pdf',                     {'application', 'wage', 'all'},  set()),
