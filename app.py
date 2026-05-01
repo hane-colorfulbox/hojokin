@@ -484,9 +484,11 @@ def _analyze_files(file_names, task):
     detected = {cat: [] for cat, _, _ in _FILE_CATEGORIES}
     unmatched = []
     for name in file_names:
+        # NFD（macOS の濁点分離形式）でも比較が通るよう NFC 化してから判定
+        name_nfc = unicodedata.normalize('NFC', name)
         matched = False
         for cat, _, keywords in _FILE_CATEGORIES:
-            if any(kw in name for kw in keywords):
+            if any(kw in name_nfc for kw in keywords):
                 detected[cat].append(name)
                 matched = True
                 break
@@ -547,11 +549,13 @@ def _check_required_by_names(file_names, task):
     """タスクに応じた必須ファイルが揃っているかチェック"""
     if not file_names:
         return False
+    # NFD（macOS の濁点分離形式）でも比較が通るよう NFC 化してから判定
+    names_nfc = [unicodedata.normalize('NFC', n) for n in file_names]
     required_cats = _REQUIRED_CATS_BY_TASK.get(task, set())
     for cat, _, keywords in _FILE_CATEGORIES:
         if cat not in required_cats:
             continue
-        if not any(any(kw in name for kw in keywords) for name in file_names):
+        if not any(any(kw in name for kw in keywords) for name in names_nfc):
             return False
     return True
 
