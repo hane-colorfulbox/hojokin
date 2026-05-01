@@ -900,7 +900,11 @@ if 'last_results' in st.session_state:
         task_display = task_display_map.get(task_name, task_name)
 
         if result['status'] == '完了':
-            st.success(f'{task_display}: 完了 — {result["message"]}')
+            # 賃金台帳の読み取り警告がメッセージに含まれていれば警告表示、それ以外は成功表示
+            if '⚠' in result['message']:
+                st.warning(f'{task_display}: 完了（一部警告あり）— {result["message"]}')
+            else:
+                st.success(f'{task_display}: 完了 — {result["message"]}')
 
             if result['file_data']:
                 st.download_button(
