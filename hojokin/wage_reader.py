@@ -626,14 +626,158 @@ def read_wage_ledger(file_path: Path) -> list[WageEmployee]:
     return employees
 
 
-def read_wage_ledgers(file_paths: list[Path]) -> list[WageEmployee]:
+def _workbook_to_tsv(wb: openpyxl.Workbook, file_label: str) -> str:
+    """ワークブック全シートをTSV文字列に変換（AI入力用）。"""
+    parts: list[str] = [f'### ファイル: {file_label} ###']
+    for ws in wb.worksheets:
+        parts.append(f'\n--- シート: {ws.title} ---')
+        for row in ws.iter_rows(values_only=True):
+            # 末尾の None だけのセルは無視して圧縮
+            cells = list(row)
+            while cells and cells[-1] is None:
+                cells.pop()
+            if not cells:
+                continue
+            line = '\t'.join('' if v is None else str(v) for v in cells)
+            parts.append(line)
+    return '\n'.join(parts)
+
+
+def _validate_ai_employee(emp: dict) -> tuple[bool, str]:
+    """AI抽出した1従業員データの妥当性チェック。(OK?, エラー理由)"""
+    name = emp.get('name')
+    if not name or not isinstance(name, str):
+        return False, 'name が空または文字列でない'
+    monthly_wages = emp.get('monthly_wages')
+    monthly_hours = emp.get('monthly_hours')
+    if not isinstance(monthly_wages, list) or len(monthly_wages) != 12:
+        return False, f'monthly_wages が12要素のリストでない (len={len(monthly_wages) if isinstance(monthly_wages, list) else "N/A"})'
+    if not isinstance(monthly_hours, list) or len(monthly_hours) != 12:
+        return False, f'monthly_hours が12要素のリストでない'
+    # 金額の現実的範囲チェック (0〜1000万円/月)
+    for i, w in enumerate(monthly_wages):
+        if w is None:
+            continue
+        if not isinstance(w, (int, float)) or w < 0 or w > 10_000_000:
+            return False, f'{i+1}月の給与額が異常: {w}'
+    # 労働時間の現実的範囲チェック (0〜400時間/月)
+    for i, h in enumerate(monthly_hours):
+        if h is None:
+            continue
+        if not isinstance(h, (int, float)) or h < 0 or h > 400:
+            return False, f'{i+1}月の労働時間が異常: {h}'
+    return True, ''
+
+
+def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
+    """AI抽出データを WageEmployee リストに変換（バリデーション付き）。"""
+    employees: list[WageEmployee] = []
+    for i, emp in enumerate(ai_data):
+        if not isinstance(emp, dict):
+            logger.warning(f'AI抽出: index={i} が辞書でないためスキップ: {type(emp).__name__}')
+            continue
+        ok, reason = _validate_ai_employee(emp)
+        if not ok:
+            logger.warning(f'AI抽出: index={i} ({emp.get("name", "?")}) バリデーション失敗: {reason}')
+            continue
+
+        monthly_wages = [
+            float(w) if w is not None else None for w in emp['monthly_wages']
+        ]
+        monthly_hours = [
+            float(h) if h is not None else None for h in emp['monthly_hours']
+        ]
+        # 月平均労働時間（None除外で平均）
+        valid_hours = [h for h in monthly_hours if h is not None and h > 0]
+        avg_hours = sum(valid_hours) / len(valid_hours) if valid_hours else 0.0
+        # 月別時給は AI 出力に含めない方針 → monthly_wages / monthly_hours から逆算可能だが現状は空でOK
+        employees.append(WageEmployee(
+            no=i + 1,
+            name=str(emp['name']).strip(),
+            employment_type=str(emp.get('employment_type', '') or '').strip(),
+            monthly_avg_hours=round(avg_hours, 1),
+            hourly_rate=0.0,
+            monthly_wages=monthly_wages,
+            monthly_hourly_rates=[None] * 12,
+            monthly_hours=monthly_hours,
+        ))
+    return employees
+
+
+def read_wage_ledgers_with_ai(
+    file_paths: list[Path],
+    extractor,
+    fiscal_period_hint: str | None = None,
+) -> list[WageEmployee]:
     """
-    複数の賃金台帳ファイルを読み、同名の従業員をマージして返す。
-    1人1ファイル運用（給与ソフト出力）と、1ファイルに全員を入れる運用の両方に対応。
+    AI による賃金台帳読み取り。
+    全ファイルを TSV に変換して1回の API 呼び出しで全従業員を抽出する。
+    バリデーション失敗時は空リストを返す（呼び出し側で fallback 判断）。
     """
     if not file_paths:
         return []
 
+    tsv_blocks: list[str] = []
+    for path in file_paths:
+        try:
+            wb = openpyxl.load_workbook(str(path), data_only=True)
+        except Exception as e:
+            logger.warning(f'賃金台帳読込失敗(AI経路): {path.name} ({e})')
+            continue
+        tsv_blocks.append(_workbook_to_tsv(wb, path.name))
+        wb.close()
+
+    if not tsv_blocks:
+        return []
+
+    combined_tsv = '\n\n'.join(tsv_blocks)
+    logger.info(
+        f'AI抽出開始: {len(file_paths)}ファイル '
+        f'→ TSV {len(combined_tsv):,}文字'
+        + (f' (前事業年度ヒント: {fiscal_period_hint})' if fiscal_period_hint else '')
+    )
+
+    try:
+        ai_data = extractor.extract_wage_ledger(combined_tsv, fiscal_period_hint)
+    except Exception as e:
+        logger.error(f'AI抽出例外: {e}', exc_info=True)
+        return []
+
+    employees = _ai_data_to_wage_employees(ai_data)
+    logger.info(
+        f'AI抽出結果: 入力{len(ai_data)}名 → 妥当{len(employees)}名'
+    )
+    return employees
+
+
+def read_wage_ledgers(
+    file_paths: list[Path],
+    extractor=None,
+    fiscal_period_hint: str | None = None,
+) -> list[WageEmployee]:
+    """
+    複数の賃金台帳ファイルを読み、同名の従業員をマージして返す。
+    1人1ファイル運用（給与ソフト出力）と、1ファイルに全員を入れる運用の両方に対応。
+
+    extractor が渡され、かつ環境変数 USE_AI_WAGE_EXTRACTION が有効な場合は
+    AI 抽出を優先し、結果が空なら決定論パーサーにフォールバックする。
+    """
+    if not file_paths:
+        return []
+
+    # AI 経路（extractor がある場合）
+    if extractor is not None:
+        from .config import USE_AI_WAGE_EXTRACTION
+        if USE_AI_WAGE_EXTRACTION:
+            ai_employees = read_wage_ledgers_with_ai(
+                file_paths, extractor, fiscal_period_hint
+            )
+            if ai_employees:
+                logger.info(f'賃金台帳合算結果(AI): {len(ai_employees)}名 ({len(file_paths)}ファイル)')
+                return ai_employees
+            logger.warning('AI抽出が0件を返したため、決定論パーサーにフォールバック')
+
+    # 決定論パーサー経路（フォールバック or extractor なし）
     individual_ledger_paths = []
     merged_emp_data: dict = {}
 
@@ -669,7 +813,7 @@ def read_wage_ledgers(file_paths: list[Path]) -> list[WageEmployee]:
             e.no = len(employees) + 1
             employees.append(e)
 
-    logger.info(f'賃金台帳合算結果: {len(employees)}名 ({len(file_paths)}ファイル)')
+    logger.info(f'賃金台帳合算結果(決定論): {len(employees)}名 ({len(file_paths)}ファイル)')
     return employees
 
 
