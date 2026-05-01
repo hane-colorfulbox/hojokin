@@ -666,11 +666,28 @@ def _validate_ai_employee(emp: dict) -> tuple[bool, str]:
             continue
         if not isinstance(h, (int, float)) or h < 0 or h > 400:
             return False, f'{i+1}月の労働時間が異常: {h}'
+    # monthly_work_days は任意フィールド（無くても可）。あれば妥当性チェック
+    monthly_work_days = emp.get('monthly_work_days')
+    if monthly_work_days is not None:
+        if not isinstance(monthly_work_days, list) or len(monthly_work_days) != 12:
+            return False, 'monthly_work_days が12要素のリストでない'
+        for i, d in enumerate(monthly_work_days):
+            if d is None:
+                continue
+            if not isinstance(d, (int, float)) or d < 0 or d > 31:
+                return False, f'{i+1}月の労働日数が異常: {d}'
     return True, ''
 
 
 def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
-    """AI抽出データを WageEmployee リストに変換（バリデーション付き）。"""
+    """AI抽出データを WageEmployee リストに変換（バリデーション付き）。
+
+    労働時間が「ない / 異常に少ない（残業時間と誤認の疑い）」場合は、
+    労働日数×8時間で補完する。役員は労働時間補完の対象外。
+    """
+    HOURS_PER_DAY = 8.0
+    SUSPICIOUS_AVG_HOURS = 50.0  # 役員/パート以外で月平均がこれ未満なら誤認の疑い
+
     employees: list[WageEmployee] = []
     for i, emp in enumerate(ai_data):
         if not isinstance(emp, dict):
@@ -681,20 +698,50 @@ def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
             logger.warning(f'AI抽出: index={i} ({emp.get("name", "?")}) バリデーション失敗: {reason}')
             continue
 
+        emp_name = str(emp['name']).strip()
+        emp_type = str(emp.get('employment_type', '') or '').strip()
+        is_officer = '役員' in emp_type
+        is_part = 'パート' in emp_type or 'アルバイト' in emp_type
+
         monthly_wages = [
             float(w) if w is not None else None for w in emp['monthly_wages']
         ]
-        monthly_hours = [
+        monthly_hours: list[float | None] = [
             float(h) if h is not None else None for h in emp['monthly_hours']
         ]
-        # 月平均労働時間（None除外で平均）
+        monthly_work_days = emp.get('monthly_work_days') or [None] * 12
+
         valid_hours = [h for h in monthly_hours if h is not None and h > 0]
         avg_hours = sum(valid_hours) / len(valid_hours) if valid_hours else 0.0
-        # 月別時給は AI 出力に含めない方針 → monthly_wages / monthly_hours から逆算可能だが現状は空でOK
+
+        # 労働時間が無い、または役員/パート以外で異常に少ない場合は労働日数×8hで補完
+        needs_fallback = not valid_hours or (
+            not is_officer
+            and not is_part
+            and avg_hours < SUSPICIOUS_AVG_HOURS
+        )
+        if needs_fallback and not is_officer:
+            valid_days = [
+                d for d in monthly_work_days
+                if d is not None and isinstance(d, (int, float)) and d > 0
+            ]
+            if valid_days:
+                old_avg = avg_hours
+                monthly_hours = [
+                    float(d) * HOURS_PER_DAY if (d is not None and isinstance(d, (int, float)) and d > 0) else None
+                    for d in monthly_work_days
+                ]
+                valid_hours = [h for h in monthly_hours if h is not None and h > 0]
+                avg_hours = sum(valid_hours) / len(valid_hours) if valid_hours else 0.0
+                logger.info(
+                    f'AI抽出補完: {emp_name} の労働時間を労働日数×{HOURS_PER_DAY}hで再計算 '
+                    f'(月平均 {old_avg:.1f}h → {avg_hours:.1f}h)'
+                )
+
         employees.append(WageEmployee(
             no=i + 1,
-            name=str(emp['name']).strip(),
-            employment_type=str(emp.get('employment_type', '') or '').strip(),
+            name=emp_name,
+            employment_type=emp_type,
             monthly_avg_hours=round(avg_hours, 1),
             hourly_rate=0.0,
             monthly_wages=monthly_wages,
@@ -711,14 +758,23 @@ def read_wage_ledgers_with_ai(
 ) -> list[WageEmployee]:
     """
     AI による賃金台帳読み取り。
-    全ファイルを TSV に変換して1回の API 呼び出しで全従業員を抽出する。
-    バリデーション失敗時は空リストを返す（呼び出し側で fallback 判断）。
+    Excel(.xlsx/.xlsm) は TSV に変換、PDF はそのまま添付して1回の API 呼出しで抽出する。
+    両フォーマット混在も可。バリデーション失敗時は空リストを返す（呼出し側で fallback 判断）。
     """
     if not file_paths:
         return []
 
     tsv_blocks: list[str] = []
+    pdf_files: list[tuple[str, bytes]] = []
+
     for path in file_paths:
+        ext = path.suffix.lower()
+        if ext == '.pdf':
+            try:
+                pdf_files.append((path.name, path.read_bytes()))
+            except Exception as e:
+                logger.warning(f'賃金台帳PDF読込失敗(AI経路): {path.name} ({e})')
+            continue
         try:
             wb = openpyxl.load_workbook(str(path), data_only=True)
         except Exception as e:
@@ -727,18 +783,23 @@ def read_wage_ledgers_with_ai(
         tsv_blocks.append(_workbook_to_tsv(wb, path.name))
         wb.close()
 
-    if not tsv_blocks:
+    if not tsv_blocks and not pdf_files:
         return []
 
-    combined_tsv = '\n\n'.join(tsv_blocks)
+    combined_tsv = '\n\n'.join(tsv_blocks) if tsv_blocks else ''
+    pdf_total_mb = sum(len(p[1]) for p in pdf_files) / 1_000_000
     logger.info(
-        f'AI抽出開始: {len(file_paths)}ファイル '
-        f'→ TSV {len(combined_tsv):,}文字'
+        f'AI抽出開始: Excel{len(tsv_blocks)}ファイル PDF{len(pdf_files)}ファイル '
+        f'→ TSV {len(combined_tsv):,}文字 / PDF {pdf_total_mb:.2f}MB'
         + (f' (前事業年度ヒント: {fiscal_period_hint})' if fiscal_period_hint else '')
     )
 
     try:
-        ai_data = extractor.extract_wage_ledger(combined_tsv, fiscal_period_hint)
+        ai_data = extractor.extract_wage_ledger(
+            combined_tsv,
+            fiscal_period_hint,
+            pdf_files=pdf_files if pdf_files else None,
+        )
     except Exception as e:
         logger.error(f'AI抽出例外: {e}', exc_info=True)
         return []
