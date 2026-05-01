@@ -128,3 +128,7 @@ class ProcessingStatus:
     message: str = ''
     output_files: list[str] = field(default_factory=list)
     empty_cells: list[str] = field(default_factory=list)
+    # AI抽出結果（後続タスクで再利用してAPI重複呼出しを防ぐ）
+    # 'WageEmployee' は循環import回避のため文字列で型注釈
+    financial: FinancialData | None = None
+    ledger_employees: list = field(default_factory=list)

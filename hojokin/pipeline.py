@@ -267,6 +267,9 @@ def run_application_transfer(
         status.status = '完了'
         status.output_files = [output_path.name]
         status.empty_cells = empty_cells
+        # 後続タスク（給与計算/加点判定）で再利用するためAI抽出結果をstatusに保持
+        status.financial = extraction.financial
+        status.ledger_employees = ledger_employees or []
         # 賃金台帳の読み取り状況に応じて完了メッセージに警告を追記（処理は続行）
         wage_warning = ''
         if wage_status == 'no_data':
@@ -298,9 +301,14 @@ def run_wage_calculation(
     company_name: str,
     output_path: Path,
     extractor: BaseExtractor | None = None,
+    cached_financial: 'FinancialData | None' = None,
+    cached_ledger_employees: list | None = None,
 ) -> ProcessingStatus:
     """
     タスク2: 給与支給総額計算の実行
+
+    cached_financial / cached_ledger_employees が渡された場合は API 呼出を省略する
+    （申請書作成タスクの結果を再利用してコスト2重化を防ぐ）。
     """
     status = ProcessingStatus(
         company_name=company_name,
@@ -315,12 +323,15 @@ def run_wage_calculation(
         detector = FileDetector(resource_folder)
         logger.info(detector.summary())
 
-        # 損益計算書（任意: あれば精度向上）
-        financial = None
-        pl_path = detector.get_pl_latest()
-        if pl_path:
-            images = pdf_to_images(pl_path)
-            financial = extractor.extract_pl(images)
+        # 損益計算書（任意: あれば精度向上）— キャッシュがあれば再利用
+        financial = cached_financial
+        if financial is None:
+            pl_path = detector.get_pl_latest()
+            if pl_path:
+                images = pdf_to_images(pl_path)
+                financial = extractor.extract_pl(images)
+        else:
+            logger.info('PL: 申請書作成タスクの結果を再利用（API呼出スキップ）')
 
         if financial is None or financial.revenue == 0:
             from .models import FinancialData
@@ -343,27 +354,32 @@ def run_wage_calculation(
 
         # フォールバック: 賃金状況報告シートで人数が取れなかった場合、賃金台帳から補完
         if seishain_count + part_count == 0:
-            ledger_paths = detector.get_all('wage_ledger')
-            if ledger_paths:
-                fiscal_hint = _format_fiscal_period(financial)
-                ledger_emps = read_wage_ledgers(
-                    ledger_paths,
-                    extractor=extractor,
-                    fiscal_period_hint=fiscal_hint,
+            # キャッシュがあれば再利用（API呼出スキップ）
+            ledger_emps = cached_ledger_employees
+            if ledger_emps:
+                logger.info(f'賃金台帳: 申請書作成タスクの結果を再利用（API呼出スキップ、{len(ledger_emps)}名）')
+            else:
+                ledger_paths = detector.get_all('wage_ledger')
+                if ledger_paths:
+                    fiscal_hint = _format_fiscal_period(financial)
+                    ledger_emps = read_wage_ledgers(
+                        ledger_paths,
+                        extractor=extractor,
+                        fiscal_period_hint=fiscal_hint,
+                    )
+            if ledger_emps:
+                employees_detail = _build_employees_detail_from_ledger(ledger_emps)
+                seishain_count = sum(
+                    1 for e in employees_detail if e['type'] == '正社員'
                 )
-                if ledger_emps:
-                    employees_detail = _build_employees_detail_from_ledger(ledger_emps)
-                    seishain_count = sum(
-                        1 for e in employees_detail if e['type'] == '正社員'
-                    )
-                    part_count = sum(
-                        1 for e in employees_detail
-                        if e['type'] in ('パート・アルバイト', '契約社員')
-                    )
-                    logger.info(
-                        f'賃金台帳フォールバック: 正社員{seishain_count}, '
-                        f'パート・契約{part_count} ({len(ledger_paths)}ファイル)'
-                    )
+                part_count = sum(
+                    1 for e in employees_detail
+                    if e['type'] in ('パート・アルバイト', '契約社員')
+                )
+                logger.info(
+                    f'賃金台帳フォールバック: 正社員{seishain_count}, '
+                    f'パート・契約{part_count}'
+                )
 
         # 給与データPDFから読取（APIが必要）
         wage_pdfs = detector.get_all('wage_data')
