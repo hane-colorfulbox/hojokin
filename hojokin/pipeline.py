@@ -51,7 +51,7 @@ class FileDetector:
         'cost_report': {'.pdf'},
         'estimate':    {'.xlsx', '.xlsm', '.pdf'},
         'wage_report': {'.xlsx', '.xlsm'},
-        'wage_ledger': {'.xlsx', '.xlsm', '.pdf'},
+        'wage_ledger': {'.xlsx', '.xlsm', '.pdf', '.csv'},
         'wage_data':   {'.pdf'},
     }
 
