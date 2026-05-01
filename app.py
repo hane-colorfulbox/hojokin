@@ -10,8 +10,20 @@ import os
 import shutil
 import tempfile
 import logging
+import unicodedata
 from pathlib import Path
 from datetime import datetime
+
+
+def _nfc_filename(name: str) -> str:
+    """ファイル名を NFC 正規化する。
+
+    macOS のファイルシステムやブラウザは日本語ファイル名を NFD（濁点・半濁点を分離）で
+    送ってくることがあり、Linux サーバ上で NFC キーワードと比較したときに一致しない。
+    保存時点で必ず NFC に揃えることで、Drive モード／アップロードモードの差異と
+    Mac/Windows ローカルの差異を吸収する。
+    """
+    return unicodedata.normalize('NFC', name)
 
 import streamlit as st
 
@@ -199,12 +211,13 @@ def find_template(base_dir: Path, template_type: str) -> Path | None:
 
 
 def save_uploaded_files(uploaded_files, target_dir: Path) -> list[str]:
-    """アップロードファイルを一時ディレクトリに保存"""
+    """アップロードファイルを一時ディレクトリに保存（ファイル名は NFC 統一）"""
     saved = []
     for f in uploaded_files:
-        dest = target_dir / f.name
+        name = _nfc_filename(f.name)
+        dest = target_dir / name
         dest.write_bytes(f.getvalue())
-        saved.append(f.name)
+        saved.append(name)
     return saved
 
 
@@ -780,13 +793,14 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
     with tempfile.TemporaryDirectory() as tmpdir:
         work_dir = Path(tmpdir)
 
-        # ファイル保存（データソースに応じて）
+        # ファイル保存（データソースに応じて）— 保存名は NFC 統一
         if data_source == 'Google Drive' and drive_files_to_download:
             with st.spinner('Google Driveからファイルをダウンロード中...'):
                 client = _get_drive_client()
                 saved = []
                 for f in drive_files_to_download:
-                    dest = work_dir / f['name']
+                    name = _nfc_filename(f['name'])
+                    dest = work_dir / name
                     saved_path = client.download_file(
                         f['id'], dest, mime_type=f.get('mimeType'),
                     )
@@ -796,7 +810,7 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
             saved = save_uploaded_files(uploaded_files, work_dir)
 
         if template_file is not None:
-            template_dest = work_dir / template_file.name
+            template_dest = work_dir / _nfc_filename(template_file.name)
             template_dest.write_bytes(template_file.getvalue())
             template_dir = work_dir
         else:
