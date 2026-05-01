@@ -407,7 +407,7 @@ class ClaudeExtractor(BaseExtractor):
         api_key: str,
         model: str = 'claude-sonnet-4-6',
         retry_callback: Optional[RetryCallback] = None,
-        timeout: float = 180.0,
+        timeout: float = 300.0,
     ):
         try:
             import anthropic
@@ -415,7 +415,8 @@ class ClaudeExtractor(BaseExtractor):
             raise ImportError('anthropic パッケージが必要です: pip install anthropic')
 
         # PDF含む長時間レスポンスでクライアント側がぶら下がるのを防ぐ。
-        # 180秒応答なしで例外 → _messages_create_with_retry が指数バックオフで再試行。
+        # 300秒応答なしで例外 → _messages_create_with_retry が指数バックオフで再試行。
+        # （6MB級のPDF×2件ぐらいまでは1発で完走する想定）
         self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
         self.model = model
         self.retry_callback = retry_callback

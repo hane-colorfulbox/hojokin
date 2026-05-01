@@ -40,7 +40,7 @@ from hojokin.pipeline import (
     FileDetector, run_application_transfer, run_wage_calculation,
 )
 from hojokin.wage_reader import (
-    read_wage_ledger, judge_bonus_points,
+    read_wage_ledgers, judge_bonus_points,
     fill_bonus_sheet_1, fill_bonus_sheet_2,
 )
 
@@ -233,9 +233,9 @@ def run_processing(
     """メイン処理を実行"""
     results = {}
 
-    # Extractor作成（加点判定のみの場合はAPI不要）
+    # Extractor作成（加点判定もPDF/CSV対応のためAI経路を使用）
     extractor = None
-    if task_type in ('application', 'wage', 'all'):
+    if task_type in ('application', 'wage', 'all', 'bonus'):
         def _on_api_retry(attempt: int, max_attempts: int, wait: float, err: str):
             # Anthropic APIの一時エラー（422/429/5xx/529/timeout等）時の再試行をユーザーに通知
             try:
@@ -285,11 +285,21 @@ def run_processing(
                 'output_path': output_path if status.status == '完了' else None,
                 'empty_cells': status.empty_cells,
                 'extra_files': extra_files,
+                # all タスクで run_wage_calculation に渡してAPI重複を防ぐためのキャッシュ
+                '_cached_financial': status.financial,
+                '_cached_ledger_employees': status.ledger_employees,
             }
 
     if task_type in ('wage', 'all'):
         if progress_callback:
             progress_callback('給与支給総額を計算中...')
+
+        # all タスクの場合、申請書作成タスクのAI抽出結果を再利用してAPI呼出スキップ
+        cached_financial = None
+        cached_ledger_employees = None
+        if task_type == 'all' and 'application' in results:
+            cached_financial = results['application'].get('_cached_financial')
+            cached_ledger_employees = results['application'].get('_cached_ledger_employees')
 
         output_path = work_dir / f'{company_name}_給与支給総額計算.xlsx'
         status = run_wage_calculation(
@@ -297,6 +307,8 @@ def run_processing(
             company_name=company_name,
             output_path=output_path,
             extractor=extractor,
+            cached_financial=cached_financial,
+            cached_ledger_employees=cached_ledger_employees,
         )
         results['wage'] = {
             'status': status.status,
@@ -308,41 +320,66 @@ def run_processing(
         if progress_callback:
             progress_callback('賃金台帳を読み取り中...')
 
-        results['bonus'] = _run_bonus_judgment(work_dir, company_name, prefecture, template_dir)
+        results['bonus'] = _run_bonus_judgment(
+            work_dir, company_name, prefecture, template_dir,
+            extractor=extractor,
+        )
 
     return results
 
 
-def _run_bonus_judgment(work_dir: Path, company_name: str, prefecture: str, template_dir: Path) -> dict:
-    """加点判定を実行"""
-    # 賃金台帳ファイルを探す
-    wage_file = None
-    for f in work_dir.iterdir():
-        if f.suffix in ('.xlsx', '.xls') and not f.name.startswith('~$'):
-            if '賃金' in f.name or '給与' in f.name or '明細' in f.name or 'wage' in f.name.lower():
-                wage_file = f
-                break
-    if wage_file is None:
-        # 賃金台帳のキーワードがなくてもExcelならとりあえず読む
-        for f in work_dir.iterdir():
-            if f.suffix in ('.xlsx', '.xls') and not f.name.startswith('~$'):
-                wage_file = f
-                break
+def _run_bonus_judgment(
+    work_dir: Path,
+    company_name: str,
+    prefecture: str,
+    template_dir: Path,
+    extractor=None,
+    cached_ledger_employees: list | None = None,
+) -> dict:
+    """加点判定を実行。
 
-    if wage_file is None:
-        return {
-            'status': 'エラー',
-            'message': '賃金台帳ファイルが見つかりません。Excelファイルをアップロードしてください。',
-        }
+    cached_ledger_employees があれば再利用してAPI呼出をスキップする。
+    なければ賃金台帳ファイル（Excel/PDF/CSV）を検索して AI 経路で読み取る。
+    """
+    # キャッシュ優先（all + bonus を同時実行する将来拡張に備えた経路）
+    if cached_ledger_employees:
+        employees = cached_ledger_employees
+    else:
+        # 賃金台帳ファイルを探す（Excel/PDF/CSV すべて対応）
+        WAGE_EXTS = ('.xlsx', '.xlsm', '.xls', '.pdf', '.csv')
+        wage_files = [
+            f for f in work_dir.iterdir()
+            if f.suffix.lower() in WAGE_EXTS and not f.name.startswith('~$')
+            and ('賃金' in f.name or '給与' in f.name or '明細' in f.name or 'wage' in f.name.lower())
+        ]
+        if not wage_files:
+            # キーワードがなくても賃金台帳らしい拡張子は試す
+            wage_files = [
+                f for f in work_dir.iterdir()
+                if f.suffix.lower() in WAGE_EXTS and not f.name.startswith('~$')
+            ]
 
-    try:
-        employees = read_wage_ledger(wage_file)
+        if not wage_files:
+            return {
+                'status': 'エラー',
+                'message': '賃金台帳ファイルが見つかりません。Excel/PDF/CSV のいずれかをアップロードしてください。',
+            }
+
+        try:
+            employees = read_wage_ledgers(wage_files, extractor=extractor)
+        except Exception as e:
+            return {
+                'status': 'エラー',
+                'message': f'賃金台帳の読み取り中にエラーが発生しました: {str(e)}',
+            }
+
         if not employees:
             return {
                 'status': 'エラー',
-                'message': '賃金台帳からデータを読み取れませんでした。シートの形式を確認してください。',
+                'message': '賃金台帳からデータを読み取れませんでした。ファイルの形式を確認してください。',
             }
 
+    try:
         result = judge_bonus_points(employees, prefecture)
 
         # 加点措置シートのテンプレートを探して自動入力
