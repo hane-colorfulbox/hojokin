@@ -204,10 +204,19 @@ PROMPT_WAGE_LEDGER = """以下は賃金台帳のExcelをTSV形式に変換した
 【抽出ルール】
 1. 全シート・全テーブルを横断して、登場するすべての従業員を抽出してください。
 2. monthly_wages: 月別の課税支給合計（または支給合計、税込支給額、給与+賞与の合算）。各月の値を Index 0=1月, Index 11=12月 として格納してください。データがない月は null。
-3. monthly_hours: 月別の労働時間（または所定労働時間、勤務時間）。同じく1月〜12月のIndex順。データがない月は null。
-4. employment_type: 雇用形態（正社員・パート・アルバイト・役員等）。元の表記をそのまま入れてください。役員は「役員」を含む表記に。
-5. 給与と賞与が別行・別シートに分かれている場合は、同月分を**合算**してください。
-6. 月の判定は以下のいずれかを使用:
+3. monthly_hours: 月別の **総労働時間 / 実労働時間 / 所定労働時間**。同じく1月〜12月のIndex順。
+   - **重要**: 「残業時間」「所定時間外」「時間外労働」は労働時間ではありません。混同しないでください。
+   - 賃金台帳に労働時間の欄が存在しない（労働日数のみ等）場合は **必ず null** にしてください。推測値は禁止。
+4. monthly_work_days: 月別の **労働日数 / 出勤日数 / 勤務日数**。1月〜12月のIndex順。データがない月は null。
+   - 「有給休暇日数」は労働日数ではないので含めないこと。
+5. employment_type: 雇用形態（正社員・パート・アルバイト・役員等）。元の表記をそのまま入れてください。役員は「役員」を含む表記に。
+6. **【名前抽出の厳密ルール】**
+   - 賃金台帳の各行は通常、以下の列構成：フリガナ / 氏名 / 性別 / 生年月日 / 住所 / 給与・労働時間...
+   - 氏名は『氏名』『社員名』『名前』など明示的なラベルが付いた欄 **からのみ** 抽出。決して隣接する「住所」「市町村」欄から文字を引っ張らない
+   - 抽出後、名前に「市」「県」「区」「都」「道」「町」「村」など行政地名が含まれていないか確認。含まれていたら、その行の住所欄を参照して誤抽出部分を削除する
+   - 住所欄が参照できず確実に分離できない場合は、その従業員レコード全体を除外する（name=null）
+7. 給与と賞与が別行・別シートに分かれている場合は、同月分を**合算**してください。
+8. 月の判定は以下のいずれかを使用:
    - 列ヘッダ「1月」「5月」等のプレーン表記
    - 「R6.5月」「R7.4月」「令和6年5月」等の和暦付き表記（年は無視して月だけ使用）
    - 「2024年5月」「2024/05」「202405」等の西暦表記
@@ -222,14 +231,16 @@ PROMPT_WAGE_LEDGER = """以下は賃金台帳のExcelをTSV形式に変換した
     "name": "従業員名",
     "employment_type": "正社員",
     "monthly_wages": [430000, 316000, null, null, null, null, null, null, null, null, null, null],
-    "monthly_hours": [160, 160, null, null, null, null, null, null, null, null, null, null]
+    "monthly_hours": [160, 160, null, null, null, null, null, null, null, null, null, null],
+    "monthly_work_days": [20, 21, null, null, null, null, null, null, null, null, null, null]
   }}
 ]
 ```
 
 【重要な注意】
-- monthly_wages / monthly_hours は **必ず12要素** の配列にしてください。データがない月は null を入れる。
+- monthly_wages / monthly_hours / monthly_work_days は **必ず12要素** の配列にしてください。データがない月は null。
 - 金額は **円単位の整数**。コンマや「円」記号は付けないでください。
+- 労働時間が記載されていない賃金台帳では monthly_hours は全て null で構いません（後段で労働日数×8hで補完します）。
 - 役員報酬は役員として抽出してください（employment_type に「役員」を含める）。
 - 名前のフリガナや空欄行は無視してください。
 - JSON以外のコメント・説明文は一切含めないでください。
@@ -249,6 +260,12 @@ PROMPT_WAGE_LEDGER_FISCAL_FILTER = """【前事業年度フィルタ】
 PROMPT_WAGE_LEDGER_NO_FILTER = """【期間フィルタ】
 納税証明書からの決算期情報は提供されていません。賃金台帳に登場するすべての月のデータを抽出してください。
 複数年度に渡る場合は、各従業員について **直近12ヶ月** のデータを優先してください。
+"""
+
+PROMPT_WAGE_LEDGER_PDF_NOTE = """【添付PDFについて】
+このメッセージには賃金台帳のPDFが添付されています。Excel(TSV)が提供されていない場合はPDFのみから、両方ある場合は両方を統合して抽出してください。
+PDFが複数ページにわたる場合も漏れなく全ページを参照し、表中の全従業員を抽出してください。
+PDF内の数値はカンマ・円記号・空白を取り除き、純粋な整数に正規化してください。
 """
 
 
@@ -291,12 +308,14 @@ class BaseExtractor(ABC):
         self,
         tsv_data: str,
         fiscal_period_hint: str | None = None,
+        pdf_files: list[tuple[str, bytes]] | None = None,
     ) -> list[dict]:
-        """賃金台帳のTSVテキストから従業員データを抽出。
+        """賃金台帳のTSV/PDFから従業員データを抽出。
 
         Args:
-            tsv_data: 全シートをTSV形式で結合したテキスト
+            tsv_data: 全シートをTSV形式で結合したテキスト（PDFのみのときは空文字でも可）
             fiscal_period_hint: 前事業年度の決算期（例: 'R6.5-R7.4' または '2024-05〜2025-04'）
+            pdf_files: (ファイル名, PDF bytes) のリスト。Excelとの混在もOK
 
         Returns:
             従業員データのリスト。各要素は {name, employment_type, monthly_wages[12], monthly_hours[12]}
@@ -374,6 +393,7 @@ class StubExtractor(BaseExtractor):
         self,
         tsv_data: str,
         fiscal_period_hint: str | None = None,
+        pdf_files: list[tuple[str, bytes]] | None = None,
     ) -> list[dict]:
         logger.warning(f'{self.STUB_MARKER} 賃金台帳のAI抽出にはClaude APIが必要です')
         return []
@@ -387,16 +407,19 @@ class ClaudeExtractor(BaseExtractor):
         api_key: str,
         model: str = 'claude-sonnet-4-6',
         retry_callback: Optional[RetryCallback] = None,
+        timeout: float = 180.0,
     ):
         try:
             import anthropic
         except ImportError:
             raise ImportError('anthropic パッケージが必要です: pip install anthropic')
 
-        self.client = anthropic.Anthropic(api_key=api_key)
+        # PDF含む長時間レスポンスでクライアント側がぶら下がるのを防ぐ。
+        # 180秒応答なしで例外 → _messages_create_with_retry が指数バックオフで再試行。
+        self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
         self.model = model
         self.retry_callback = retry_callback
-        logger.info(f'Claude API 初期化完了 (model={model})')
+        logger.info(f'Claude API 初期化完了 (model={model}, timeout={timeout}s)')
 
     def _messages_create_with_retry(self, *, caller: str, stats: str, **kwargs):
         """messages.create を指数バックオフ付きで呼び出す。
@@ -748,6 +771,7 @@ class ClaudeExtractor(BaseExtractor):
         self,
         tsv_data: str,
         fiscal_period_hint: str | None = None,
+        pdf_files: list[tuple[str, bytes]] | None = None,
     ) -> list[dict]:
         if fiscal_period_hint:
             fiscal_section = PROMPT_WAGE_LEDGER_FISCAL_FILTER.format(
@@ -756,22 +780,48 @@ class ClaudeExtractor(BaseExtractor):
         else:
             fiscal_section = PROMPT_WAGE_LEDGER_NO_FILTER
 
+        tsv_for_prompt = tsv_data if tsv_data else '(Excel(TSV)データなし、添付PDFのみを参照してください)'
         prompt = PROMPT_WAGE_LEDGER.format(
-            tsv_data=tsv_data,
+            tsv_data=tsv_for_prompt,
             fiscal_period_section=fiscal_section,
         )
+        if pdf_files:
+            prompt = prompt + '\n\n' + PROMPT_WAGE_LEDGER_PDF_NOTE
 
         # 出力JSONは従業員数に比例して大きくなるため最大16Kトークン
         max_tokens = 16384
 
-        stats = f'images=0枚 prompt={len(prompt)}chars max_tokens={max_tokens}'
+        # メッセージ content を構築（PDFがあれば document ブロックを先に積む）
+        content: list = []
+        pdf_total_bytes = 0
+        if pdf_files:
+            import base64
+            for fname, pdf_bytes in pdf_files:
+                pdf_total_bytes += len(pdf_bytes)
+                b64 = base64.standard_b64encode(pdf_bytes).decode('ascii')
+                content.append({
+                    'type': 'document',
+                    'source': {
+                        'type': 'base64',
+                        'media_type': 'application/pdf',
+                        'data': b64,
+                    },
+                    'title': fname,
+                })
+        content.append({'type': 'text', 'text': prompt})
+
+        pdf_count = len(pdf_files) if pdf_files else 0
+        stats = (
+            f'pdfs={pdf_count}件 pdf合計={pdf_total_bytes/1_000_000:.2f}MB '
+            f'prompt={len(prompt)}chars max_tokens={max_tokens}'
+        )
         logger.warning(f'[API送信] caller=extract_wage_ledger {stats}')
         response = self._messages_create_with_retry(
             caller='extract_wage_ledger',
             stats=stats,
             model=self.model,
             max_tokens=max_tokens,
-            messages=[{'role': 'user', 'content': prompt}],
+            messages=[{'role': 'user', 'content': content}],
         )
         text = response.content[0].text
         logger.warning(
