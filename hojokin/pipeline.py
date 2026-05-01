@@ -249,7 +249,10 @@ def run_application_transfer(
         )
 
         # 賃金台帳 → 1人当たり給与支給総額の計画値 + 一覧Excel出力
-        wage_plan = _calc_wage_plan_from_ledger(detector, extraction.financial)
+        # AI抽出経路を活かすため extractor を渡す。失敗時は決定論パーサーにフォールバック。
+        wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
+            detector, extraction.financial, extractor=extractor,
+        )
 
         # テンプレート転記
         empty_cells = fill_template(
@@ -264,18 +267,23 @@ def run_application_transfer(
         status.status = '完了'
         status.output_files = [output_path.name]
         status.empty_cells = empty_cells
-        status.message = f'完了。空欄{len(empty_cells)}件'
-        logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件)')
+        # 賃金台帳の読み取り状況に応じて完了メッセージに警告を追記（処理は続行）
+        wage_warning = ''
+        if wage_status == 'no_data':
+            wage_warning = ' ⚠ 賃金台帳が読み取れませんでした（給与支給総額は空欄）'
+        elif wage_status == 'zero_total':
+            wage_warning = ' ⚠ 賃金台帳の給与支給総額が0でした'
+        elif wage_status == 'error':
+            wage_warning = ' ⚠ 賃金台帳処理中にエラーが発生しました'
+        status.message = f'完了。空欄{len(empty_cells)}件{wage_warning}'
+        logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件{wage_warning})')
 
-        # 賃金台帳一覧Excel出力（チェック用）
-        ledger_paths = detector.get_all('wage_ledger')
-        if ledger_paths:
-            ledger_employees = read_wage_ledgers(ledger_paths)
-            if ledger_employees:
-                company = output_path.stem.split('_')[0]
-                ledger_output = output_path.parent / f'{company}_賃金台帳一覧.xlsx'
-                export_wage_ledger_summary(ledger_employees, ledger_output, company)
-                status.output_files.append(ledger_output.name)
+        # 賃金台帳一覧Excel出力（チェック用）— AI抽出結果をそのまま再利用してAPI呼出しの2重化を防ぐ
+        if ledger_employees:
+            company = output_path.stem.split('_')[0]
+            ledger_output = output_path.parent / f'{company}_賃金台帳一覧.xlsx'
+            export_wage_ledger_summary(ledger_employees, ledger_output, company)
+            status.output_files.append(ledger_output.name)
 
     except Exception as e:
         status.status = 'エラー'
@@ -337,7 +345,12 @@ def run_wage_calculation(
         if seishain_count + part_count == 0:
             ledger_paths = detector.get_all('wage_ledger')
             if ledger_paths:
-                ledger_emps = read_wage_ledgers(ledger_paths)
+                fiscal_hint = _format_fiscal_period(financial)
+                ledger_emps = read_wage_ledgers(
+                    ledger_paths,
+                    extractor=extractor,
+                    fiscal_period_hint=fiscal_hint,
+                )
                 if ledger_emps:
                     employees_detail = _build_employees_detail_from_ledger(ledger_emps)
                     seishain_count = sum(
@@ -390,35 +403,69 @@ def run_wage_calculation(
     return status
 
 
+def _format_fiscal_period(financial: 'FinancialData') -> str | None:
+    """FinancialData の fiscal_year_start/end から AI 用ヒント文字列を組み立てる。
+
+    例: '2024-05-01' / '2025-04-30' → '2024-05〜2025-04'
+    """
+    start = (financial.fiscal_year_start or '').strip()
+    end = (financial.fiscal_year_end or '').strip()
+    if not start and not end:
+        return None
+    # YYYY-MM-DD → YYYY-MM
+    def _ym(s: str) -> str:
+        if len(s) >= 7 and s[4] == '-':
+            return s[:7]
+        return s
+    s_ym = _ym(start)
+    e_ym = _ym(end)
+    if s_ym and e_ym:
+        return f'{s_ym}〜{e_ym}'
+    return s_ym or e_ym
+
+
 def _calc_wage_plan_from_ledger(
     detector: FileDetector,
     financial: 'FinancialData',
-) -> dict[str, float] | None:
+    extractor=None,
+) -> tuple[dict[str, float] | None, list, str]:
     """
     賃金台帳から給与支給総額を算出し、年3%成長の計画値を返す。
 
-    賃金台帳がない場合はNoneを返す（C200:C204は空欄のまま）。
+    extractor が渡されると AI 抽出を優先する（USE_AI_WAGE_EXTRACTION=true 時）。
+    AI失敗時は決定論パーサーにフォールバック。
 
     Returns:
-        {
-            'employee_count_fte': FTE換算従業員数,
-            'wage_total_base': 基準年の給与支給総額,
-            'wage_total_y1': 1年目計画, 'wage_total_y2': 2年目計画,
-            'wage_total_y3': 3年目計画,
-        }
+        (plan_dict_or_None, employees_raw_list, status_message)
+        status_message:
+          - '': 正常
+          - 'no_ledger': 賃金台帳なし
+          - 'no_data': 賃金台帳はあるがデータ抽出失敗
+          - 'zero_total': 給与支給総額が0以下
+          - 'error': 例外発生
     """
     from .wage_reader import read_wage_ledgers
 
     ledger_paths = detector.get_all('wage_ledger')
     if not ledger_paths:
         logger.info('賃金台帳が見つかりません → 計画値転記をスキップ')
-        return None
+        return None, [], 'no_ledger'
+
+    fiscal_hint = _format_fiscal_period(financial)
 
     try:
-        employees_raw = read_wage_ledgers(ledger_paths)
+        employees_raw = read_wage_ledgers(
+            ledger_paths,
+            extractor=extractor,
+            fiscal_period_hint=fiscal_hint,
+        )
         if not employees_raw:
-            logger.warning('賃金台帳からデータを読み取れませんでした')
-            return None
+            logger.warning(
+                f'賃金台帳からデータを読み取れませんでした '
+                f'(ファイル: {[p.name for p in ledger_paths]}, '
+                f'fiscal_hint={fiscal_hint})'
+            )
+            return None, [], 'no_data'
 
         logger.info(f'賃金台帳: {len(employees_raw)}名読取 ({len(ledger_paths)}ファイル)')
 
@@ -472,7 +519,7 @@ def _calc_wage_plan_from_ledger(
 
         if result.total_salary <= 0:
             logger.warning('給与支給総額が0以下 → 計画値転記をスキップ')
-            return None
+            return None, employees_raw, 'zero_total'
 
         # 給与支給総額ベースで年3%成長の計画値を算出
         base = result.total_salary
@@ -491,11 +538,11 @@ def _calc_wage_plan_from_ledger(
             f'(従業員FTE: {result.employee_count_fte:.1f}人, 年3%成長, '
             f'総労働時間: {total_annual_hours:,.0f}時間)'
         )
-        return plan
+        return plan, employees_raw, ''
 
     except Exception as e:
-        logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}')
-        return None
+        logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}', exc_info=True)
+        return None, [], 'error'
 
 
 def _classify_emp_type(emp_type: str) -> str:
