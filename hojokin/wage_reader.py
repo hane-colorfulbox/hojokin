@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import openpyxl
+import pandas as pd
 
 from .config import MIN_WAGE_MAP
 
@@ -344,6 +345,81 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
                     rec['monthly_hourly_rates'][midx] = rec['hourly_rate_flat']
 
 
+def _read_csv(path: Path, emp_data: dict | None = None) -> None:
+    """CSV ファイルの簡易フォールバック読込み。
+
+    通常は AI 経路（read_wage_ledgers_with_ai → _csv_to_tsv）で処理されるため
+    この関数が呼ばれるのは USE_AI_WAGE_EXTRACTION=false または AI 抽出失敗時のみ。
+    対応範囲：氏名列＋年間給与列がある単純な集計表型 CSV のみ。
+    医療機関の月別行型（YYYYMM 1行=1月）には対応しない（AI 経路で処理）。
+    """
+    if emp_data is None:
+        emp_data = {}
+
+    try:
+        df = pd.read_csv(path, header=0, na_values=['', 'N/A', 'null'])
+    except Exception as e:
+        logger.warning(f'CSV 読込失敗: {path.name} ({e})')
+        return
+
+    # 列の正規化（日本語テキストの NFD→NFC 変換）
+    df.columns = [unicodedata.normalize('NFC', str(col)) for col in df.columns]
+
+    # 氏名列を探す（複数パターン対応）
+    name_cols = [c for c in df.columns if '氏名' in c or '名前' in c or 'name' in c.lower()]
+    if not name_cols:
+        logger.warning(f'CSV に氏名列が見つかりません: {path.name}')
+        return
+    name_col = name_cols[0]
+
+    # 給与列を探す（複数パターン対応）
+    wage_col_patterns = ['支給', '給与', '合計', '給', 'wage', 'total']
+    wage_cols = [c for c in df.columns if any(p in c for p in wage_col_patterns)]
+    if not wage_cols:
+        logger.warning(f'CSV に給与列が見つかりません: {path.name}')
+        return
+
+    # 各行を処理（従業員追加）
+    for idx, row in df.iterrows():
+        name_val = row[name_col]
+        if pd.isna(name_val) or not str(name_val).strip():
+            continue
+
+        name = str(name_val).replace('　', ' ').strip()
+        if not name or name in emp_data:
+            continue
+
+        # 初期化（_new_emp_record と同じ構造）
+        emp_type = ''
+        if '雇用形態' in df.columns:
+            et = row['雇用形態']
+            if not pd.isna(et):
+                emp_type = str(et)
+        emp_data[name] = {
+            'name': name,
+            'employment_type': emp_type,
+            'monthly_wages': [None] * 12,
+            'monthly_hours': [None] * 12,
+            'hourly_rate_flat': 0.0,
+            'avg_hours_flat': 0.0,
+            'monthly_hourly_rates': [None] * 12,
+        }
+
+        # 給与合計を取得（最初の給与列を使用）
+        if wage_cols:
+            total_wage = row[wage_cols[0]]
+            if not pd.isna(total_wage):
+                try:
+                    annual_total = float(total_wage)
+                    # 年間総額を12で除算して月別平均を算出
+                    monthly_avg = annual_total / 12
+                    emp_data[name]['monthly_wages'] = [monthly_avg] * 12
+                except (ValueError, TypeError):
+                    pass
+
+        logger.debug(f'CSV から従業員を追加: {name}')
+
+
 def _read_flexible(wb: openpyxl.Workbook,
                    emp_data: dict | None = None) -> dict:
     """柔軟パーサー本体（emp_dataに蓄積）"""
@@ -643,6 +719,39 @@ def _workbook_to_tsv(wb: openpyxl.Workbook, file_label: str) -> str:
     return '\n'.join(parts)
 
 
+def _csv_to_tsv(path: Path) -> str:
+    """CSVファイルをTSV文字列に変換（AI入力用）。
+    ヘッダー位置・列構成は AI に解釈させるため、全行を文字列のまま渡す。
+    複数エンコーディング（UTF-8 / CP932）を順次試す。
+    """
+    last_error: Exception | None = None
+    for encoding in ('utf-8-sig', 'utf-8', 'cp932', 'shift_jis'):
+        try:
+            df = pd.read_csv(
+                path,
+                header=None,
+                dtype=str,
+                keep_default_na=False,
+                encoding=encoding,
+            )
+            break
+        except (UnicodeDecodeError, UnicodeError) as e:
+            last_error = e
+            continue
+    else:
+        raise last_error or RuntimeError(f'CSV decode failed: {path.name}')
+
+    parts: list[str] = [f'### ファイル: {path.name} ###']
+    for row in df.itertuples(index=False, name=None):
+        cells = [str(c) if c is not None else '' for c in row]
+        while cells and cells[-1] == '':
+            cells.pop()
+        if not cells:
+            continue
+        parts.append('\t'.join(cells))
+    return '\n'.join(parts)
+
+
 def _validate_ai_employee(emp: dict) -> tuple[bool, str]:
     """AI抽出した1従業員データの妥当性チェック。(OK?, エラー理由)"""
     name = emp.get('name')
@@ -758,8 +867,8 @@ def read_wage_ledgers_with_ai(
 ) -> list[WageEmployee]:
     """
     AI による賃金台帳読み取り。
-    Excel(.xlsx/.xlsm) は TSV に変換、PDF はそのまま添付して1回の API 呼出しで抽出する。
-    両フォーマット混在も可。バリデーション失敗時は空リストを返す（呼出し側で fallback 判断）。
+    Excel(.xlsx/.xlsm)・CSV は TSV に変換、PDF はそのまま添付して1回の API 呼出しで抽出する。
+    各フォーマット混在も可。バリデーション失敗時は空リストを返す（呼出し側で fallback 判断）。
     """
     if not file_paths:
         return []
@@ -774,6 +883,12 @@ def read_wage_ledgers_with_ai(
                 pdf_files.append((path.name, path.read_bytes()))
             except Exception as e:
                 logger.warning(f'賃金台帳PDF読込失敗(AI経路): {path.name} ({e})')
+            continue
+        if ext == '.csv':
+            try:
+                tsv_blocks.append(_csv_to_tsv(path))
+            except Exception as e:
+                logger.warning(f'賃金台帳CSV読込失敗(AI経路): {path.name} ({e})')
             continue
         try:
             wb = openpyxl.load_workbook(str(path), data_only=True)
@@ -844,6 +959,17 @@ def read_wage_ledgers(
 
     for path in file_paths:
         try:
+            # CSV の場合は pandas で読込、以降の処理は Excel と同じ
+            if path.suffix.lower() == '.csv':
+                before = len(merged_emp_data)
+                _read_csv(path, merged_emp_data)
+                logger.info(
+                    f'賃金台帳読み取り(CSV): {path.name} '
+                    f'→ 追加/更新 {len(merged_emp_data) - before}名 (累計{len(merged_emp_data)}名)'
+                )
+                continue
+
+            # Excel の場合は既存処理
             wb = openpyxl.load_workbook(str(path), data_only=True)
         except Exception as e:
             logger.warning(f'賃金台帳読込失敗: {path.name} ({e})')
