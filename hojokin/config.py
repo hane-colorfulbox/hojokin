@@ -12,6 +12,9 @@ CLAUDE_MODEL = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-6')
 GOOGLE_CREDENTIALS_PATH = os.getenv('GOOGLE_CREDENTIALS_PATH', 'credentials/service_account.json')
 MANAGEMENT_SHEET_ID = os.getenv('MANAGEMENT_SHEET_ID', '')
 
+# 賃金台帳のAI抽出を使うか。デフォルト ON。決定論パーサーに完全に戻したい場合は false に。
+USE_AI_WAGE_EXTRACTION = os.getenv('USE_AI_WAGE_EXTRACTION', 'true').strip().lower() not in ('false', '0', 'off', 'no')
+
 # ── 標準パス ──
 BASE_DIR = Path(os.getenv('HOJOKIN_BASE_DIR', '.'))
 
