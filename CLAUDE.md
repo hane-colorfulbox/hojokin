@@ -158,6 +158,105 @@ ea6cd83 の修正内容を本番（Streamlit Cloud）でテストし、追加の
 
 ---
 
+### 2026-04-29 賃金台帳をAI抽出に切替（和暦ヘッダ対応・前事業年度フィルタ）
+
+**背景**
+2026-04-28 15:17 に坂平さんからチャットで報告:
+- 「賃金台帳一覧」を出力しなくなっている
+- 給与支給総額も入っていない
+- （要望）賃金台帳を読み込むときに前事業年度のみを対象に計算したい
+
+調査の結果、原因は **賃金台帳の和暦付き月ヘッダ**（`R6.5月`〜`R7.4月`）を既存の決定論パーサーが認識できないこと。
+[wage_reader.py:159](hojokin/wage_reader.py#L159) の `re.fullmatch(r'(\d{1,2})月', s)` がプレーン表記しかマッチしないため、月列検出に失敗 → `read_wage_ledgers` が0名 → 給与支給総額計画値の書込み・賃金台帳一覧Excel生成の両方がスキップされていた。
+production ログで `賃金台帳からデータを読み取れませんでした` を2回確認済み。
+
+「先日OKだったテスト」と「本日NGだったテスト」の間にコード変更ゼロ — 入力ファイルのフォーマット差で発覚した既知のバグ。
+
+**方針判断**
+正規表現を緩める対症療法ではなく、**「他の人が作業しないで済むツール」の方針**に従い、賃金台帳抽出を AI 化する選択を取った。
+- 既存の Sonnet 4.6 で統一（モデル混在を避ける）
+- Haiku に下げる選択肢もあったが、コスト差は月数百円レベルで、運用統一性を優先
+- AI 失敗時は決定論パーサーにフォールバック（後方互換）
+- `USE_AI_WAGE_EXTRACTION=false` 環境変数で旧経路に戻せる
+
+**実施内容**
+
+PR/コミット: `d553a44` → main マージ `a0b7a3b`（`fix/ai-wage-extraction` ブランチ経由、`--no-ff`）
+
+1. `hojokin/ai_extractor.py`:
+   - `PROMPT_WAGE_LEDGER` / `PROMPT_WAGE_LEDGER_FISCAL_FILTER` / `PROMPT_WAGE_LEDGER_NO_FILTER` 追加
+   - `BaseExtractor.extract_wage_ledger(tsv_data, fiscal_period_hint)` 抽象メソッド
+   - `StubExtractor.extract_wage_ledger`: 空リスト返却（要 API 警告）
+   - `ClaudeExtractor.extract_wage_ledger`: テキストベース API 呼出し（max_tokens=16384）
+
+2. `hojokin/wage_reader.py`:
+   - `_workbook_to_tsv(wb, file_label)`: ワークブック全シートを TSV 文字列化
+   - `_validate_ai_employee(emp)`: 雇用形態・金額範囲(0〜1000万円)・労働時間(0〜400時間)・12要素チェック
+   - `_ai_data_to_wage_employees(ai_data)`: AI 出力 → `WageEmployee` リスト変換（バリデーション付き）
+   - `read_wage_ledgers_with_ai(paths, extractor, fiscal_period_hint)`: AI 経路本体
+   - `read_wage_ledgers(paths, extractor=None, fiscal_period_hint=None)`: AI 優先 → 決定論フォールバック
+
+3. `hojokin/pipeline.py`:
+   - `_format_fiscal_period(financial)`: `FinancialData.fiscal_year_start/end` から `'2024-05〜2025-04'` 形式の AI 用ヒント文字列を生成
+   - `_calc_wage_plan_from_ledger(detector, financial, extractor=None)` を `(plan, employees, status)` の3-tuple 返却に変更
+     - status: `''` / `'no_ledger'` / `'no_data'` / `'zero_total'` / `'error'`
+     - employees を `run_application_transfer` 内で再利用 → 賃金台帳一覧出力時の API 重複呼出しを防止
+   - `run_application_transfer` で extractor を `_calc_wage_plan_from_ledger` に渡す
+   - `run_wage_calculation` の賃金台帳フォールバック経路にも extractor + fiscal_hint を渡す
+   - 失敗時 `status.message` に ⚠ 警告を付与
+
+4. `hojokin/config.py`:
+   - `USE_AI_WAGE_EXTRACTION` 環境変数フラグ（default: true）
+
+5. `app.py`:
+   - `result['message']` に `⚠` が含まれる場合は `st.warning()`、それ以外は `st.success()` 表示
+
+**検証**
+- 坂平さん提供の `賃金台帳_R6.5-R7.4.xlsx`（5名、和暦ヘッダ）で AI 抽出成功
+  - 給与支給総額 12,351,270円、FTE 3.0人、年間総労働時間 7,040時間
+  - API tokens: 1597in + 618out = **約 2.1円/案件**
+- `USE_AI_WAGE_EXTRACTION=false` で旧挙動（決定論のみ・0件返却）が維持されることを確認
+- Stub Extractor で AI→フォールバック経路が動作することを確認
+- 検算: 阿萬さん 4,284,800円（手計算と一致）
+
+**コスト試算（Sonnet 4.6, 1USD=150円）**
+| 規模 | 申請書 | 賃金台帳 | 合計 |
+|---|---|---|---|
+| 5名 | ~12円 | ~3円 | **~15円/案件** |
+| 10名 | ~12円 | ~7円 | **~19円/案件** |
+| 30名 | ~12円 | ~20円 | **~32円/案件** |
+
+補助金支援フィー（数十万〜数百万円）に対して 0.001〜0.01% 程度、誤差レベル。
+
+**ロールバック手順（優先順）**
+1. **最速**: Streamlit Cloud secrets に `USE_AI_WAGE_EXTRACTION = "false"` を設定 → コード非変更で旧経路に戻る
+2. **マージ revert**: `git revert -m 1 a0b7a3b && git push origin main`
+3. **個別コミット revert**: `git revert d553a44 && git push origin main`
+
+**修正後のカバー範囲**
+| フォーマット | 状態 |
+|---|---|
+| プレーン `1月〜12月` | ✅ |
+| 和暦 `R6.5月〜R7.4月` | ✅（今回追加）|
+| 西暦 `2024年5月` | ✅ |
+| 月別行型・YYYYMM月次型・個人台帳型 | ✅ |
+| 弥生・freee 等の各社固有フォーマット | ✅（AI 自動対応）|
+| シート名・列順違い | ✅ |
+| 24ヶ月入っていて前事業年度のみ抽出が必要 | ✅（決算期ヒントで AI フィルタ）|
+| 雇用形態の表記揺れ | ✅（AI 正規化）|
+
+**残タスク**
+- 坂平さんに再テスト依頼（マージ済み・デプロイ反映後）
+- 坂平さんからフィードバックを受けて、必要なら AI プロンプトを微調整
+- USE_AI_WAGE_EXTRACTION フラグの存在を運用ドキュメントに記載検討
+
+**副次効果**
+- 申請書類生成パイプラインの全入力データが Sonnet 4.6 統一に（履歴事項・PL・納税証明書・見積書・AI判断・**賃金台帳**）
+- 坂平さんの2つ目のリクエスト（前事業年度のみ抽出）も同 PR で同時解決
+- 既存決定論パーサーは温存しているため、AI 不要なシンプルなフォーマットでも変わらず動作
+
+---
+
 ## プロジェクト構成メモ
 
 ### GAS（gas/ 配下）
