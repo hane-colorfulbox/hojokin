@@ -624,20 +624,6 @@ if data_source == 'Google Drive':
                         loc = f.get('folder_name', 'ルート')
                         st.text(f'  [{loc}] {f["name"]}')
 
-                csv_wage_ledgers = [
-                    f['name'] for f in all_files
-                    if f['name'].lower().endswith('.csv') and '賃金台帳' in f['name']
-                ]
-                if csv_wage_ledgers:
-                    st.warning(
-                        '⚠️ **賃金台帳が .csv 形式で検出されました**（現在このツールは .xlsx のみ対応）\n\n'
-                        f'対象ファイル: `{"`, `".join(csv_wage_ledgers)}`\n\n'
-                        '**変換手順（いずれか）:**\n'
-                        '1. ローカルのVS Code + Claude Code で該当CSVを開き、「この賃金台帳CSVをxlsxに変換して」と依頼\n'
-                        '2. Excel で CSV を開いて「名前を付けて保存」→ ファイル形式を「Excelブック (.xlsx)」で保存\n\n'
-                        '変換後、Driveフォルダに .xlsx をアップロードしてから再度実行してください。\n'
-                        '（.csv のままでは賃金台帳が読み込まれません）'
-                    )
             else:
                 st.warning('このフォルダにはファイルがありません。')
 
@@ -670,7 +656,7 @@ else:
          '履歴事項全部証明書_○○様.pdf',           {'application', 'all'},          {'application', 'all'}),
         ('pl',          '損益計算書 / 決算報告書', 'PDF',       ['損益計算書', '決算報告書', '決算書'],
          '42期 決算報告書.pdf',                    {'application', 'wage', 'all'},  {'application', 'all'}),
-        ('wage_ledger', '賃金台帳',               'Excel/PDF', ['賃金台帳'],
+        ('wage_ledger', '賃金台帳',               'Excel/PDF/CSV', ['賃金台帳'],
          '賃金台帳_2025年度.xlsx',                 {'wage', 'bonus'},              {'wage', 'bonus'}),
         ('cost_report', '製造原価報告書',          'PDF',       ['製造原価報告書', '原価報告書'],
          '製造原価報告書.pdf',                     {'application', 'wage', 'all'},  set()),
@@ -722,7 +708,7 @@ else:
     uploaded_files = st.file_uploader(
         'ここにファイルをまとめてドラッグ&ドロップ（複数選択可）',
         accept_multiple_files=True,
-        type=['pdf', 'xlsx', 'xls'],
+        type=['pdf', 'xlsx', 'xls', 'csv'],
         key='file_uploader',
     )
 
