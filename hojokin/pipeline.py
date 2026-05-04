@@ -578,18 +578,21 @@ def _check_wage_pl_consistency(
     Returns:
         警告文字列（不整合あり）または空文字列（整合 / 比較不能）
 
-    判定:
+    判定方針:
+        - wage_plan['wage_total_base'] は wage_calculator.calculate_per_capita_wage で
+          **役員報酬を除外** して算出されている（[wage_calculator.py:49] 参照）。
+          そのため PL 側からも officer_compensation を除いて比較する必要がある。
+        - 比較対象 = PL の (給料手当 + 雑給 + 賞与) ※役員報酬除く
         - PL に給与系の計上が無い場合は判定不能 → '' を返す
-        - 賃金台帳の年間合計 vs PL の (給与+雑給+賞与+役員報酬) を比較
         - 差が tolerance を超えたら警告を返す（処理は続行する）
     """
     if not wage_plan or 'wage_total_base' not in wage_plan:
         return ''
+    # 役員報酬は除外（賃金台帳側も役員除外で集計しているため）
     pl_personnel = (
         (financial.salary or 0)
         + (financial.misc_wages or 0)
         + (financial.bonus or 0)
-        + (financial.officer_compensation or 0)
     )
     if pl_personnel <= 0:
         return ''  # PL データなし → 比較不能
@@ -602,7 +605,7 @@ def _check_wage_pl_consistency(
     direction = '多い' if ledger_total > pl_personnel else '少ない'
     return (
         f' ⚠ 賃金台帳合計({ledger_total:,.0f}円)と損益計算書の人件費'
-        f'({pl_personnel:,.0f}円)に{diff_ratio*100:.0f}%の差があります'
+        f'({pl_personnel:,.0f}円, 役員報酬除く)に{diff_ratio*100:.0f}%の差があります'
         f'（賃金台帳が{direction}）。AI抽出が月数や雇用区分を取り違えていないか確認してください'
     )
 

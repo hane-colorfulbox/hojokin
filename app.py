@@ -588,10 +588,14 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
     EXCEL_CSV_LIMIT = 5 * 1024 * 1024
     WAGE_TOTAL_LIMIT = 25 * 1024 * 1024
     WAGE_COUNT_LIMIT = 8
+    # FileDetector.ALLOWED_EXTS['wage_ledger'] と整合させる（処理対象拡張子のみカウント）
+    WAGE_EXTS = {'.xlsx', '.xlsm', '.pdf', '.csv'}
 
     wage_keywords = ('賃金台帳',)
     wage_files = []
     for name, size in file_size_pairs:
+        if not name or size is None or size <= 0:
+            continue  # サイズ不明や空ファイルはスキップ（誤警告防止）
         n = unicodedata.normalize('NFC', name)
         ext = Path(n).suffix.lower()
         if ext == '.pdf' and size > PDF_LIMIT:
@@ -604,7 +608,8 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
                 f'📦 大容量{ext}: {n} ({size/1024/1024:.1f}MB) — '
                 f'想定外に大きいファイルです。誤ったファイルでないか確認してください'
             )
-        if any(kw in n for kw in wage_keywords):
+        # 賃金台帳カウントは処理対象拡張子のみ（.docx等の誤検出を防ぐ）
+        if any(kw in n for kw in wage_keywords) and ext in WAGE_EXTS:
             wage_files.append((n, size))
 
     if wage_files:
