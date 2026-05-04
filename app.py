@@ -25,6 +25,24 @@ def _nfc_filename(name: str) -> str:
     """
     return unicodedata.normalize('NFC', name)
 
+
+def _safe_company_name(name: str) -> str:
+    """会社名をファイル名に使える形にサニタイズする。
+
+    会社名は出力ファイル名（例: 顧客企業A_通常枠_2026_AI版.xlsx）に直接連結されるため、
+    Windows で使えない文字（/ \\ : * ? " < > |）が含まれているとパス解釈が壊れて
+    FileNotFoundError になる。実例: 会社名「テスト5/1」→ パスが「テスト5\1_...」と解釈され失敗。
+    禁止文字を - に置換し、制御文字・先頭末尾の空白は除去する。
+    """
+    if not name:
+        return ''
+    # Windows 禁止文字 + 改行・タブ
+    forbidden = '/\\:*?"<>|\r\n\t'
+    safe = ''.join('-' if c in forbidden else c for c in name)
+    # 制御文字（U+0000-U+001F, U+007F）の除去
+    safe = ''.join(c for c in safe if c.isprintable())
+    return safe.strip()
+
 import streamlit as st
 
 # .env読み込み
@@ -436,11 +454,18 @@ st.markdown("""
 with st.sidebar:
     st.header('⚙️ 設定')
 
-    company_name = st.text_input(
+    company_name_input = st.text_input(
         '会社名（必須）',
         placeholder='例: 顧客企業A',
         help='正式名称でなくてもOK。出力ファイル名に使われます。',
     )
+    # ファイル名に使えない文字（/ \ : * ? " < > | 等）が含まれているとパスエラーになる。
+    # 入力直後にサニタイズして、以降の output_path 生成すべてに安全に使う。
+    company_name = _safe_company_name(company_name_input)
+    if company_name_input and company_name != company_name_input:
+        st.caption(
+            f'⚠ ファイル名に使えない文字を「-」に置換しました: `{company_name}`'
+        )
 
     template_label = st.selectbox(
         'テンプレート種別',
