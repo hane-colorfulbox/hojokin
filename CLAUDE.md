@@ -449,3 +449,84 @@ Google Drive 内の CSV:
 - ✅ フォールバック決定論経路、回帰なし
 - 📝 コード修正済み（main にコミット済み、push なし）
 - ⏳ 担当者の本番テストで実 CSV 検証後、GitHub push → Streamlit デプロイ
+
+---
+
+### 2026-05-01 ファイル名 NFC 統一 + UI 判別 NFC 化 + 前事業年度フィルタ実テスト
+
+**背景**
+2026-05-01 のセッションで担当者が本番テスト中、以下を確認:
+
+1. **`テスト5/1` という会社名でパスエラー**: 会社名にスラッシュ含む → `/tmp/.../テスト5/1_xxx.xlsx` がパスとして解釈され `[Errno 2] No such file or directory` で失敗
+2. **`ヒアリングシート_有限会社クリーンニイガタ.xlsx` が UI で「未検出」表示**: ファイル名が NFD（macOS の濁点分離）で送信されていて、`_analyze_files` が NFC キーワード「ヒアリング」とマッチしない問題
+3. **アップロードモードと Drive モードでファイル名扱いに差異がある可能性**: 担当者から「両モードで挙動が違うかも」と指摘
+
+**実施内容**
+
+PR/コミット:
+- `b509d2c` (`fix/nfc-filename`) → `8dc5be6` (merge to main)
+- `8d8270c` (`fix/analyze-files-nfc`) → `dc45f72` (merge to main)
+
+1. `app.py`:
+   - `_nfc_filename(name)` ヘルパーを追加
+   - `save_uploaded_files`: 保存名を NFC 化（ローカルアップロード）
+   - Drive download 経路: 保存名を NFC 化
+   - template_file 保存: NFC 化
+   - `_analyze_files`: ファイル名を NFC 化してから keyword 比較（UI 表示用）
+   - `_check_required_by_names`: 同上（必須チェック用）
+
+**結果として吸収できる差異**
+- ブラウザがファイル名を NFC で送信（Win 一般）vs NFD で送信（mac 一部）
+- アップロードモード（ブラウザ送信）vs Drive モード（API 取得）
+- 保存先が macOS（NFD 強制）vs Linux（指定通り）vs Windows（NFC 強制）
+
+**前事業年度フィルタの実データ確認**
+
+担当者が「前事業年度のみ抽出」機能を実データでテストしたいと依頼。
+
+検証方法:
+- 既存 `賃金台帳_R6.5-R7.4.xlsx`（5名・12ヶ月）を拡張して **24ヶ月版**を合成（R7.5-R8.4 を 1.05 倍データで追加）
+- ケース1: `fiscal_period_hint='2024-05〜2025-04'` を渡す → AI は 元の R6.5-R7.4 のみ抽出
+- ケース2: `fiscal_period_hint=None` を渡す → AI は直近 12 ヶ月を抽出（プロンプトの指示）
+
+検証結果（担当者Xさんの年間合計）:
+| ケース | 結果 | 期待 |
+|---|---|---|
+| fiscal_hint="2024-05〜2025-04" | **0円**（元データそのまま）| ✅ 前事業年度のみ |
+| fiscal_hint なし | 4,499,040円（1.05倍データ）| ✅ 直近12ヶ月選択 |
+
+→ AI が指定された 12 ヶ月だけを正しく抽出することを確認。
+
+**Drive 内の実データ調査結果**
+- xlsx 賃金台帳: 顧客企業Eの 7名分（2025年/令和7年・1年分のみ）
+- PDF 賃金台帳: クリーンニイガタ・ユーアイコム等（複数あるが PDF のみで、別途 PDF 対応済）
+- **xlsx で複数年度を持つ実案件は Drive 上に存在しない**ため、24ヶ月リアルデータでの検証は今回は合成データで代替
+
+**ロールバック手順**
+1. NFC 修正のみ戻したい: `git revert -m 1 dc45f72 -m 1 8dc5be6`
+2. AI 抽出ごと戻したい: `git revert -m 1 a0b7a3b`
+3. 環境変数で切替: `USE_AI_WAGE_EXTRACTION=false`
+
+**現在の状態（2026-05-01 終了時点）**
+- ✅ NFC 統一修正をデプロイ済み（`dc45f72`）
+- ✅ Streamlit Cloud で担当者がテスト → 顧客企業Dの申請書 + 給与計算が正常生成（5名検出）
+- ✅ AI 抽出 + 前事業年度フィルタ機能、合成データで動作確認
+- ⚠ 顧客企業Dの賃金台帳が PDF のため `wage_plan` の計画値（行216-219）は空欄（既存仕様）
+- ⏳ 担当者から残課題:「PDF 賃金台帳対応を考えるかどうか」議論段階（このセッションの直後に PDF 対応コミット `c5fa62e` 等が main に入った模様）
+
+**次セッション（Windows 切替時）への引き継ぎ事項**
+
+1. **作業環境**: macOS → Windows に切替予定
+   - クローン手順: `git clone https://github.com/hane-colorfulbox/hojokin.git`
+   - Python 3.11 + `pip install -r requirements.txt`
+   - `.env` に `CLAUDE_API_KEY=...`（macOS 側の `.env` 内容を参照）
+2. **本番 URL**: https://hojokin-uymden838zfglt9uahkapf.streamlit.app
+3. **直近の懸案**:
+   - 担当者から本日 PDF/CSV 対応された機能の実テスト結果待ち
+   - 案件管理ダッシュボードのEXTERNAL_VENDOR_A権限問題（既知）
+4. **NFC 関連知識**: ファイル名の NFC 統一は app.py 側で完了。FileDetector（pipeline.py 側）も NFC 正規化を行うので、Windows 環境でファイル名が NFC で送信されても問題なく動く。
+5. **テスト用ファイル（macOS Downloads にあるもの・Windows でも入手可能）**:
+   - `賃金台帳_R6.5-R7.4.xlsx` (5名・和暦ヘッダ・テスト用)
+   - 顧客企業Eの個人台帳型 7 ファイル（Drive 上 fileId は別記録）
+
+---
