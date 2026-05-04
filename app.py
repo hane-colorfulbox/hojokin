@@ -574,6 +574,55 @@ def _analyze_files(file_names, task):
     }
 
 
+def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
+    """ファイル(名前, バイト数)から大容量・大量警告を作る。
+
+    閾値（実害が出る前のソフト警告レベル）:
+      - PDF 30MB超: API 残高消費が大きい・タイムアウトリスク
+      - 賃金台帳ファイル合計 25MB超: AI 抽出に長時間かかる可能性
+      - 賃金台帳ファイル 8件超: 個人別ファイル多数 → AI 抽出 max_tokens 不足の可能性
+      - 単一 Excel/CSV 5MB超: 想定外に大きく、誤ったファイルの可能性
+    """
+    warnings = []
+    PDF_LIMIT = 30 * 1024 * 1024
+    EXCEL_CSV_LIMIT = 5 * 1024 * 1024
+    WAGE_TOTAL_LIMIT = 25 * 1024 * 1024
+    WAGE_COUNT_LIMIT = 8
+
+    wage_keywords = ('賃金台帳',)
+    wage_files = []
+    for name, size in file_size_pairs:
+        n = unicodedata.normalize('NFC', name)
+        ext = Path(n).suffix.lower()
+        if ext == '.pdf' and size > PDF_LIMIT:
+            warnings.append(
+                f'📦 大容量PDF: {n} ({size/1024/1024:.1f}MB) — '
+                f'AI 抽出に時間がかかる可能性があります（タイムアウト 300秒）'
+            )
+        if ext in ('.xlsx', '.xlsm', '.csv') and size > EXCEL_CSV_LIMIT:
+            warnings.append(
+                f'📦 大容量{ext}: {n} ({size/1024/1024:.1f}MB) — '
+                f'想定外に大きいファイルです。誤ったファイルでないか確認してください'
+            )
+        if any(kw in n for kw in wage_keywords):
+            wage_files.append((n, size))
+
+    if wage_files:
+        total_size = sum(s for _, s in wage_files)
+        if total_size > WAGE_TOTAL_LIMIT:
+            warnings.append(
+                f'📦 賃金台帳合計サイズが大きいです（{total_size/1024/1024:.1f}MB, '
+                f'{len(wage_files)}ファイル） — AI 抽出が長時間化する可能性'
+            )
+        if len(wage_files) > WAGE_COUNT_LIMIT:
+            warnings.append(
+                f'📂 賃金台帳ファイルが多数あります（{len(wage_files)}件） — '
+                f'従業員数が多い場合は AI 出力が途中で切れる可能性があります（max_tokens 16384）'
+            )
+
+    return warnings
+
+
 def _render_file_check_result(result, total_count):
     """判別結果の表示（ローカル/Drive 共通）"""
     if result['all_required_ok']:
@@ -680,6 +729,17 @@ if data_source == 'Google Drive':
 
                 drive_analysis = _analyze_files([f['name'] for f in all_files], task_type)
                 _render_file_check_result(drive_analysis, len(all_files))
+                # 容量・件数の事前警告（Drive ファイルのサイズは f['size'] が文字列の場合があるので int 変換）
+                size_pairs = []
+                for f in all_files:
+                    sz = f.get('size', 0)
+                    try:
+                        sz = int(sz) if sz else 0
+                    except (TypeError, ValueError):
+                        sz = 0
+                    size_pairs.append((f['name'], sz))
+                for w in _check_size_warnings(size_pairs):
+                    st.warning(w)
 
                 with st.expander('ファイル一覧（Drive上の場所）', expanded=False):
                     for f in all_files:
@@ -778,6 +838,12 @@ else:
     if uploaded_files:
         upload_analysis = _analyze_files([f.name for f in uploaded_files], task_type)
         _render_file_check_result(upload_analysis, len(uploaded_files))
+        # 容量・件数の事前警告（処理は続行可能、ユーザーに確認を促すだけ）
+        size_warnings = _check_size_warnings(
+            [(f.name, f.size) for f in uploaded_files]
+        )
+        for w in size_warnings:
+            st.warning(w)
 
     if task_type in ('application', 'all'):
         st.markdown('---')

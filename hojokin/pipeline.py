@@ -278,7 +278,9 @@ def run_application_transfer(
             wage_warning = ' ⚠ 賃金台帳の給与支給総額が0でした'
         elif wage_status == 'error':
             wage_warning = ' ⚠ 賃金台帳処理中にエラーが発生しました'
-        status.message = f'完了。空欄{len(empty_cells)}件{wage_warning}'
+        # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
+        consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
+        status.message = f'完了。空欄{len(empty_cells)}件{wage_warning}{consistency_warning}'
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件{wage_warning})')
 
         # 賃金台帳一覧Excel出力（チェック用）— AI抽出結果をそのまま再利用してAPI呼出しの2重化を防ぐ
@@ -559,6 +561,50 @@ def _calc_wage_plan_from_ledger(
     except Exception as e:
         logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}', exc_info=True)
         return None, [], 'error'
+
+
+def _check_wage_pl_consistency(
+    wage_plan: dict | None,
+    financial: 'FinancialData',
+    tolerance: float = 0.20,
+) -> str:
+    """賃金台帳合計と損益計算書の人件費を照合し、不整合があれば警告文字列を返す。
+
+    Args:
+        wage_plan: _calc_wage_plan_from_ledger の戻り値（基準年の給与支給総額を含む）
+        financial: 損益計算書から抽出した財務データ
+        tolerance: 許容差（デフォルト ±20%）
+
+    Returns:
+        警告文字列（不整合あり）または空文字列（整合 / 比較不能）
+
+    判定:
+        - PL に給与系の計上が無い場合は判定不能 → '' を返す
+        - 賃金台帳の年間合計 vs PL の (給与+雑給+賞与+役員報酬) を比較
+        - 差が tolerance を超えたら警告を返す（処理は続行する）
+    """
+    if not wage_plan or 'wage_total_base' not in wage_plan:
+        return ''
+    pl_personnel = (
+        (financial.salary or 0)
+        + (financial.misc_wages or 0)
+        + (financial.bonus or 0)
+        + (financial.officer_compensation or 0)
+    )
+    if pl_personnel <= 0:
+        return ''  # PL データなし → 比較不能
+    ledger_total = wage_plan['wage_total_base']
+    if ledger_total <= 0:
+        return ''
+    diff_ratio = abs(ledger_total - pl_personnel) / pl_personnel
+    if diff_ratio <= tolerance:
+        return ''
+    direction = '多い' if ledger_total > pl_personnel else '少ない'
+    return (
+        f' ⚠ 賃金台帳合計({ledger_total:,.0f}円)と損益計算書の人件費'
+        f'({pl_personnel:,.0f}円)に{diff_ratio*100:.0f}%の差があります'
+        f'（賃金台帳が{direction}）。AI抽出が月数や雇用区分を取り違えていないか確認してください'
+    )
 
 
 def _classify_emp_type(emp_type: str) -> str:
