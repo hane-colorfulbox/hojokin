@@ -530,3 +530,84 @@ PR/コミット:
    - 顧客企業Eの個人台帳型 7 ファイル（Drive 上 fileId は別記録）
 
 ---
+
+### 2026-05-04 API重複呼出の解消・加点判定 PDF/CSV対応・タイムアウト延長
+
+**背景**
+2026-05-01 のセッションで CSV 対応・PDF 対応した後、担当者の本番テスト中に
+6.78MB PDF×2 件で 180 秒タイムアウトが発生。本番ログを精査して以下の問題を特定:
+
+1. `all` タスクで `extract_pl` / `extract_wage_ledger` が同一案件で 2 回呼ばれる重複
+   （application で1回 + wage で1回）
+2. 加点判定機能 (`_run_bonus_judgment`) が Excel 限定 → Drive 内 76% (PDF/CSV) で使えない
+3. 大容量 PDF で 180 秒タイムアウト発生
+
+**実施内容**
+
+コミット: `7406c73` (UI 注意書き) → `b503f31` (重複解消＋加点判定＋timeout)
+
+1. **UI 注意書き整理** (`7406c73`):
+   - app.py の Drive モードで「.csv → xlsx に変換しろ」古い警告を削除（CSV はそのまま処理可能）
+   - 賃金台帳の対応形式表示を `Excel/PDF` → `Excel/PDF/CSV` に
+   - file_uploader の type に `.csv` を追加
+
+2. **ProcessingStatus に AI 抽出結果を保持** (`b503f31`):
+   - `hojokin/models.py`: `ProcessingStatus.financial` / `ledger_employees` フィールド追加
+   - `run_application_transfer` の `status` に `extraction.financial` と `ledger_employees` をセット
+   - 後続タスクで再利用するためのキャリア
+
+3. **`run_wage_calculation` のキャッシュ対応** (`b503f31`):
+   - 引数 `cached_financial` / `cached_ledger_employees` 追加
+   - キャッシュがあれば `extract_pl` / `read_wage_ledgers` の API 呼出をスキップ
+   - なければ従来通り（後方互換）
+
+4. **app.py で all タスク時の連結** (`b503f31`):
+   - application 結果から `_cached_financial` / `_cached_ledger_employees` を保持
+   - wage に渡して API 重複を解消
+
+5. **加点判定 (`_run_bonus_judgment`) を AI 経路化** (`b503f31`):
+   - ファイル検索を `.xlsx/.xlsm/.xls/.pdf/.csv` に拡張
+   - `read_wage_ledger` (単数) → `read_wage_ledgers` (複数+AI) に切替
+   - `extractor` を bonus でも作成して渡す（236-249 行で `task_type in (..., 'bonus')` 拡張）
+   - エラーメッセージを「Excel/PDF/CSV」表記に修正
+
+6. **API timeout 180秒 → 300秒** (`b503f31`):
+   - `hojokin/ai_extractor.py` の `ClaudeExtractor` 初期化時の timeout 既定値を変更
+   - 6MB級 PDF×2 件でも 1 発で完走できる想定
+   - リトライ回数（最大 3 回）は据え置き
+
+**コスト削減効果（試算）**
+| シナリオ | 改修前 | 改修後 |
+|---|---|---|
+| `all` タスク 1 案件あたり | 約 ¥12-18（重複あり） | **約 ¥6-9（半減）** |
+| 月 50 件想定 | - | **月 ¥300-450 削減** |
+| 加点判定の対応範囲 | Excel のみ（24% のファイル） | **Excel/PDF/CSV（100%）** |
+
+**ローカル検証**
+- AST 構文チェック: 全 Python ファイル OK
+- import チェック: ProcessingStatus 新フィールド・`run_wage_calculation` 新引数が正しくロード
+- 加点判定の Sonnet サブエージェント検証: API なしで JSON → `judge_bonus_points` 動作確認済み
+
+**ロールバック手段**
+1. timeout のみ戻したい: `hojokin/ai_extractor.py` の `timeout: float = 300.0` → `180.0`
+2. 加点判定 AI 化を戻したい: `git revert b503f31`
+3. 環境変数: `USE_AI_WAGE_EXTRACTION=false` で AI 経路全体を無効化（加点判定も Excel のみに戻る）
+
+**副次成果: `/sonnet` グローバルコマンド（リポジトリ外）**
+今回の実装中に「ローカルで Sonnet 4.6 を API 呼び出さずに検証する」需要が頻発したため、
+`~/.claude/commands/sonnet.md` をグローバル配置（**プロジェクト外**）。
+- 任意のプロンプト+データを `Agent(subagent_type="general-purpose", model="sonnet")` で実行
+- 補助金プロジェクト以外の Claude Code セッションでも使える汎用コマンド
+- リポジトリ管理外（個人の Claude Code 設定）
+- Windows 環境では `%USERPROFILE%\.claude\commands\sonnet.md` に同等ファイルを配置すれば移植可能
+
+**現在の状態（2026-05-04）**
+- ✅ 全変更デプロイ済み（main: `b503f31`）
+- ✅ Streamlit Cloud で担当者本番テスト続行中
+- ⏳ Windows 切替後、次のセッションで本番テスト結果を確認
+
+**Windows 移行時の追加注意点**
+- 上記の 5/4 改修により「タスク間の AI 抽出結果の引き継ぎ」が `ProcessingStatus` 経由で行われるため、
+  app.py の `results['application']['_cached_*']` キーには dataclass オブジェクトが入っている。
+  将来 results を JSON シリアライズする処理を追加する際はこのキーを除外すること（先頭が `_` で識別可能）。
+- Windows 側で `~/.claude/commands/sonnet.md` をコピーすれば、移行先でも `/sonnet` コマンドが使える。

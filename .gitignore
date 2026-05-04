@@ -7,6 +7,9 @@ credentials/
 __pycache__/
 *.pyc
 *.pyo
+.venv/
+venv/
+.python-version
 
 # 顧客資料・出力ファイル
 output/
