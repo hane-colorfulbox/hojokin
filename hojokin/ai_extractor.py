@@ -21,9 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 # ── リトライ設定 ──
-# 初回+2回リトライ = 最大3回試行、バックオフは 2s → 5s
-MAX_API_ATTEMPTS = 3
-API_BACKOFF_SECONDS = [2, 5]
+# 初回+1回リトライ = 最大2回試行、バックオフは 2s
+# timeout エラーは即 fail（再試行しても 300 秒 × N 回浪費するだけのため）
+MAX_API_ATTEMPTS = 2
+API_BACKOFF_SECONDS = [2]
 
 # リトライ対象のHTTPステータス（APIStatusError系の一時的失敗）
 # 422: "context reduction is suggested" 等のflakyエラー
@@ -423,9 +424,10 @@ class ClaudeExtractor(BaseExtractor):
         logger.info(f'Claude API 初期化完了 (model={model}, timeout={timeout}s)')
 
     def _messages_create_with_retry(self, *, caller: str, stats: str, **kwargs):
-        """messages.create を指数バックオフ付きで呼び出す。
+        """messages.create をバックオフ付きで呼び出す。
 
-        - 422/429/5xx/529/timeout/connection エラーは最大3回まで再試行
+        - 422/429/5xx/529/connection エラーは最大1回まで再試行
+        - **timeout（300秒経過）は即失敗**（再試行しても同条件で再度 timeout するだけのため）
         - 400 credit_balance_too_low は APICreditExhaustedError に変換して即失敗
         - その他の 400/401/403/404/413 は即失敗
         - 再試行時は retry_callback(attempt, max_attempts, wait, err_summary) を呼ぶ
@@ -475,8 +477,16 @@ class ClaudeExtractor(BaseExtractor):
                 logger.error(f'[API失敗/確定] caller={caller} {stats} status={status} error={e}')
                 raise
 
-            except (anthropic.APITimeoutError, anthropic.APIConnectionError) as e:
-                # ネットワーク系の一時障害もリトライ
+            except anthropic.APITimeoutError as e:
+                # timeout は即失敗（リトライしても 300 秒 × N 回浪費するだけ）
+                logger.error(
+                    f'[API失敗/timeout即失敗] caller={caller} {stats} '
+                    f'error={type(e).__name__}: {e}'
+                )
+                raise
+
+            except anthropic.APIConnectionError as e:
+                # ネットワーク瞬断は1回だけリトライ
                 if attempt < MAX_API_ATTEMPTS:
                     last_error = e
                     wait = API_BACKOFF_SECONDS[attempt - 1]

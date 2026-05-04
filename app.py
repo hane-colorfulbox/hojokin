@@ -575,17 +575,20 @@ def _analyze_files(file_names, task):
 
 
 def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
-    """ファイル(名前, バイト数)から大容量・大量警告を作る。
+    """ファイル(名前, バイト数)から大容量・大量警告と処理時間目安を作る。
 
     閾値（実害が出る前のソフト警告レベル）:
       - PDF 30MB超: API 残高消費が大きい・タイムアウトリスク
-      - 賃金台帳ファイル合計 25MB超: AI 抽出に長時間かかる可能性
+      - 賃金台帳PDF合計 6MB超: 処理時間目安を表示（情報レベル）
+        → 7MB 前後から処理時間が顕著に伸びるため、6MB 超で事前案内
+      - 賃金台帳ファイル合計 25MB超: AI 抽出に長時間かかる可能性（警告）
       - 賃金台帳ファイル 8件超: 個人別ファイル多数 → AI 抽出 max_tokens 不足の可能性
       - 単一 Excel/CSV 5MB超: 想定外に大きく、誤ったファイルの可能性
     """
     warnings = []
     PDF_LIMIT = 30 * 1024 * 1024
     EXCEL_CSV_LIMIT = 5 * 1024 * 1024
+    WAGE_PDF_NOTICE_LIMIT = 6 * 1024 * 1024  # 賃金台帳PDFがこのサイズ超で処理時間目安を表示
     WAGE_TOTAL_LIMIT = 25 * 1024 * 1024
     WAGE_COUNT_LIMIT = 8
     # FileDetector.ALLOWED_EXTS['wage_ledger'] と整合させる（処理対象拡張子のみカウント）
@@ -593,6 +596,7 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
 
     wage_keywords = ('賃金台帳',)
     wage_files = []
+    wage_pdf_files = []
     for name, size in file_size_pairs:
         if not name or size is None or size <= 0:
             continue  # サイズ不明や空ファイルはスキップ（誤警告防止）
@@ -611,6 +615,25 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
         # 賃金台帳カウントは処理対象拡張子のみ（.docx等の誤検出を防ぐ）
         if any(kw in n for kw in wage_keywords) and ext in WAGE_EXTS:
             wage_files.append((n, size))
+            if ext == '.pdf':
+                wage_pdf_files.append((n, size))
+
+    # 賃金台帳PDF合計サイズに応じた処理時間目安（情報レベル）
+    # 経験則: PDF 1MB あたり約 6 ページ、1 ページあたり 2〜3 秒の API 処理。
+    # 7MB → 約 1.5〜2分 / 10MB → 2〜3分 / 14MB → 3〜5分（タイムアウト 300秒に近づく）
+    if wage_pdf_files:
+        pdf_total = sum(s for _, s in wage_pdf_files)
+        if pdf_total > WAGE_PDF_NOTICE_LIMIT:
+            mb = pdf_total / 1024 / 1024
+            est_min_sec = mb * 12   # 1MB ≈ 12 秒（楽観値）
+            est_max_sec = mb * 25   # 1MB ≈ 25 秒（悲観値）
+            est_min = max(1, round(est_min_sec / 60))
+            est_max = max(est_min + 1, round(est_max_sec / 60))
+            warnings.append(
+                f'⏱ 賃金台帳PDFが大きめです（{mb:.1f}MB, {len(wage_pdf_files)}ファイル）— '
+                f'処理時間目安: 約{est_min}〜{est_max}分。'
+                f'可能であれば Excel / CSV 形式で提供いただくと数秒〜数十秒で完了します'
+            )
 
     if wage_files:
         total_size = sum(s for _, s in wage_files)
