@@ -477,6 +477,10 @@ class ClaudeExtractor(BaseExtractor):
                 logger.error(f'[API失敗/確定] caller={caller} {stats} status={status} error={e}')
                 raise
 
+            # ⚠ 重要: APITimeoutError は APIConnectionError のサブクラス。
+            # この2つの except 節の並び順は **絶対に入れ替えないこと**。
+            # 入れ替えると Timeout が Connection 扱いでリトライされ、
+            # 300 秒 × N 回 = 数分〜十数分のハングが再発する。
             except anthropic.APITimeoutError as e:
                 # timeout は即失敗（リトライしても 300 秒 × N 回浪費するだけ）
                 logger.error(
