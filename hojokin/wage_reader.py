@@ -719,6 +719,41 @@ def _workbook_to_tsv(wb: openpyxl.Workbook, file_label: str) -> str:
     return '\n'.join(parts)
 
 
+def _pdf_to_tsv(path: Path) -> str:
+    """PDFからテキストを抽出してTSV風文字列に変換（AI入力用）。
+    テキスト層が薄い場合は RuntimeError を送出 → 呼出し側でバイナリ送信にフォールバックする。
+    """
+    import fitz  # PyMuPDF
+    MIN_CHARS_PER_PAGE = 50   # これ未満なら画像PDF扱いとしてフォールバック
+    MAX_TOTAL_CHARS = 500_000  # 超大量テキストへのガード（約125Kトークン相当）
+
+    doc = fitz.open(str(path))
+    page_count = len(doc)  # close前に保持
+    parts: list[str] = [f'### ファイル: {path.name} ###']
+    total_chars = 0
+    try:
+        for page_num in range(page_count):
+            text = doc[page_num].get_text('text')
+            if text.strip():
+                parts.append(f'\n--- ページ {page_num + 1} ---')
+                parts.append(text)
+                total_chars += len(text)
+                if total_chars > MAX_TOTAL_CHARS:
+                    logger.warning(
+                        f'PDF テキスト量上限超過({total_chars:,}文字)でページ{page_num+1}以降を切り捨て: {path.name}'
+                    )
+                    break
+    finally:
+        doc.close()
+
+    avg_chars = total_chars / max(page_count, 1)
+    if avg_chars < MIN_CHARS_PER_PAGE:
+        raise RuntimeError(
+            f'PDF テキスト層が薄すぎます ({avg_chars:.0f}文字/ページ): {path.name}'
+        )
+    return '\n'.join(parts)
+
+
 def _csv_to_tsv(path: Path) -> str:
     """CSVファイルをTSV文字列に変換（AI入力用）。
     ヘッダー位置・列構成は AI に解釈させるため、全行を文字列のまま渡す。
@@ -886,13 +921,21 @@ def read_wage_ledgers_with_ai(
         return []
 
     tsv_blocks: list[str] = []
-    pdf_files: list[tuple[str, bytes]] = []
+    pdf_files: list[tuple[str, bytes]] = []  # テキスト抽出失敗時のバイナリフォールバック用
 
     for path in file_paths:
         ext = path.suffix.lower()
         if ext == '.pdf':
             try:
-                pdf_files.append((path.name, path.read_bytes()))
+                tsv_blocks.append(_pdf_to_tsv(path))
+                logger.info(f'賃金台帳PDF→テキスト変換: {path.name}')
+            except RuntimeError as e:
+                # テキスト層が薄い（画像PDF）→ バイナリ送信にフォールバック
+                logger.warning(f'{e} → バイナリ送信にフォールバック')
+                try:
+                    pdf_files.append((path.name, path.read_bytes()))
+                except Exception as e2:
+                    logger.warning(f'賃金台帳PDF読込失敗(AI経路): {path.name} ({e2})')
             except Exception as e:
                 logger.warning(f'賃金台帳PDF読込失敗(AI経路): {path.name} ({e})')
             continue
@@ -914,10 +957,11 @@ def read_wage_ledgers_with_ai(
         return []
 
     combined_tsv = '\n\n'.join(tsv_blocks) if tsv_blocks else ''
+    pdf_count_binary = len(pdf_files)
     pdf_total_mb = sum(len(p[1]) for p in pdf_files) / 1_000_000
     logger.info(
-        f'AI抽出開始: Excel{len(tsv_blocks)}ファイル PDF{len(pdf_files)}ファイル '
-        f'→ TSV {len(combined_tsv):,}文字 / PDF {pdf_total_mb:.2f}MB'
+        f'AI抽出開始: TSV{len(tsv_blocks)}ブロック({len(combined_tsv):,}文字)'
+        + (f' + PDFバイナリ{pdf_count_binary}件({pdf_total_mb:.2f}MB)' if pdf_files else '')
         + (f' (前事業年度ヒント: {fiscal_period_hint})' if fiscal_period_hint else '')
     )
 
