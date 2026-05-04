@@ -847,14 +847,26 @@ def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
                     f'(月平均 {old_avg:.1f}h → {avg_hours:.1f}h)'
                 )
 
+        # 時給算出: 月別 monthly_wages / monthly_hours から計算
+        # 加点判定 (judge_bonus_points) と給与計算シートの時給表示で使用
+        # 役員は時給を出さない（月給制で意味がないため）
+        monthly_hourly_rates: list[float | None] = []
+        for w, h in zip(monthly_wages, monthly_hours):
+            if not is_officer and w is not None and h is not None and h > 0:
+                monthly_hourly_rates.append(w / h)
+            else:
+                monthly_hourly_rates.append(None)
+        valid_hourly = [h for h in monthly_hourly_rates if h is not None and h > 0]
+        avg_hourly = sum(valid_hourly) / len(valid_hourly) if valid_hourly else 0.0
+
         employees.append(WageEmployee(
             no=i + 1,
             name=emp_name,
             employment_type=emp_type,
             monthly_avg_hours=round(avg_hours, 1),
-            hourly_rate=0.0,
+            hourly_rate=round(avg_hourly, 1),
             monthly_wages=monthly_wages,
-            monthly_hourly_rates=[None] * 12,
+            monthly_hourly_rates=monthly_hourly_rates,
             monthly_hours=monthly_hours,
         ))
     return employees
