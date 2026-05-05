@@ -360,10 +360,54 @@ def _read_csv(path: Path, emp_data: dict | None = None) -> None:
     if emp_data is None:
         emp_data = {}
 
+    # gzip CSV (magic 0x1F 0x8B) なら自動解凍
+    raw_bytes: bytes | None = None
     try:
-        df = pd.read_csv(path, header=0, na_values=['', 'N/A', 'null'])
-    except Exception as e:
-        logger.warning(f'CSV 読込失敗: {path.name} ({e})')
+        with open(path, 'rb') as f:
+            head = f.read(2)
+        if head == b'\x1f\x8b':
+            import gzip
+            with gzip.open(path, 'rb') as gz:
+                raw_bytes = gz.read()
+    except Exception:
+        head = b''
+
+    last_error: Exception | None = None
+    df = None
+    for encoding in ('utf-8-sig', 'utf-8', 'cp932', 'shift_jis'):
+        try:
+            if raw_bytes is not None:
+                import io as _io
+                df = pd.read_csv(_io.BytesIO(raw_bytes), header=0,
+                                 na_values=['', 'N/A', 'null'], encoding=encoding)
+            else:
+                df = pd.read_csv(path, header=0, na_values=['', 'N/A', 'null'],
+                                 encoding=encoding)
+            break
+        except (UnicodeDecodeError, UnicodeError) as e:
+            last_error = e
+            continue
+        except Exception as e:
+            # encoding 以外の理由（パースエラー等）は早期返却
+            level = _csv_decode_warning_level(path)
+            msg = f'CSV 読込失敗: {path.name} ({e})'
+            if level == 'info':
+                logger.info(msg + ' → 同名 xlsx/xlsm を優先使用します')
+            else:
+                logger.warning(msg)
+            return
+
+    if df is None:
+        # 全エンコーディング失敗 → 同名 xlsx/xlsm があれば info 降格
+        level = _csv_decode_warning_level(path)
+        msg = (
+            f'CSV読込失敗（対応外形式の可能性、先頭バイト=0x{head.hex() if head else ""}）: '
+            f'{path.name} ({last_error})'
+        )
+        if level == 'info':
+            logger.info(msg + ' → 同名 xlsx/xlsm を優先使用します')
+        else:
+            logger.warning(msg)
         return
 
     # 列の正規化（日本語テキストの NFD→NFC 変換）
@@ -758,26 +802,80 @@ def _pdf_to_tsv(path: Path) -> str:
     return '\n'.join(parts)
 
 
+def _csv_decode_warning_level(path: Path) -> str:
+    """CSV decode 失敗時に warning と info のどちらで出力するかを判定する。
+
+    同じディレクトリに同名の .xlsx / .xlsm が存在し正常そうなら、
+    そちら経由で情報を拾えるので info 降格。それ以外は warning 維持。
+    """
+    stem = path.stem
+    for ext in ('.xlsx', '.xlsm'):
+        sibling = path.parent / f'{stem}{ext}'
+        if sibling.exists() and sibling.stat().st_size > 0:
+            return 'info'
+    return 'warning'
+
+
 def _csv_to_tsv(path: Path) -> str:
     """CSVファイルをTSV文字列に変換（AI入力用）。
     ヘッダー位置・列構成は AI に解釈させるため、全行を文字列のまま渡す。
     複数エンコーディング（UTF-8 / CP932）を順次試す。
+    gzip圧縮 CSV (magic 0x1F 0x8B) の場合は自動解凍してから decode。
     """
+    # gzip magic を見て解凍を試みる
+    try:
+        with open(path, 'rb') as f:
+            head = f.read(2)
+    except Exception:
+        head = b''
+
+    raw_bytes: bytes | None = None
+    if head == b'\x1f\x8b':
+        # gzip CSV — 解凍してから渡す
+        try:
+            import gzip
+            with gzip.open(path, 'rb') as gz:
+                raw_bytes = gz.read()
+            logger.info(f'CSV(gzip): {path.name} を解凍しました ({len(raw_bytes):,}バイト)')
+        except Exception as e:
+            logger.warning(f'CSV(gzip) 解凍失敗: {path.name} ({e})')
+
     last_error: Exception | None = None
     for encoding in ('utf-8-sig', 'utf-8', 'cp932', 'shift_jis'):
         try:
-            df = pd.read_csv(
-                path,
-                header=None,
-                dtype=str,
-                keep_default_na=False,
-                encoding=encoding,
-            )
+            if raw_bytes is not None:
+                import io as _io
+                df = pd.read_csv(
+                    _io.BytesIO(raw_bytes),
+                    header=None,
+                    dtype=str,
+                    keep_default_na=False,
+                    encoding=encoding,
+                )
+            else:
+                df = pd.read_csv(
+                    path,
+                    header=None,
+                    dtype=str,
+                    keep_default_na=False,
+                    encoding=encoding,
+                )
             break
         except (UnicodeDecodeError, UnicodeError) as e:
             last_error = e
             continue
     else:
+        # decode 全敗 — 同名 xlsx があれば info 降格、なければ warning
+        level = _csv_decode_warning_level(path)
+        msg = (
+            f'CSV読込失敗（対応外形式の可能性、先頭バイト=0x{head.hex() if head else ""}）: '
+            f'{path.name}'
+        )
+        if level == 'info':
+            msg += ' → 同名 xlsx/xlsm を優先使用します'
+            logger.info(msg)
+        else:
+            logger.warning(msg)
         raise last_error or RuntimeError(f'CSV decode failed: {path.name}')
 
     parts: list[str] = [f'### ファイル: {path.name} ###']
@@ -947,7 +1045,14 @@ def read_wage_ledgers_with_ai(
             try:
                 tsv_blocks.append(_csv_to_tsv(path))
             except Exception as e:
-                logger.warning(f'賃金台帳CSV読込失敗(AI経路): {path.name} ({e})')
+                # _csv_to_tsv 内で詳細ログ済み。ここでは降格判定のみ
+                # （同名 xlsx/xlsm が存在すればそちら経由で読めるので info で十分）
+                level = _csv_decode_warning_level(path)
+                msg = f'賃金台帳CSV読込失敗(AI経路): {path.name} ({e})'
+                if level == 'info':
+                    logger.info(msg)
+                else:
+                    logger.warning(msg)
             continue
         try:
             wb = openpyxl.load_workbook(str(path), data_only=True)
@@ -986,6 +1091,122 @@ def read_wage_ledgers_with_ai(
     return employees
 
 
+def _normalize_name_key(name: str) -> str:
+    """同一人物判定用の正規化キー。
+
+    - NFKC正規化（全角英数→半角、半角カナ→全角等）
+    - 全角・半角の空白をすべて除去
+    - 大文字小文字統一はしない（漢字氏名の運用なので影響小）
+
+    例: '長塚 典子' / '長塚　典子' / '長塚典子' / 'NAGATSUKA' は別キーになるが、
+        前3者は同じキー '長塚典子' になる。
+    """
+    if not name:
+        return ''
+    n = unicodedata.normalize('NFKC', str(name))
+    return re.sub(r'[\s　]+', '', n)
+
+
+def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
+    """同一人物と判定された2件のWageEmployeeを統合する。
+
+    同月衝突ポリシー:
+        - 片方null → もう片方を採用（補完）
+        - 両方値あり・差 < 1円(時間 < 0.1h) → そのまま採用
+        - 両方値あり・差大 → WARNING ログ + **大きい方を採用**
+          （理由: 部分入力・欠損で値が小さくなる典型的ミスを救う。
+           給与は「完全データ ≥ 部分データ ≥ 0」なので max が最も完全な値を選ぶ）
+    """
+    new_wages: list[float | None] = []
+    new_hours: list[float | None] = []
+    for i in range(12):
+        wa = a.monthly_wages[i] if i < len(a.monthly_wages) else None
+        wb = b.monthly_wages[i] if i < len(b.monthly_wages) else None
+        if wa is None:
+            new_wages.append(wb)
+        elif wb is None:
+            new_wages.append(wa)
+        elif abs(wa - wb) < 1.0:
+            new_wages.append(wa)
+        else:
+            chosen = max(wa, wb)
+            logger.warning(
+                f'同名統合: "{a.name}" の{i+1}月給与に差分があります '
+                f'({wa:,.0f} vs {wb:,.0f}) → 大きい方 {chosen:,.0f} を採用'
+            )
+            new_wages.append(chosen)
+
+        ha = a.monthly_hours[i] if i < len(a.monthly_hours) else None
+        hb = b.monthly_hours[i] if i < len(b.monthly_hours) else None
+        if ha is None:
+            new_hours.append(hb)
+        elif hb is None:
+            new_hours.append(ha)
+        elif abs(ha - hb) < 0.1:
+            new_hours.append(ha)
+        else:
+            # 時間も同じ理由で max（残業時間との誤判定で部分値が出るケースを救う）
+            new_hours.append(max(ha, hb))
+
+    # 月平均/時給を統合後の値で再計算
+    valid_h = [h for h in new_hours if h is not None and h > 0]
+    avg_h = sum(valid_h) / len(valid_h) if valid_h else 0.0
+
+    is_officer = '役員' in (a.employment_type or '')
+    new_rates: list[float | None] = []
+    for w, h in zip(new_wages, new_hours):
+        if not is_officer and w is not None and h is not None and h > 0:
+            new_rates.append(w / h)
+        else:
+            new_rates.append(None)
+    valid_r = [r for r in new_rates if r is not None and r > 0]
+    avg_r = sum(valid_r) / len(valid_r) if valid_r else 0.0
+
+    return WageEmployee(
+        no=a.no,
+        name=a.name,
+        employment_type=a.employment_type or b.employment_type,
+        monthly_avg_hours=round(avg_h, 1),
+        hourly_rate=round(avg_r, 1),
+        monthly_wages=new_wages,
+        monthly_hourly_rates=new_rates,
+        monthly_hours=new_hours,
+    )
+
+
+def _dedupe_employees_by_normalized_name(
+    employees: list[WageEmployee],
+) -> list[WageEmployee]:
+    """正規化キー（NFKC + 全空白除去）で同一人物の重複を統合する。
+
+    例: '長塚典子' (xlsx由来) と '長塚 典子' (ファイル名由来) を同一として統合。
+    """
+    if not employees:
+        return employees
+
+    merged: dict[str, WageEmployee] = {}
+    order: list[str] = []
+    for emp in employees:
+        key = _normalize_name_key(emp.name)
+        if not key:
+            continue
+        if key not in merged:
+            merged[key] = emp
+            order.append(key)
+        else:
+            existing = merged[key]
+            if existing.name != emp.name:
+                logger.info(
+                    f'同名統合: "{existing.name}" と "{emp.name}" を同一人物として統合'
+                )
+            merged[key] = _merge_two_employees(existing, emp)
+
+    result = [merged[k] for k in order]
+    for i, emp in enumerate(result):
+        emp.no = i + 1
+    return result
+
+
 def read_wage_ledgers(
     file_paths: list[Path],
     extractor=None,
@@ -997,6 +1218,9 @@ def read_wage_ledgers(
 
     extractor が渡され、かつ環境変数 USE_AI_WAGE_EXTRACTION が有効な場合は
     AI 抽出を優先し、結果が空なら決定論パーサーにフォールバックする。
+
+    最終結果は NFKC 正規化キー（全空白除去）で同一人物の重複を統合する。
+    'A' / 'A ' / 'A　' / 'Ａ' のような表記揺れを 1 人として扱う。
     """
     if not file_paths:
         return []
@@ -1009,6 +1233,7 @@ def read_wage_ledgers(
                 file_paths, extractor, fiscal_period_hint
             )
             if ai_employees:
+                ai_employees = _dedupe_employees_by_normalized_name(ai_employees)
                 logger.info(f'賃金台帳合算結果(AI): {len(ai_employees)}名 ({len(file_paths)}ファイル)')
                 return ai_employees
             logger.warning('AI抽出が0件を返したため、決定論パーサーにフォールバック')
@@ -1060,6 +1285,7 @@ def read_wage_ledgers(
             e.no = len(employees) + 1
             employees.append(e)
 
+    employees = _dedupe_employees_by_normalized_name(employees)
     logger.info(f'賃金台帳合算結果(決定論): {len(employees)}名 ({len(file_paths)}ファイル)')
     return employees
 
