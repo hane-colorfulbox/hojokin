@@ -444,7 +444,7 @@ class ClaudeExtractor(BaseExtractor):
                 if CREDIT_BALANCE_MARKER in str(e).lower():
                     logger.error(f'[API残高切れ] caller={caller} {stats}')
                     raise APICreditExhaustedError(
-                        'APIの残高が不足しています。管理者にチャージを依頼してください。'
+                        'APIの残高が不足しています。APIキー管理担当者にチャージを依頼してください。'
                     ) from e
                 logger.error(f'[API失敗/400] caller={caller} {stats} error={e}')
                 raise
@@ -861,11 +861,22 @@ class ClaudeExtractor(BaseExtractor):
 def create_extractor(
     api_key: str = '',
     retry_callback: Optional[RetryCallback] = None,
+    model: str | None = None,
 ) -> BaseExtractor:
-    """APIキーの有無に応じて適切なExtractorを返す"""
+    """APIキーの有無に応じて適切なExtractorを返す。
+
+    model を省略した場合は config.CLAUDE_MODEL（環境変数 CLAUDE_MODEL で
+    上書き可能）を使う。Cloud Secrets / .env でモデル切替できるようにする。
+    """
     if api_key:
-        logger.info('Claude API Extractor を使用')
-        return ClaudeExtractor(api_key, retry_callback=retry_callback)
+        from .config import CLAUDE_MODEL
+        selected_model = model or CLAUDE_MODEL
+        logger.info(f'Claude API Extractor を使用 (model={selected_model})')
+        return ClaudeExtractor(
+            api_key,
+            model=selected_model,
+            retry_callback=retry_callback,
+        )
     else:
         logger.warning('APIキー未設定 → StubExtractor を使用（PDF読取不可）')
         return StubExtractor()
