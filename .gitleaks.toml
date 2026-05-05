@@ -1,0 +1,35 @@
+title = "hojokin gitleaks config"
+
+# 既定ルール一式 + プロジェクト固有の禁止パターンを追加
+[extend]
+useDefault = true
+
+# プロジェクト固有: 顧客企業名・社員氏名・金額・社員メールが新規commitに混入したらブロック
+[[rules]]
+id = "kf-customer-names"
+description = "Customer company names that must not be committed"
+regex = '''(クラフトバンク|京のお肉処弘|オーサワジャパン|ピスケス|ファンファーレ|いろはな|京の食事処|阿萬|医療法人社団三和会|黒石歯科|クリーン新潟)'''
+tags = ["customer", "personal-info"]
+
+[[rules]]
+id = "kf-internal-emails"
+description = "Internal employee email addresses (use env vars instead)"
+regex = '''[a-zA-Z0-9._%+-]+@colorfulbox\.(co\.)?jp'''
+tags = ["internal", "email"]
+
+[[rules]]
+id = "kf-personal-amount"
+description = "Specific personal salary figures from past leak"
+regex = '''(4,?284,?800|12,?351,?270)'''
+tags = ["personal-info", "amount"]
+
+# 過去にコミット済みの履歴は浄化済みなので、誤検知無視リストは不要
+
+[allowlist]
+description = "Allowlist for false positives"
+paths = [
+  '''.env\.example$''',
+  '''README\.md$''',
+  '''\.gitleaks\.toml$''',
+  '''\.gitignore$''',
+]
