@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import tempfile
 import unicodedata
 from pathlib import Path
@@ -370,7 +371,11 @@ def run_wage_calculation(
                         fiscal_period_hint=fiscal_hint,
                     )
             if ledger_emps:
-                employees_detail = _build_employees_detail_from_ledger(ledger_emps)
+                # fiscal_hint を渡して時系列順で直近3ヶ月を抽出（非1月始まり対応）
+                _fiscal_hint_for_detail = _format_fiscal_period(financial)
+                employees_detail = _build_employees_detail_from_ledger(
+                    ledger_emps, fiscal_period_hint=_fiscal_hint_for_detail,
+                )
                 seishain_count = sum(
                     1 for e in employees_detail if e['type'] == '正社員'
                 )
@@ -567,13 +572,15 @@ def _check_wage_pl_consistency(
     wage_plan: dict | None,
     financial: 'FinancialData',
     tolerance: float = 0.20,
+    severe_threshold: float = 0.50,
 ) -> str:
     """賃金台帳合計と損益計算書の人件費を照合し、不整合があれば警告文字列を返す。
 
     Args:
         wage_plan: _calc_wage_plan_from_ledger の戻り値（基準年の給与支給総額を含む）
         financial: 損益計算書から抽出した財務データ
-        tolerance: 許容差（デフォルト ±20%）
+        tolerance: 通常警告の許容差（デフォルト ±20%）
+        severe_threshold: 強警告に格上げする差分比（デフォルト 50%）
 
     Returns:
         警告文字列（不整合あり）または空文字列（整合 / 比較不能）
@@ -584,7 +591,9 @@ def _check_wage_pl_consistency(
           そのため PL 側からも officer_compensation を除いて比較する必要がある。
         - 比較対象 = PL の (給料手当 + 雑給 + 賞与) ※役員報酬除く
         - PL に給与系の計上が無い場合は判定不能 → '' を返す
-        - 差が tolerance を超えたら警告を返す（処理は続行する）
+        - 差が severe_threshold を超えたら強警告（⛔ + 「賃金台帳が著しく〜」）
+        - 差が tolerance を超えたら通常警告（⚠ + 「〜の差があります」）
+        - いずれも処理は続行する
     """
     if not wage_plan or 'wage_total_base' not in wage_plan:
         return ''
@@ -603,6 +612,13 @@ def _check_wage_pl_consistency(
     if diff_ratio <= tolerance:
         return ''
     direction = '多い' if ledger_total > pl_personnel else '少ない'
+    if diff_ratio >= severe_threshold:
+        # 著しい乖離 — AI 抽出の打ち切り / 雇用区分誤認 / 中途退職者多数 等の可能性大
+        return (
+            f' ⛔ 強警告: 賃金台帳合計({ledger_total:,.0f}円)と損益計算書の人件費'
+            f'({pl_personnel:,.0f}円, 役員報酬除く)に{diff_ratio*100:.0f}%の著しい差があります'
+            f'（賃金台帳が著しく{direction}）。賃金台帳の抽出漏れがないか必ず確認してください'
+        )
     return (
         f' ⚠ 賃金台帳合計({ledger_total:,.0f}円)と損益計算書の人件費'
         f'({pl_personnel:,.0f}円, 役員報酬除く)に{diff_ratio*100:.0f}%の差があります'
@@ -623,18 +639,52 @@ def _classify_emp_type(emp_type: str) -> str:
     return '正社員'
 
 
-def _build_employees_detail_from_ledger(employees) -> list[dict]:
+def _fiscal_month_order(fiscal_period_hint: str | None) -> list[int]:
+    """fiscal_period_hint から「事業年度内の月の時系列順 Index リスト」を返す。
+
+    例: '2024-05〜2025-04' → [4,5,6,7,8,9,10,11,0,1,2,3]（5月始まり、12月の次は1月）
+    None や形式不明な場合は [0,1,...,11]（カレンダー順 = 1月始まり）にフォールバック。
+    """
+    if not fiscal_period_hint:
+        return list(range(12))
+    # 'YYYY-MM〜YYYY-MM' / 'YYYY-MM-DD〜...' / 'YYYY-MM' から開始月を抽出
+    m = re.search(r'(\d{4})-(\d{1,2})', fiscal_period_hint)
+    if not m:
+        return list(range(12))
+    start_month = int(m.group(2))  # 1〜12
+    if not 1 <= start_month <= 12:
+        return list(range(12))
+    start_idx = start_month - 1  # 0〜11
+    return [(start_idx + i) % 12 for i in range(12)]
+
+
+def _build_employees_detail_from_ledger(
+    employees,
+    fiscal_period_hint: str | None = None,
+) -> list[dict]:
     """賃金台帳の読取結果 → create_wage_calculation が期待する employees_detail 形式に変換。
-    役員はカウント対象外として除外する。"""
+    役員はカウント対象外として除外する。
+
+    直近3ヶ月の判定方針:
+        fiscal_period_hint があれば「事業年度内の月の時系列順」で末尾3つを採用。
+        例: 5月開始の年度なら 5,6,7,...,2,3,4 の順序で並べた中の最後3つ。
+        fiscal_period_hint がなければカレンダー順末尾3つ（フォールバック、従来動作）。
+        この区別が無いと、12月始まりの台帳で「直近3 = 配列末尾の10/11/12月」になり、
+        実際の時系列上の直近（9/10/11月）とズレる。
+    """
     detail = []
+    month_order = _fiscal_month_order(fiscal_period_hint)
     for emp in employees:
         classified = _classify_emp_type(emp.employment_type)
         if classified == '役員':
             continue
 
-        # 直近データのある3ヶ月を m1/m2/m3 に割り当て
-        months_with_data = [m for m, w in enumerate(emp.monthly_wages) if w is not None]
-        last_three = months_with_data[-3:]
+        # 事業年度内の時系列順で「データのある月」を取り、末尾3つを直近として採用
+        ordered_months_with_data = [
+            idx for idx in month_order
+            if idx < len(emp.monthly_wages) and emp.monthly_wages[idx] is not None
+        ]
+        last_three = ordered_months_with_data[-3:]
         m_vals = [emp.monthly_wages[m] or 0 for m in last_three]
         while len(m_vals) < 3:
             m_vals.append(0)
