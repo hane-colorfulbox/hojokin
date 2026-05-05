@@ -106,6 +106,10 @@ class BonusPointResult:
     prefecture: str = ''
     min_wage_r6: int = 0
     min_wage_r7: int = 0
+    # 加点措置②で使用した「直近月」のインデックス（0=1月, 11=12月）。
+    # judge_bonus_points が動的決定した月を保持し、fill_bonus_sheet_2 で
+    # 同じ月を出力シートに反映するために使う（画面判定とExcelの不整合防止）。
+    latest_month_idx: int | None = None
 
 
 # ============================================================
@@ -1320,6 +1324,9 @@ def judge_bonus_points(
         if latest_month_idx is None:
             latest_month_idx = 11
 
+    # fill_bonus_sheet_2 が同じ月をシートに反映できるよう保存
+    result.latest_month_idx = latest_month_idx
+
     latest_hourly_rates = [
         emp.get_hourly_for_month(latest_month_idx)
         for emp in employees
@@ -1417,7 +1424,7 @@ def fill_bonus_sheet_2(
     output_path: Path,
     result: BonusPointResult,
     july_month_idx: int = 6,
-    latest_month_idx: int = 11,
+    latest_month_idx: int | None = None,
 ) -> Path:
     """
     加点措置②用シートに従業員データを入力
@@ -1425,9 +1432,20 @@ def fill_bonus_sheet_2(
     加点措置②のシート構成:
       2つの賃金計算期間を横に並べて入力
       データ行は17行目から
+
+    latest_month_idx を省略した場合、judge_bonus_points が
+    動的決定して result.latest_month_idx に保存した月を使う。
+    画面判定（最新データがある月）とExcel出力を一致させる目的。
+    フォールバックとして 11（12月）を使う。
     """
     wb = openpyxl.load_workbook(str(template_path))
     ws = wb[wb.sheetnames[0]]
+
+    if latest_month_idx is None:
+        latest_month_idx = (
+            result.latest_month_idx
+            if result.latest_month_idx is not None else 11
+        )
 
     period_cols = [
         {'no': 2, 'name': 3, 'pref': 4, 'wage': 6, 'hourly': 7},
