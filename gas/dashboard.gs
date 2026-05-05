@@ -21,6 +21,15 @@
 // ============================================================
 // 設定
 // ============================================================
+//
+// 表示名の運用について
+// - CB_VENDOR_NAME は「外部ベンダー管理表（別スプシ）から取得した案件を
+//   ダッシュボード上でどう表示するか」を決める。
+// - 実名（取引先の社名など）はコードにハードコードしない方針のため、
+//   GAS管理画面 → プロジェクトの設定 → スクリプトプロパティ で
+//   `EXTERNAL_VENDOR_A_DISPLAY` というキーに表示用の名称を入れる。
+// - スクリプトプロパティ未設定時は 'EXTERNAL_VENDOR_A' のままダッシュボードに出る。
+//
 const DASHBOARD_CONFIG = {
   // 案件管理表
   SPREADSHEET_ID: '1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU',
@@ -38,8 +47,26 @@ const DASHBOARD_CONFIG = {
   CB_HEADER_ROW: 2,
   CB_COL_COMPANY: 2,   // B列: 社名
   CB_COL_TEMPLATE: 10, // J列: 申請枠（回次情報を含む）
-  CB_VENDOR_NAME: 'EXTERNAL_VENDOR_A',
+  // 表示名は getExternalVendorDisplayName_() で取得する（Script Properties 経由）
 };
+
+
+/**
+ * 外部ベンダーの表示名を Script Properties から取得する。
+ * GAS管理画面でプロパティ EXTERNAL_VENDOR_A_DISPLAY を設定しておけば、
+ * ダッシュボード集計でその値が「支援事業者名」列に表示される。
+ * 未設定の場合は内部識別子 'EXTERNAL_VENDOR_A' を返す。
+ *
+ * @returns {string} 表示用の支援事業者名
+ */
+function getExternalVendorDisplayName_() {
+  try {
+    const v = PropertiesService.getScriptProperties().getProperty('EXTERNAL_VENDOR_A_DISPLAY');
+    return v && v.length > 0 ? v : 'EXTERNAL_VENDOR_A';
+  } catch (e) {
+    return 'EXTERNAL_VENDOR_A';
+  }
+}
 
 
 // ============================================================
@@ -91,11 +118,14 @@ function updateDashboard() {
     });
   }
 
+  // 外部ベンダーの表示名を Script Properties から1度だけ取得
+  const externalVendorName = getExternalVendorDisplayName_();
+
   for (const row of cbRows) {
     // 外部ベンダーの「1次」を案件管理表の「1次（5/12締切）」にマッチさせる
     const matched = mainRounds.find(r => r.startsWith(row.round));
     combinedRows.push({
-      vendor: DASHBOARD_CONFIG.CB_VENDOR_NAME,
+      vendor: externalVendorName,
       round: matched || row.round,
     });
   }
