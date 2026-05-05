@@ -204,11 +204,16 @@ PROMPT_WAGE_LEDGER = """以下は賃金台帳のExcelをTSV形式に変換した
 
 【抽出ルール】
 1. 全シート・全テーブルを横断して、登場するすべての従業員を抽出してください。
-2. monthly_wages: 月別の課税支給合計（または支給合計、税込支給額、給与+賞与の合算）。各月の値を Index 0=1月, Index 11=12月 として格納してください。データがない月は null。
-3. monthly_hours: 月別の **総労働時間 / 実労働時間 / 所定労働時間**。同じく1月〜12月のIndex順。
+2. monthly_wages: 月別の課税支給合計（または支給合計、税込支給額、給与+賞与の合算）。
+   - **★ 配列の Index は必ず西暦/和暦カレンダーの月で固定**: Index 0=1月, Index 1=2月, ..., Index 11=12月
+   - **★ 台帳の列の物理的順序とは無関係**: 例えば「R6.12月, R7.1月, R7.2月, ..., R7.11月」の順で並んでいても、
+     R7.1月→Index 0, R7.2月→Index 1, ..., R7.11月→Index 10, **R6.12月→Index 11** に格納する
+   - **★ 24ヶ月以上ある台帳**: 同じ月（例: R6.5月とR7.5月）は重複しないため、対象期間（{fiscal_period_section}参照）の月だけ抽出する
+   - データがない月は null
+3. monthly_hours: 月別の **総労働時間 / 実労働時間 / 所定労働時間**。Index は monthly_wages と同じ規則（Index 0=1月固定）。
    - **重要**: 「残業時間」「所定時間外」「時間外労働」は労働時間ではありません。混同しないでください。
    - 賃金台帳に労働時間の欄が存在しない（労働日数のみ等）場合は **必ず null** にしてください。推測値は禁止。
-4. monthly_work_days: 月別の **労働日数 / 出勤日数 / 勤務日数**。1月〜12月のIndex順。データがない月は null。
+4. monthly_work_days: 月別の **労働日数 / 出勤日数 / 勤務日数**。Index は monthly_wages と同じ規則。
    - 「有給休暇日数」は労働日数ではないので含めないこと。
 5. employment_type: 雇用形態（正社員・パート・アルバイト・役員等）。元の表記をそのまま入れてください。役員は「役員」を含む表記に。
 6. **【名前抽出の厳密ルール】**
@@ -237,6 +242,8 @@ PROMPT_WAGE_LEDGER = """以下は賃金台帳のExcelをTSV形式に変換した
   }}
 ]
 ```
+↑ 上の例では Index 0=1月(430000円), Index 1=2月(316000円), 残り全 null。
+   仮に「12月のみ給与あり」なら `[null,null,null,null,null,null,null,null,null,null,null,500000]` となる。
 
 【重要な注意】
 - monthly_wages / monthly_hours / monthly_work_days は **必ず12要素** の配列にしてください。データがない月は null。
@@ -244,7 +251,8 @@ PROMPT_WAGE_LEDGER = """以下は賃金台帳のExcelをTSV形式に変換した
 - 労働時間が記載されていない賃金台帳では monthly_hours は全て null で構いません（後段で労働日数×8hで補完します）。
 - 役員報酬は役員として抽出してください（employment_type に「役員」を含める）。
 - 名前のフリガナや空欄行は無視してください。
-- JSON以外のコメント・説明文は一切含めないでください。
+- **登場するすべての従業員を漏れなく出力してください。N名いれば N要素のJSON配列にする。最初の数名で打ち切ったり、代表者だけ抽出することは禁止です。**
+- JSON以外のコメント・説明文は一切含めないでください（先頭・末尾とも純粋なJSON配列のみ）。
 
 【賃金台帳データ】
 {tsv_data}
@@ -787,7 +795,13 @@ class ClaudeExtractor(BaseExtractor):
         tsv_data: str,
         fiscal_period_hint: str | None = None,
         pdf_files: list[tuple[str, bytes]] | None = None,
+        _retry_depth: int = 0,
     ) -> list[dict]:
+        """賃金台帳のTSV/PDFから従業員データを抽出。
+
+        Args:
+            _retry_depth: 内部用。0=初回、1=分割再抽出中（再々分割しないためのカウンタ）
+        """
         if fiscal_period_hint:
             fiscal_section = PROMPT_WAGE_LEDGER_FISCAL_FILTER.format(
                 fiscal_period=fiscal_period_hint
@@ -828,7 +842,7 @@ class ClaudeExtractor(BaseExtractor):
         pdf_count = len(pdf_files) if pdf_files else 0
         stats = (
             f'pdfs={pdf_count}件 pdf合計={pdf_total_bytes/1_000_000:.2f}MB '
-            f'prompt={len(prompt)}chars max_tokens={max_tokens}'
+            f'prompt={len(prompt)}chars max_tokens={max_tokens} retry={_retry_depth}'
         )
         logger.warning(f'[API送信] caller=extract_wage_ledger {stats}')
         response = self._messages_create_with_retry(
@@ -839,23 +853,130 @@ class ClaudeExtractor(BaseExtractor):
             messages=[{'role': 'user', 'content': content}],
         )
         text = response.content[0].text
+        output_tokens = response.usage.output_tokens
+        stop_reason = getattr(response, 'stop_reason', None)
         logger.warning(
             f'[API成功] caller=extract_wage_ledger '
             f'応答={len(text)}chars '
-            f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
+            f'tokens={response.usage.input_tokens}in+{output_tokens}out '
+            f'stop_reason={stop_reason}'
         )
+
+        # 打ち切り検出: stop_reason==max_tokens が最も信頼できるシグナル
+        # （Anthropic API が「出力をmax_tokensで切った」と明示してくる）
+        truncated = (stop_reason == 'max_tokens')
 
         try:
             data = self._parse_json(text)
         except json.JSONDecodeError as e:
             logger.error(f'[extract_wage_ledger] JSON解析失敗: {e}, 応答先頭500文字: {text[:500]}')
+            # 打ち切り + PDF あり + 初回 → 分割再抽出 (JSON が途中で切れて parse 失敗の可能性大)
+            if truncated and pdf_files and _retry_depth == 0:
+                logger.warning('[extract_wage_ledger] JSON parse失敗 + max_tokens打ち切り → PDF分割再抽出')
+                return self._retry_extract_with_split_pdf(
+                    tsv_data, fiscal_period_hint, pdf_files, partial_data=[]
+                )
             return []
 
         if not isinstance(data, list):
             logger.error(f'[extract_wage_ledger] 応答がリストではありません: type={type(data).__name__}')
             return []
 
+        # 打ち切り検出 + PDF あり + 初回 → 分割再抽出してマージ
+        # (JSON parse は通ったが、配列途中で max_tokens 到達した可能性 = 後半の従業員が欠けている)
+        if truncated and pdf_files and _retry_depth == 0:
+            logger.warning(
+                f'[extract_wage_ledger] max_tokens打ち切り検出 (出力{output_tokens}tok使用) '
+                f'→ {len(data)}名の取得後、PDF分割再抽出で残りを補完'
+            )
+            return self._retry_extract_with_split_pdf(
+                tsv_data, fiscal_period_hint, pdf_files, partial_data=data
+            )
+
         return data
+
+    def _retry_extract_with_split_pdf(
+        self,
+        tsv_data: str,
+        fiscal_period_hint: str | None,
+        pdf_files: list[tuple[str, bytes]],
+        partial_data: list[dict],
+    ) -> list[dict]:
+        """賃金台帳PDFを2分割して再抽出し、partial_data とマージする。
+
+        - PDF を PyMuPDF で前半・後半に分割
+        - 各分割を _retry_depth=1 で再 API 呼出（再々分割は禁止 = 最大 +2回API呼出）
+        - 同名人物は NFKC 正規化キーで重複排除し、partial_data 側を優先採用
+          （初回呼出は完全データ、分割側はサブセット）
+        - 失敗時は partial_data をそのまま返す
+        """
+        import fitz  # type: ignore
+
+        split_part1: list[tuple[str, bytes]] = []
+        split_part2: list[tuple[str, bytes]] = []
+        for fname, pdf_bytes in pdf_files:
+            try:
+                doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+                n_pages = len(doc)
+                if n_pages <= 2:
+                    # 2ページ以下は分割不能 → 元のまま part1 に入れる
+                    split_part1.append((fname, pdf_bytes))
+                    doc.close()
+                    continue
+                half = n_pages // 2
+                doc1 = fitz.open()
+                doc1.insert_pdf(doc, from_page=0, to_page=half - 1)
+                buf1 = doc1.tobytes()
+                doc1.close()
+                doc2 = fitz.open()
+                doc2.insert_pdf(doc, from_page=half, to_page=n_pages - 1)
+                buf2 = doc2.tobytes()
+                doc2.close()
+                doc.close()
+                split_part1.append((f'{fname}#part1of2', buf1))
+                split_part2.append((f'{fname}#part2of2', buf2))
+                logger.info(f'PDF分割: {fname} ({n_pages}P) → {half}P + {n_pages-half}P')
+            except Exception as e:
+                logger.warning(f'PDF分割失敗 ({fname}): {e} → 元のまま part1 に入れる')
+                split_part1.append((fname, pdf_bytes))
+
+        # 各分割で再抽出（再帰禁止のため _retry_depth=1）
+        retry_results: list[dict] = []
+        for label, split_pdfs in [('part1', split_part1), ('part2', split_part2)]:
+            if not split_pdfs:
+                continue
+            try:
+                partial = self.extract_wage_ledger(
+                    tsv_data='',  # TSV は初回呼出で送信済み、分割では PDF のみ
+                    fiscal_period_hint=fiscal_period_hint,
+                    pdf_files=split_pdfs,
+                    _retry_depth=1,
+                )
+                logger.info(f'分割再抽出 {label}: {len(partial)}名')
+                retry_results.extend(partial)
+            except Exception as e:
+                logger.warning(f'分割再抽出 {label} 失敗: {e}')
+
+        # マージ: 初回 partial_data を優先採用、分割側で漏れた人物を追加
+        seen: dict[str, dict] = {}
+        order: list[str] = []
+        for emp in (partial_data or []) + retry_results:
+            name = emp.get('name', '')
+            if not name:
+                continue
+            import re as _re
+            import unicodedata as _ud
+            key = _re.sub(r'[\s　]+', '', _ud.normalize('NFKC', str(name)))
+            if key in seen:
+                continue  # 既出 → 既存優先（初回 partial_data が完全データ前提）
+            seen[key] = emp
+            order.append(key)
+        merged = [seen[k] for k in order]
+        logger.warning(
+            f'[extract_wage_ledger] 分割再抽出マージ完了: '
+            f'初回{len(partial_data or [])}名 + 再抽出{len(retry_results)}名 → 重複排除後{len(merged)}名'
+        )
+        return merged
 
 
 def create_extractor(
