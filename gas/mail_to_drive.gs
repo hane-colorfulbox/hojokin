@@ -30,7 +30,6 @@ const CONFIG = {
   PARENT_FOLDER_ID: '1L_nt38A9IFbZLaDZl1_nKxcbSrUlwKjX',
 
   // 案件管理スプレッドシートID
-  // https://docs.google.com/spreadsheets/d/1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU/
   MANAGEMENT_SHEET_ID: '1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU',
 
   // 案件管理シート名

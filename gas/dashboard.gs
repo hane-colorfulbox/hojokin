@@ -6,12 +6,12 @@
  *
  * データソース:
  *   1. 案件管理表（シート1）
- *   2. EXTERNAL_VENDOR_A管理表（別スプレッドシート）
+ *   2. 外部ベンダー管理表（別スプレッドシート）
  *
  * 自動更新:
  *   1. onEditDashboard  : 案件管理表の編集時に即時更新（インストール型トリガー）
  *   2. updateDashboard  : 時間主導トリガーでバックアップ更新
- *                         （EXTERNAL_VENDOR_A側の変更や onEdit 取りこぼしを拾う）
+ *                         （外部ベンダー側の変更や onEdit 取りこぼしを拾う）
  *
  * トリガー設定:
  *   - 関数: onEditDashboard / イベントソース: スプレッドシート → 編集時
@@ -33,7 +33,7 @@ const DASHBOARD_CONFIG = {
   COL_VENDOR: 3,      // C列: 支援事業者名
   COL_ROUND: 5,       // E列: 公募回（締め切り）
 
-  // EXTERNAL_VENDOR_A管理表
+  // 外部ベンダー管理表（紹介会社が独自管理する別スプシ）
   CB_SPREADSHEET_ID: '1dn6HMJMdFJNQljGRXPPX6RLfVkltLoguKjcb4uDFTpQ',
   CB_HEADER_ROW: 2,
   CB_COL_COMPANY: 2,   // B列: 社名
@@ -69,8 +69,8 @@ function updateDashboard() {
   // --- 案件管理表からデータ取得 ---
   const allRows = getMainSheetRows_(source);
 
-  // --- EXTERNAL_VENDOR_Aからデータ取得 ---
-  const cbRows = getCraftbankRows_();
+  // --- 外部ベンダー管理表からデータ取得 ---
+  const cbRows = getExternalVendorRows_();
 
   // 全データを結合: [支援事業者名, 公募回]
   const combinedRows = [];
@@ -92,7 +92,7 @@ function updateDashboard() {
   }
 
   for (const row of cbRows) {
-    // EXTERNAL_VENDOR_Aの「1次」を案件管理表の「1次（5/12締切）」にマッチさせる
+    // 外部ベンダーの「1次」を案件管理表の「1次（5/12締切）」にマッチさせる
     const matched = mainRounds.find(r => r.startsWith(row.round));
     combinedRows.push({
       vendor: DASHBOARD_CONFIG.CB_VENDOR_NAME,
@@ -306,10 +306,10 @@ function getMainSheetRows_(source) {
 
 
 /**
- * EXTERNAL_VENDOR_A管理表からデータを取得
+ * 外部ベンダー管理表からデータを取得
  * @returns {Object[]} { round } の配列
  */
-function getCraftbankRows_() {
+function getExternalVendorRows_() {
   try {
     const cbSs = SpreadsheetApp.openById(DASHBOARD_CONFIG.CB_SPREADSHEET_ID);
     const cbSheet = cbSs.getSheets()[0]; // 最初のシート
@@ -337,11 +337,11 @@ function getCraftbankRows_() {
       rows.push({ round: round });
     }
 
-    Logger.log('EXTERNAL_VENDOR_A: ' + rows.length + '件取得');
+    Logger.log('外部ベンダー: ' + rows.length + '件取得');
     return rows;
 
   } catch (e) {
-    Logger.log('EXTERNAL_VENDOR_A取得エラー: ' + e.message);
+    Logger.log('外部ベンダー取得エラー: ' + e.message);
     return [];
   }
 }

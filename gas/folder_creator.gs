@@ -18,7 +18,6 @@
 // ============================================================
 const FOLDER_CONFIG = {
   // 2026年度の親フォルダID
-  // https://drive.google.com/drive/folders/1L_nt38A9IFbZLaDZl1_nKxcbSrUlwKjX
   PARENT_FOLDER_ID: '1L_nt38A9IFbZLaDZl1_nKxcbSrUlwKjX',
 
   // サブフォルダ名

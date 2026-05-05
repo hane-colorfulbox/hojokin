@@ -5,7 +5,7 @@
  *   関数: onEditNotify
  *   イベントソース: スプレッドシートから → 編集時
  *
- * 【2026-04-17】担当者依頼で通知を一旦停止中。
+ * 【2026-04-17】業務担当者の依頼により通知を一旦停止中。
  * 再開する場合は NOTIFY_CONFIG.ENABLED を true に戻す。
  */
 
@@ -20,7 +20,7 @@ const CHAT_WEBHOOK_URL = 'https://chat.googleapis.com/v1/spaces/AAAAJyNY9qM/mess
 // 設定
 // ============================================================
 const NOTIFY_CONFIG = {
-  // 通知の有効/無効（2026-04-17 担当者依頼で一旦停止）
+  // 通知の有効/無効（2026-04-17 業務担当者の依頼により一旦停止）
   ENABLED: false,
 
   // 通知するステータス
@@ -143,7 +143,7 @@ function testChatNotification() {
     'テスト株式会社',
     '支援事業者A',
     '通常枠（5万円～150万円未満）',
-    '村上',
+    '担当者A',
     '申請_準備完了',
     'https://drive.google.com/drive/folders/example'
   );

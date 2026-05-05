@@ -1,613 +1,68 @@
 # 補助金プロジェクト - Claude向けメモ
 
-このファイルはClaude Codeが自動で読み込む、プロジェクト横断のコンテキストファイル。
-作業履歴や既知の状態を記録する（日付つき）。新しい作業をしたら末尾に追記する。
-
----
-
-## 作業履歴
-
-### 2026-04-24 (10:00頃) GAS ダッシュボードの即時更新化
-
-**背景**
-先方から「案件管理シートのダッシュボードは可能な限り即時更新して欲しい」と依頼。
-調査したところ、時間主導トリガーが「日付ベース / 1日1回（午前8-9時）」になっており、
-これが「反映が遅い」と言われていた本当の原因だった。
-
-**実施内容**
-- `gas/dashboard.gs` に以下を追加:
-  - `onEditDashboard(e)`: 案件管理表の編集時（B/C/E列）に即時更新
-  - `runDashboardUpdateDebounced_()`: LockService + ダーティフラグで直列化
-- GAS管理画面で以下のトリガー変更:
-  - `updateDashboard`: 日付ベース1日1回 → **分ベース5分おき**（バックアップ更新用）
-  - `onEditDashboard`: 新規追加（スプレッドシート編集時、インストール型）
-
-**結果**
-編集した瞬間にダッシュボード反映、万一の取りこぼしも5分以内に拾われる構成になった。
-
-**既知の状態（未解決）**
-- `updateDashboard` トリガーが **「失敗しました」表示を継続** する
-  - 原因: EXTERNAL_VENDOR_A管理表（別スプシ `1dn6HMJMdFJNQljGRXPPX6RLfVkltLoguKjcb4uDFTpQ`）に
-    アクセス権がない。`SpreadsheetApp.openById()` が permission エラーを出し、
-    try/catch で処理はしているが、Cloud Logging には ERROR レベルで記録されるため、
-    GAS側は「失敗」と判定してしまう（GASの仕様）
-  - コード実行自体は成功しており、**ダッシュボードシートは正常に更新される**（EXTERNAL_VENDOR_A分を除いて）
-- **週1でエラー通知メール** が羽根さん（example@example.com）宛てに届く
-  - GASの仕様で「通知しない」は選べず、最短が週1通知のため許容
-- **EXTERNAL_VENDOR_A案件はダッシュボードに表示されない**
-  - 元からそうだったので先方も気づいていない模様
-
-**再有効化の手順（将来EXTERNAL_VENDOR_A権限が取れた場合）**
-1. 先方（EXTERNAL_VENDOR_A側）にスプレッドシート `1dn6HMJMdFJNQljGRXPPX6RLfVkltLoguKjcb4uDFTpQ` を
-   羽根さんのアカウント（example@example.com）に **閲覧権限** で共有してもらう
-2. コード側の変更不要。次の updateDashboard 実行時から自動的にEXTERNAL_VENDOR_A案件も集計される
-3. 結果として「失敗しました」表示とエラー通知も消える
-
-**関連する別件（未着手）**
-- EXTERNAL_VENDOR_A以外にも紹介会社が存在するらしい（詳細未確認）
-- それぞれ独自の管理スプシを持っているパターン（EXTERNAL_VENDOR_Aと同様）なら、
-  設定を配列化して複数ソースを読む改修が必要
-- 案件管理表のC列に直接入力されているだけなら追加対応不要（既に集計されている）
-- 次回やるときは先方に紹介会社のリストと管理方式を確認する
-
----
-
-### 2026-04-24 (20:00頃) 担当者指摘の通常枠修正まとめ
-
-**背景**
-担当者から通常枠テンプレ・運用について複数の修正依頼。
-
-**実施内容**
-
-1. 通常枠原本 xlsx (`ツール/【原本_法人】企業名_通常枠_法人2026_v2.xlsx`) を直接編集:
-   - 行157（粗利益）/ 180 / 225 / 227 の B:E 結合を解除
-   - C157 に `='生産性指標給与支給総額計算'!B11` を復元
-   - C227 に `='転記'!B85` を復元（226/228 と同パターン）
-   - バックアップ `.bak_20260424_204034` 同梱
-
-2. 通常枠で行173（IT投資状況）/ 175（IT活用状況）をテンプレ既定値温存に変更:
-   - `config.py`: `TemplateMapping` に `preserve_rows` フィールド追加、通常枠で `[173, 175]`
-   - `it_investment_status` / `it_utilization_status` の2キーを通常枠マッピングから削除
-     （`fill_shinsei_sheet` の `write()` は `if field not in m: return` で短絡）
-   - `template_filler.py` の `clear_manual_cells` で `preserve_rows` をスキップ
-   - インボイス枠（163）/ インボイス個人（133）は影響なし（AI書込み継続）
-
-3. 生産性指標給与支給総額計算シート B40（事業者あたりの総労働時間）を賃金台帳実績で上書き:
-   - `hojokin/pipeline.py`: `_calculate_wage_plan` で `total_annual_hours` を算出
-     （役員除く、月別実績があればそれを使用、なければ月平均×在籍月数で補完）
-   - `hojokin/template_filler.py`: STEP 3.6 を追加して B40 に直接値書込み
-   - C40-E40（計画年次）は既存式 `=C38*C39` 等を保持（挙動は担当者確認後に追加調整）
-
-4. 賃金台帳一覧 Excel に月別労働時間列を追加:
-   - `WageEmployee` に `monthly_hours: list[float|None]` フィールド新設
-   - 柔軟パーサー / 個人台帳型パーサーで月別時間を保持するよう改修
-   - `export_wage_ledger_summary` のレイアウトを拡張:
-     - 月別賃金12列 + 年間合計賃金 / 月別労働時間12列 + 年間合計時間 + 月平均
-   - ペイロード変換時に実月別データを優先（FTE計算精度向上）
-
-5. 申請フォーマット（テンプレ原本）のアップロードUIを復活:
-   - `app.py`: ファイルアップロード/Driveモード双方で `template_uploader` 復活
-   - 申請書作成を伴うタスク（application / all）で必須化
-   - アップロードされた原本を work_dir に保存してそちらを優先、未アップロード時のみ `ツール/` 同梱フォールバック
-   - プロジェクトルートへのコピー（2回目以降用）は廃止（ポリューション防止）
-
-**検証**
-- `_debug/test_wage_reader.py` 既存テスト（3フォーマット）: 回帰なし
-- 通常枠テンプレ書き出し: 173/175既定値温存、157/180/225/227 結合解除、227 式復元確認
-- B40 上書き: 9876.5→B40 直接値、C40-E40は式維持
-- インボイス法人・個人テンプレ: `it_investment_status` AI書込み継続を確認
-
-**未解決 / 今後の課題**
-- 生産性指標 B40 を実績で上書きすると基準年だけ変動 → C42 成長率判定に波及する可能性。
-  担当者に動作確認してもらい、必要なら C40-E40 も同種ロジックに統一する。
-- 申請ツール関数の仕様が固まったら運用方法を再相談（アップロード運用の継続 or 別方式）。
-
----
-
-### 2026-04-24 (追加) インボイス枠にも preserve_rows を拡張
-
-**背景**
-通常枠の修正中に、インボイス枠でも同様に AI が既定値を上書きしている現象を確認:
-- 163（法人）/ 133（個人）: 「インボイスに対するIT投資状況」欄に、AI が一般IT投資の文言を書き込む（全く別の話題）
-- 164（法人）/ 134（個人）: 「IT電子化範囲」— ツール選択関数で制御される想定の行を AI が上書き
-- 165（法人）/ 135（個人）: 「インボイス対応に資する業務」— 同上
-
-担当者の依頼スコープ外だったが、**同じバグ + 担当者の「ツール関数駆動」運用と矛盾** するため、相談のうえ同じ `preserve_rows` パターンで修正することに。
-
-**実施内容**
-- `hojokin/config.py`:
-  - `MAPPING_2026_INVOICE.shinsei` から `it_investment_status` / `it_utilization_scope` / `invoice_related_work` の3キー削除
-  - `MAPPING_2026_INVOICE.preserve_rows = [163, 164, 165]` 設定
-  - `MAPPING_2026_INVOICE_KOJIN` も同様（キー削除 + `preserve_rows=[133, 134, 135]`）
-
-**検証**
-- 両インボイステンプレで AI 書込みスキップ、preset 温存を確認
-- 通常枠 173/175 既定値温存が維持されていることを再確認（回帰なし）
-
-**備考**
-- `AIJudgment` モデルのフィールド・AI抽出ロジックは未変更（AIは引き続き値を生成するが、`write()` が `if field not in m: return` で短絡するため書込まれない）。
-- 将来インボイス 163-165 で何かしら AI 生成値を使いたくなったら、`preserve_rows` から外して別セルに書くか、マッピングに復活させる。
-
----
-
-### 2026-04-24 (22:00頃) 担当者フィードバック追加対応・本番テスト修正
-
-**背景**
-ea6cd83 の修正内容を本番（Streamlit Cloud）でテストし、追加の問題を発見・修正。
-
-**実施内容**
-
-1. **申請フォーマットアップロード（任意）を復活** (`2c0af23`):
-   - 担当者より「ツール名を選択したExcelをアップロードして使いたい」との依頼
-   - アップロードあり → そのファイルをその実行のみ使用（`work_dir` に保存）
-   - アップロードなし → `ツール/` 同梱のデフォルト原本を使用
-   - Drive モード・ファイルアップロードモード両方に対応
-   - `application` / `all` タスクのみ表示
-
-2. **Streamlit Cloud デプロイ遅延の確認**:
-   - push 直後にテストすると旧コードが動いている場合がある
-   - 数分待てば自動デプロイされる（Reboot 不要）
-
-**現在の申請フォーマット運用**
-- 担当者はツール名選択済みExcelを毎回アップロードして使う想定
-- ツールの内容が固まったら運用方法を再相談予定
-
-**既知の状態**
-- 生産性指標 B40: 賃金台帳に月別労働時間データがない場合は元の式（`=B38*B39`）のまま（仕様）
-- 賃金台帳一覧: 30列（月別賃金12列 + 年間合計 + 月別労働時間12列 + 年間合計 + 月平均）
-
----
-
-### 2026-04-29 賃金台帳をAI抽出に切替（和暦ヘッダ対応・前事業年度フィルタ）
-
-**背景**
-2026-04-28 15:17 に担当者からチャットで報告:
-- 「賃金台帳一覧」を出力しなくなっている
-- 給与支給総額も入っていない
-- （要望）賃金台帳を読み込むときに前事業年度のみを対象に計算したい
-
-調査の結果、原因は **賃金台帳の和暦付き月ヘッダ**（`R6.5月`〜`R7.4月`）を既存の決定論パーサーが認識できないこと。
-[wage_reader.py:159](hojokin/wage_reader.py#L159) の `re.fullmatch(r'(\d{1,2})月', s)` がプレーン表記しかマッチしないため、月列検出に失敗 → `read_wage_ledgers` が0名 → 給与支給総額計画値の書込み・賃金台帳一覧Excel生成の両方がスキップされていた。
-production ログで `賃金台帳からデータを読み取れませんでした` を2回確認済み。
-
-「先日OKだったテスト」と「本日NGだったテスト」の間にコード変更ゼロ — 入力ファイルのフォーマット差で発覚した既知のバグ。
-
-**方針判断**
-正規表現を緩める対症療法ではなく、**「他の人が作業しないで済むツール」の方針**に従い、賃金台帳抽出を AI 化する選択を取った。
-- 既存の Sonnet 4.6 で統一（モデル混在を避ける）
-- Haiku に下げる選択肢もあったが、コスト差は月数百円レベルで、運用統一性を優先
-- AI 失敗時は決定論パーサーにフォールバック（後方互換）
-- `USE_AI_WAGE_EXTRACTION=false` 環境変数で旧経路に戻せる
-
-**実施内容**
-
-PR/コミット: `d553a44` → main マージ `a0b7a3b`（`fix/ai-wage-extraction` ブランチ経由、`--no-ff`）
-
-1. `hojokin/ai_extractor.py`:
-   - `PROMPT_WAGE_LEDGER` / `PROMPT_WAGE_LEDGER_FISCAL_FILTER` / `PROMPT_WAGE_LEDGER_NO_FILTER` 追加
-   - `BaseExtractor.extract_wage_ledger(tsv_data, fiscal_period_hint)` 抽象メソッド
-   - `StubExtractor.extract_wage_ledger`: 空リスト返却（要 API 警告）
-   - `ClaudeExtractor.extract_wage_ledger`: テキストベース API 呼出し（max_tokens=16384）
-
-2. `hojokin/wage_reader.py`:
-   - `_workbook_to_tsv(wb, file_label)`: ワークブック全シートを TSV 文字列化
-   - `_validate_ai_employee(emp)`: 雇用形態・金額範囲(0〜1000万円)・労働時間(0〜400時間)・12要素チェック
-   - `_ai_data_to_wage_employees(ai_data)`: AI 出力 → `WageEmployee` リスト変換（バリデーション付き）
-   - `read_wage_ledgers_with_ai(paths, extractor, fiscal_period_hint)`: AI 経路本体
-   - `read_wage_ledgers(paths, extractor=None, fiscal_period_hint=None)`: AI 優先 → 決定論フォールバック
-
-3. `hojokin/pipeline.py`:
-   - `_format_fiscal_period(financial)`: `FinancialData.fiscal_year_start/end` から `'2024-05〜2025-04'` 形式の AI 用ヒント文字列を生成
-   - `_calc_wage_plan_from_ledger(detector, financial, extractor=None)` を `(plan, employees, status)` の3-tuple 返却に変更
-     - status: `''` / `'no_ledger'` / `'no_data'` / `'zero_total'` / `'error'`
-     - employees を `run_application_transfer` 内で再利用 → 賃金台帳一覧出力時の API 重複呼出しを防止
-   - `run_application_transfer` で extractor を `_calc_wage_plan_from_ledger` に渡す
-   - `run_wage_calculation` の賃金台帳フォールバック経路にも extractor + fiscal_hint を渡す
-   - 失敗時 `status.message` に ⚠ 警告を付与
-
-4. `hojokin/config.py`:
-   - `USE_AI_WAGE_EXTRACTION` 環境変数フラグ（default: true）
-
-5. `app.py`:
-   - `result['message']` に `⚠` が含まれる場合は `st.warning()`、それ以外は `st.success()` 表示
-
-**検証**
-- 担当者提供の `賃金台帳_R6.5-R7.4.xlsx`（5名、和暦ヘッダ）で AI 抽出成功
-  - 給与支給総額 0円、FTE 3.0人、年間総労働時間 7,040時間
-  - API tokens: 1597in + 618out = **約 2.1円/案件**
-- `USE_AI_WAGE_EXTRACTION=false` で旧挙動（決定論のみ・0件返却）が維持されることを確認
-- Stub Extractor で AI→フォールバック経路が動作することを確認
-- 検算: 担当者Xさん 0円（手計算と一致）
-
-**コスト試算（Sonnet 4.6, 1USD=150円）**
-| 規模 | 申請書 | 賃金台帳 | 合計 |
-|---|---|---|---|
-| 5名 | ~12円 | ~3円 | **~15円/案件** |
-| 10名 | ~12円 | ~7円 | **~19円/案件** |
-| 30名 | ~12円 | ~20円 | **~32円/案件** |
-
-補助金支援フィー（数十万〜数百万円）に対して 0.001〜0.01% 程度、誤差レベル。
-
-**ロールバック手順（優先順）**
-1. **最速**: Streamlit Cloud secrets に `USE_AI_WAGE_EXTRACTION = "false"` を設定 → コード非変更で旧経路に戻る
-2. **マージ revert**: `git revert -m 1 a0b7a3b && git push origin main`
-3. **個別コミット revert**: `git revert d553a44 && git push origin main`
-
-**修正後のカバー範囲**
-| フォーマット | 状態 |
-|---|---|
-| プレーン `1月〜12月` | ✅ |
-| 和暦 `R6.5月〜R7.4月` | ✅（今回追加）|
-| 西暦 `2024年5月` | ✅ |
-| 月別行型・YYYYMM月次型・個人台帳型 | ✅ |
-| 弥生・freee 等の各社固有フォーマット | ✅（AI 自動対応）|
-| シート名・列順違い | ✅ |
-| 24ヶ月入っていて前事業年度のみ抽出が必要 | ✅（決算期ヒントで AI フィルタ）|
-| 雇用形態の表記揺れ | ✅（AI 正規化）|
-
-**残タスク**
-- 担当者に再テスト依頼（マージ済み・デプロイ反映後）
-- 担当者からフィードバックを受けて、必要なら AI プロンプトを微調整
-- USE_AI_WAGE_EXTRACTION フラグの存在を運用ドキュメントに記載検討
-
-**副次効果**
-- 申請書類生成パイプラインの全入力データが Sonnet 4.6 統一に（履歴事項・PL・納税証明書・見積書・AI判断・**賃金台帳**）
-- 担当者の2つ目のリクエスト（前事業年度のみ抽出）も同 PR で同時解決
-- 既存決定論パーサーは温存しているため、AI 不要なシンプルなフォーマットでも変わらず動作
-
----
-
-## プロジェクト構成メモ
-
-### GAS（gas/ 配下）
-- `dashboard.gs`: ダッシュボード集計・更新
-- `chat_notify.gs`: ステータス変更時のChat通知（現在停止中）
-- `folder_creator.gs`: 送客フォーム回答時にDriveフォルダ自動作成
-- `mail_to_drive.gs`: メール添付の自動保存
-- `コード.gs`: フォーム回答の管理表転記
-
-### 主要スプレッドシート
-- 案件管理表: `1YKHps9kq7gQ9kZIXXyiukfq_qMHN56NxP1J_f-9hQpU`
-  - `2026案件一覧` シート（データ）
-  - `ダッシュボード` シート（集計結果、自動更新）
-- EXTERNAL_VENDOR_A管理表: `1dn6HMJMdFJNQljGRXPPX6RLfVkltLoguKjcb4uDFTpQ`（権限なし）
-
----
-
-### 2026-05-01 賃金台帳 PDF 抽出機能の本番統合
-
-**背景**
-担当者から「賃金台帳が PDF で提供される場合が増えている」との報告。
-既存は Excel/TSV のみ対応で、PDF は手動処理が必要だった。
-和暦ヘッダ対応（2026-04-29）で AI 抽出を導入済みだったため、
-PDF も同じ AI 抽出パイプラインで処理する運用に統一する判断。
-
-**実施内容**
-
-ブランチ: `feature/wage-pdf` → main マージ `c5fa62e`（2026-05-01 18:00）
-
-1. `hojokin/ai_extractor.py`:
-   - `extract_wage_ledger()` に `pdf_files: list[tuple[str, bytes]]` パラメータ追加
-   - PDF を Base64 encode して Claude API に document block で送信
-   - PROMPT_WAGE_LEDGER に【名前抽出の厳密ルール】を新規ルール6として追加
-     - 「『氏名』ラベルからのみ抽出」「隣接する住所欄から混入なし」
-     - 抽出後に行政地名（市/県/区等）をチェック → 混入時は除外
-   - Timeout を 180秒に設定（PDF の長時間応答対応）
-   - PROMPT_WAGE_LEDGER_PDF_NOTE を追加（PDF 複数ページの全読走査指示）
-
-2. `hojokin/wage_reader.py`:
-   - `read_wage_ledgers()` で ファイル拡張子を検出（.pdf / .xlsx/.xlsm）
-   - PDF は PyMuPDF で bytes 読込、 `pdf_files` パラメータで API に渡す
-   - Excel は既存の TSV 変換処理で対応（変更なし）
-   - 混在アップロード（PDF + Excel）にも対応可能
-
-3. `hojokin/pipeline.py`:
-   - FileDetector の wage_ledger セットに `.pdf` を追加
-   - 「賃金台帳」キーワード + PDF 拡張子で自動検出
-
-4. `app.py`:
-   - ファイルアップロード UI で 「Excel/PDF」表記に更新
-   - file_uploader の type に 'pdf' を追加（既に含まれていた）
-
-**API テスト結果（2026-05-01）**
-- テスト対象: `07-2_R7.pdf` (5.77MB, 30 名分)
-- 抽出結果: 30 名成功、うち 29 名が完全正常
-- 1 件「加藤東市下鞆川」で市名混入（PDF テキスト抽出層の限界）
-- API コスト: $0.187 ≈ 28 円
-- 給与精度: 30/30 正常
-- 労働日数精度: 29/30 正常（1 件は役員で未記載）
-
-**本番展開判定**
-✅ コスト: 0.01-0.05%（補助金フィー対比、誤差範囲）
-✅ 給与・労働日数: 99%+ 精度
-✅ システム準備: 全て統合済み
-✅ フォールバック: USE_AI_WAGE_EXTRACTION フラグで切替可能
-🟢 **本番移行: GO**
-
-**デプロイ内容**
-- GitHub リモート: `origin/main` に c5fa62e push（2026-05-01 18:05）
-- Streamlit Cloud: 自動デプロイ開始（数分以内に反映）
-- 本番 URL: https://hojokin-uymden838zfglt9uahkapf.streamlit.app
-
-**既知の制限**
-- 名前に「市」「県」「区」が含まれる場合、AI が住所混入と判定して除外する可能性がある
-  （実運用ではレアケース、品質と誤検出のバランスを取った判定）
-- PDF OCR 依存（テキスト層がない画像 PDF には未対応、テキスト層あり PDF のみ）
-
-**次のテスト対象**
-- クリーンニイガタ R7.pdf（3.6MB、最新会計年度）
-- 07-1.R6.pdf（5.8MB、旧年度フォーマット）
-- 担当者による本番データでのテスト・フィードバック収集
-
----
-
-### 2026-05-01 (22:00) CSV 対応の事前検討（提案段階・デプロイ未実施）
-
-**背景**
-Google Drive に CSV ファイルが複数存在することを確認（顧客企業E給与データ）。
-PDF 対応で AI 抽出パイプラインを確立したため、CSV も同じ経路で処理できるか検討。
-
-**現状調査結果**
-
-Google Drive 内の CSV:
-- **件数**: 7 件（すべて顧客企業E、案件ID 2025-0168）
-- **パターン**: 個人別ファイル（1 人 = 1 ファイル）
-- **サイズ**: 2-3KB/ファイル（合計 19.8KB、非常に小さい）
-- **フォーマット**: 月別給与・控除・支給額の詳細（Excel と同じスキーマ）
-
-**対応判定：コスト × 品質**
-
-| 項目 | Phase 1（CSV 対応） | Phase 2（複数ファイル統合） |
-|------|------|------|
-| **開発コスト** | 30-40 分 | 2-3 時間 |
-| **API 追加コスト** | ¥0（既存パーサー再利用） | ¥0（統合送信） |
-| **効果** | 📊 中（CSV も Excel と同じパイプライン化） | 📊 大（UX 大幅向上） |
-| **推奨度** | 🟢 実装推奨 | 🟡 医療機関需要確認後 |
-| **実装複雑度** | 低（FileDetector + CSV→TSV 変換） | 中（ファイルループ + 統合ロジック） |
-
-**Phase 1 の実装内容（案）**
-1. `hojokin/pipeline.py` の FileDetector:
-   ```python
-   'wage_ledger': {'.xlsx', '.xlsm', '.pdf', '.csv'}  # .csv を追加
-   ```
-
-2. `hojokin/wage_reader.py` に CSV パーサーを追加:
-   - `pandas.read_csv()` で CSV 読込
-   - 列の自動マッピング（月別給与・労働日数を自動検出）
-   - 既存の `_workbook_to_tsv()` と同様に TSV 形式に統一
-   - 以降の処理は変わらず（AI 抽出 or 決定論パーサー）
-
-3. `app.py` の UI:
-   - ファイルアップロードの type に `.csv` を追加
-
-**Phase 1 利点**
-- CSV も Excel も「同じ AI 抽出パイプライン」で処理可能
-- 医療機関など多数の給与管理システムに対応
-- 実装コスト低（1 時間程度）、API 追加コストなし
-
-**Phase 2 の将来効果（複数ファイル同時アップロード）**
-- 複数の個人別ファイル（CSV/Excel 混在可）を 1 回でアップロード
-- バックエンド: ファイルをループして統合、1 回の AI 呼出しで全員分を処理
-- UX: 「30 人分の個人別ファイル → 複数選択 → 一括アップロード」が可能に
-- 医療機関からの需要が高い可能性あり
-
-**現在の状態**
-- ✅ PDF 対応は本番済み（GitHub push + Streamlit デプロイ済み）
-- 🔄 CSV 対応は「提案・検討段階」（コード未変更、デプロイなし）
-- ⏳ Phase 1/2 の実装判断は担当者のフィードバック待ち
-
-**次のステップ**
-- 担当者に「CSV ファイルの今後の提供可能性」を確認
-- 医療機関の複数ファイル対応の需要度を確認
-- Phase 1 実装の Go/No-go を判断
-
----
-
-### 2026-05-01 (深夜) CSV 対応 Phase 1 実装：AI 経路メイン + フォールバック
-
-**背景**
-担当者から「CSV対応を本番で使えるか確認してほしい」との依頼。
-当初は自前 CSV パーサー（`_read_csv()`）で年間合計÷12 する簡易実装にしたが、
-俯瞰的に見直したところ以下の問題を発見：
-
-- 医療機関の実 CSV は **YYYYMM 月別行型**（202501,202502,...）で、自前パーサーでは未対応
-- 自前ロジック60行 vs AI 経路に流せば3行で済む
-- API コスト ¥20/案件 は誤差レベル、堅牢性とコード簡素化のメリットを優先すべき
-
-**判断方針**
-品質（対応範囲の広さ）> コスト。但し無駄なコストは避ける。
-- メイン経路：AI 抽出（PDF/Excel/CSV すべて統一）
-- フォールバック：簡易 `_read_csv()`（USE_AI_WAGE_EXTRACTION=false 時の保険）
-
-**実施内容**
-
-1. `requirements.txt` に `pandas>=2.0.0` を追加
-
-2. `hojokin/wage_reader.py`:
-   - `_csv_to_tsv(path)` を新設：CSV を TSV 文字列化（複数エンコーディング対応 utf-8/cp932/shift_jis）
-   - `read_wage_ledgers_with_ai()` の for ループに CSV 分岐を追加（PDF・Excel と同じパイプラインに統合）
-   - `_read_csv()` はフォールバック用として残し、コメントで「集計表型のみ対応・月別行型は AI 経路で処理」と明示
-
-3. `hojokin/pipeline.py`:
-   - `FileDetector.ALLOWED_EXTS['wage_ledger']` に `.csv` を追加
-
-**ファイル形式ごとの API 利用**
-| 形式 | AI 経路（メイン） | フォールバック | API コスト |
-|---|---|---|---|
-| Excel | TSV 変換 → API | `_read_flexible()` | 既存通り |
-| PDF | document block → API | (なし) | ~¥28/案件 |
-| CSV | TSV 変換 → API | `_read_csv()` 簡易 | ~¥20/案件 |
-
-**ローカル検証（API 呼出なし、Stub 使用）**
-- 医療機関フォーマット模倣 CSV（YYYYMM 月別行型12ヶ月）→ TSV 変換正常、氏名・月別賃金・出勤日数すべて保持
-- 集計表型の dummy CSV → TSV 変換正常
-- `read_wage_ledgers_with_ai()` で CSV/Excel/PDF 混在パイプライン動作確認
-- 既存 `_read_csv()` の決定論経路 4 シナリオ全パス（回帰なし）
-
-**現在の状態**
-- ✅ AI 経路 CSV 対応、ローカル検証 OK
-- ✅ フォールバック決定論経路、回帰なし
-- 📝 コード修正済み（main にコミット済み、push なし）
-- ⏳ 担当者の本番テストで実 CSV 検証後、GitHub push → Streamlit デプロイ
-
----
-
-### 2026-05-01 ファイル名 NFC 統一 + UI 判別 NFC 化 + 前事業年度フィルタ実テスト
-
-**背景**
-2026-05-01 のセッションで担当者が本番テスト中、以下を確認:
-
-1. **`テスト5/1` という会社名でパスエラー**: 会社名にスラッシュ含む → `/tmp/.../テスト5/1_xxx.xlsx` がパスとして解釈され `[Errno 2] No such file or directory` で失敗
-2. **`ヒアリングシート_有限会社クリーンニイガタ.xlsx` が UI で「未検出」表示**: ファイル名が NFD（macOS の濁点分離）で送信されていて、`_analyze_files` が NFC キーワード「ヒアリング」とマッチしない問題
-3. **アップロードモードと Drive モードでファイル名扱いに差異がある可能性**: 担当者から「両モードで挙動が違うかも」と指摘
-
-**実施内容**
-
-PR/コミット:
-- `b509d2c` (`fix/nfc-filename`) → `8dc5be6` (merge to main)
-- `8d8270c` (`fix/analyze-files-nfc`) → `dc45f72` (merge to main)
-
-1. `app.py`:
-   - `_nfc_filename(name)` ヘルパーを追加
-   - `save_uploaded_files`: 保存名を NFC 化（ローカルアップロード）
-   - Drive download 経路: 保存名を NFC 化
-   - template_file 保存: NFC 化
-   - `_analyze_files`: ファイル名を NFC 化してから keyword 比較（UI 表示用）
-   - `_check_required_by_names`: 同上（必須チェック用）
-
-**結果として吸収できる差異**
-- ブラウザがファイル名を NFC で送信（Win 一般）vs NFD で送信（mac 一部）
-- アップロードモード（ブラウザ送信）vs Drive モード（API 取得）
-- 保存先が macOS（NFD 強制）vs Linux（指定通り）vs Windows（NFC 強制）
-
-**前事業年度フィルタの実データ確認**
-
-担当者が「前事業年度のみ抽出」機能を実データでテストしたいと依頼。
-
-検証方法:
-- 既存 `賃金台帳_R6.5-R7.4.xlsx`（5名・12ヶ月）を拡張して **24ヶ月版**を合成（R7.5-R8.4 を 1.05 倍データで追加）
-- ケース1: `fiscal_period_hint='2024-05〜2025-04'` を渡す → AI は 元の R6.5-R7.4 のみ抽出
-- ケース2: `fiscal_period_hint=None` を渡す → AI は直近 12 ヶ月を抽出（プロンプトの指示）
-
-検証結果（担当者Xさんの年間合計）:
-| ケース | 結果 | 期待 |
+このファイルは Claude Code が自動で読み込む、プロジェクト横断のコンテキストファイル。
+
+## プロジェクト概要
+
+IT導入補助金の申請書類を、ヒアリングシート・PDF資料・Excel賃金台帳から AI で自動生成するツール。
+本番運用は Streamlit Cloud で動作。
+
+## ディレクトリ構成
+
+```
+補助金/
+├── app.py                  Streamlit エントリポイント
+├── run.py                  CLI エントリポイント
+├── hojokin/                コア処理パッケージ
+│   ├── ai_extractor.py    Claude API 呼び出し（PDF/CSV/Excel 抽出）
+│   ├── config.py          設定・テンプレートマッピング
+│   ├── pipeline.py        申請書作成・給与計算のオーケストレーション
+│   ├── template_filler.py Excel 書込み
+│   ├── wage_reader.py     賃金台帳の決定論パーサー
+│   ├── pdf_reader.py      PDF テキスト抽出
+│   ├── google_drive.py    Drive API クライアント
+│   ├── google_sheets.py   Sheets API クライアント
+│   └── ...
+├── gas/                    Google Apps Script（管理表自動化）
+├── docs/                   運用マニュアル・設計ドキュメント
+├── ツール/                 申請テンプレート・ヒアリングシート原本
+└── credentials/            Google サービスアカウント鍵（gitignore）
+```
+
+## 主要設定
+
+- 環境変数: `.env` 参照（`.env.example` を雛形として）
+- 主な変数: `CLAUDE_API_KEY`, `GOOGLE_CREDENTIALS_PATH`, `MANAGEMENT_SHEET_ID`, `USE_AI_WAGE_EXTRACTION`
+- Google Sheet/Drive の各種 ID は `.env` で管理。コードにハードコードしない。
+
+## 開発時の注意
+
+### コード規約
+- マジックナンバーは定数化、上部にまとめる
+- `sys.stdout.reconfigure(encoding='utf-8')` をスクリプト先頭に
+- 日本語パスは `pathlib.Path.iterdir()` で解決
+- Excel に書き込む文字列の先頭に `=` を入れない（数式と誤認）
+
+### 個人情報・機密情報の取り扱い（重要）
+- **顧客企業名・顧客従業員氏名・年収・連絡先など、特定可能な個人情報や顧客情報をリポジトリにコミットしない**
+- 作業ログや調査メモは、抽象化した形（「顧客企業A」「担当者」等）で記述する
+- 顧客実データ（ヒアリングシート、賃金台帳、給与明細等）は `.gitignore` 配下に置く
+- Google Sheet ID・Drive フォルダ ID・Webhook URL 等は環境変数 / Apps Script Properties に逃がす
+
+### 本番デプロイ
+- Streamlit Cloud と GitHub の `main` ブランチが連携。push で自動再デプロイ。
+- ロールバックは `git revert` または Streamlit Cloud secrets での機能フラグ切替
+- `USE_AI_WAGE_EXTRACTION=false` で AI 抽出を旧経路（決定論パーサー）に戻せる
+
+## ロールバック・運用フラグ
+
+| フラグ | デフォルト | 役割 |
 |---|---|---|
-| fiscal_hint="2024-05〜2025-04" | **0円**（元データそのまま）| ✅ 前事業年度のみ |
-| fiscal_hint なし | 4,499,040円（1.05倍データ）| ✅ 直近12ヶ月選択 |
+| `USE_AI_WAGE_EXTRACTION` | `true` | 賃金台帳の AI 抽出 ON/OFF。`false` で決定論パーサーのみ |
 
-→ AI が指定された 12 ヶ月だけを正しく抽出することを確認。
+## 関連ドキュメント
 
-**Drive 内の実データ調査結果**
-- xlsx 賃金台帳: 顧客企業Eの 7名分（2025年/令和7年・1年分のみ）
-- PDF 賃金台帳: クリーンニイガタ・ユーアイコム等（複数あるが PDF のみで、別途 PDF 対応済）
-- **xlsx で複数年度を持つ実案件は Drive 上に存在しない**ため、24ヶ月リアルデータでの検証は今回は合成データで代替
-
-**ロールバック手順**
-1. NFC 修正のみ戻したい: `git revert -m 1 dc45f72 -m 1 8dc5be6`
-2. AI 抽出ごと戻したい: `git revert -m 1 a0b7a3b`
-3. 環境変数で切替: `USE_AI_WAGE_EXTRACTION=false`
-
-**現在の状態（2026-05-01 終了時点）**
-- ✅ NFC 統一修正をデプロイ済み（`dc45f72`）
-- ✅ Streamlit Cloud で担当者がテスト → 顧客企業Dの申請書 + 給与計算が正常生成（5名検出）
-- ✅ AI 抽出 + 前事業年度フィルタ機能、合成データで動作確認
-- ⚠ 顧客企業Dの賃金台帳が PDF のため `wage_plan` の計画値（行216-219）は空欄（既存仕様）
-- ⏳ 担当者から残課題:「PDF 賃金台帳対応を考えるかどうか」議論段階（このセッションの直後に PDF 対応コミット `c5fa62e` 等が main に入った模様）
-
-**次セッション（Windows 切替時）への引き継ぎ事項**
-
-1. **作業環境**: macOS → Windows に切替予定
-   - クローン手順: `git clone https://github.com/hane-colorfulbox/hojokin.git`
-   - Python 3.11 + `pip install -r requirements.txt`
-   - `.env` に `CLAUDE_API_KEY=...`（macOS 側の `.env` 内容を参照）
-2. **本番 URL**: https://hojokin-uymden838zfglt9uahkapf.streamlit.app
-3. **直近の懸案**:
-   - 担当者から本日 PDF/CSV 対応された機能の実テスト結果待ち
-   - 案件管理ダッシュボードのEXTERNAL_VENDOR_A権限問題（既知）
-4. **NFC 関連知識**: ファイル名の NFC 統一は app.py 側で完了。FileDetector（pipeline.py 側）も NFC 正規化を行うので、Windows 環境でファイル名が NFC で送信されても問題なく動く。
-5. **テスト用ファイル（macOS Downloads にあるもの・Windows でも入手可能）**:
-   - `賃金台帳_R6.5-R7.4.xlsx` (5名・和暦ヘッダ・テスト用)
-   - 顧客企業Eの個人台帳型 7 ファイル（Drive 上 fileId は別記録）
-
----
-
-### 2026-05-04 API重複呼出の解消・加点判定 PDF/CSV対応・タイムアウト延長
-
-**背景**
-2026-05-01 のセッションで CSV 対応・PDF 対応した後、担当者の本番テスト中に
-6.78MB PDF×2 件で 180 秒タイムアウトが発生。本番ログを精査して以下の問題を特定:
-
-1. `all` タスクで `extract_pl` / `extract_wage_ledger` が同一案件で 2 回呼ばれる重複
-   （application で1回 + wage で1回）
-2. 加点判定機能 (`_run_bonus_judgment`) が Excel 限定 → Drive 内 76% (PDF/CSV) で使えない
-3. 大容量 PDF で 180 秒タイムアウト発生
-
-**実施内容**
-
-コミット: `7406c73` (UI 注意書き) → `b503f31` (重複解消＋加点判定＋timeout)
-
-1. **UI 注意書き整理** (`7406c73`):
-   - app.py の Drive モードで「.csv → xlsx に変換しろ」古い警告を削除（CSV はそのまま処理可能）
-   - 賃金台帳の対応形式表示を `Excel/PDF` → `Excel/PDF/CSV` に
-   - file_uploader の type に `.csv` を追加
-
-2. **ProcessingStatus に AI 抽出結果を保持** (`b503f31`):
-   - `hojokin/models.py`: `ProcessingStatus.financial` / `ledger_employees` フィールド追加
-   - `run_application_transfer` の `status` に `extraction.financial` と `ledger_employees` をセット
-   - 後続タスクで再利用するためのキャリア
-
-3. **`run_wage_calculation` のキャッシュ対応** (`b503f31`):
-   - 引数 `cached_financial` / `cached_ledger_employees` 追加
-   - キャッシュがあれば `extract_pl` / `read_wage_ledgers` の API 呼出をスキップ
-   - なければ従来通り（後方互換）
-
-4. **app.py で all タスク時の連結** (`b503f31`):
-   - application 結果から `_cached_financial` / `_cached_ledger_employees` を保持
-   - wage に渡して API 重複を解消
-
-5. **加点判定 (`_run_bonus_judgment`) を AI 経路化** (`b503f31`):
-   - ファイル検索を `.xlsx/.xlsm/.xls/.pdf/.csv` に拡張
-   - `read_wage_ledger` (単数) → `read_wage_ledgers` (複数+AI) に切替
-   - `extractor` を bonus でも作成して渡す（236-249 行で `task_type in (..., 'bonus')` 拡張）
-   - エラーメッセージを「Excel/PDF/CSV」表記に修正
-
-6. **API timeout 180秒 → 300秒** (`b503f31`):
-   - `hojokin/ai_extractor.py` の `ClaudeExtractor` 初期化時の timeout 既定値を変更
-   - 6MB級 PDF×2 件でも 1 発で完走できる想定
-   - リトライ回数（最大 3 回）は据え置き
-
-**コスト削減効果（試算）**
-| シナリオ | 改修前 | 改修後 |
-|---|---|---|
-| `all` タスク 1 案件あたり | 約 ¥12-18（重複あり） | **約 ¥6-9（半減）** |
-| 月 50 件想定 | - | **月 ¥300-450 削減** |
-| 加点判定の対応範囲 | Excel のみ（24% のファイル） | **Excel/PDF/CSV（100%）** |
-
-**ローカル検証**
-- AST 構文チェック: 全 Python ファイル OK
-- import チェック: ProcessingStatus 新フィールド・`run_wage_calculation` 新引数が正しくロード
-- 加点判定の Sonnet サブエージェント検証: API なしで JSON → `judge_bonus_points` 動作確認済み
-
-**ロールバック手段**
-1. timeout のみ戻したい: `hojokin/ai_extractor.py` の `timeout: float = 300.0` → `180.0`
-2. 加点判定 AI 化を戻したい: `git revert b503f31`
-3. 環境変数: `USE_AI_WAGE_EXTRACTION=false` で AI 経路全体を無効化（加点判定も Excel のみに戻る）
-
-**副次成果: `/sonnet` グローバルコマンド（リポジトリ外）**
-今回の実装中に「ローカルで Sonnet 4.6 を API 呼び出さずに検証する」需要が頻発したため、
-`~/.claude/commands/sonnet.md` をグローバル配置（**プロジェクト外**）。
-- 任意のプロンプト+データを `Agent(subagent_type="general-purpose", model="sonnet")` で実行
-- 補助金プロジェクト以外の Claude Code セッションでも使える汎用コマンド
-- リポジトリ管理外（個人の Claude Code 設定）
-- Windows 環境では `%USERPROFILE%\.claude\commands\sonnet.md` に同等ファイルを配置すれば移植可能
-
-**現在の状態（2026-05-04）**
-- ✅ 全変更デプロイ済み（main: `b503f31`）
-- ✅ Streamlit Cloud で担当者本番テスト続行中
-- ⏳ Windows 切替後、次のセッションで本番テスト結果を確認
-
-**Windows 移行時の追加注意点**
-- 上記の 5/4 改修により「タスク間の AI 抽出結果の引き継ぎ」が `ProcessingStatus` 経由で行われるため、
-  app.py の `results['application']['_cached_*']` キーには dataclass オブジェクトが入っている。
-  将来 results を JSON シリアライズする処理を追加する際はこのキーを除外すること（先頭が `_` で識別可能）。
-- Windows 側で `~/.claude/commands/sonnet.md` をコピーすれば、移行先でも `/sonnet` コマンドが使える。
+- `docs/マニュアル_書類作成.md` — Streamlit/Claude Code を使った書類作成手順
+- `docs/運用マニュアル.md` — 案件管理から書類作成までの運用フロー
+- `docs/設計_API自動化.md` — 完全自動化バージョンの設計案
+- `docs/案件メモ/` — 個別案件の調査ログ（テンプレートのみ。実案件メモは gitignore）

@@ -4,13 +4,13 @@
 
 使い方:
   # 申請書 + 給与計算を一括実行
-  python run.py --company "顧客企業A" --template "通常枠_2026" --folder "./顧客資料置き場資料/"
+  python run.py --company "顧客企業名" --template "通常枠_2026" --folder "./顧客資料/"
 
   # 申請書のみ
-  python run.py --task application --company "顧客企業A" --template "通常枠_2026" --folder "./顧客資料置き場資料/"
+  python run.py --task application --company "顧客企業名" --template "通常枠_2026" --folder "./顧客資料/"
 
   # 給与計算のみ
-  python run.py --task wage --company "顧客企業A" --folder "./顧客資料置き場資料/"
+  python run.py --task wage --company "顧客企業名" --folder "./顧客資料/"
 
   # Google Drive連携（管理シートから実行）
   python run.py --drive --sheet-id "1ABC..."

@@ -444,7 +444,7 @@ class ClaudeExtractor(BaseExtractor):
                 if CREDIT_BALANCE_MARKER in str(e).lower():
                     logger.error(f'[API残高切れ] caller={caller} {stats}')
                     raise APICreditExhaustedError(
-                        'APIの残高が不足しています。担当者にチャージを依頼してください。'
+                        'APIの残高が不足しています。管理者にチャージを依頼してください。'
                     ) from e
                 logger.error(f'[API失敗/400] caller={caller} {stats} error={e}')
                 raise
