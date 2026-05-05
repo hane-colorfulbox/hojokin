@@ -63,9 +63,22 @@ from hojokin.wage_reader import (
 )
 
 # Drive連携（認証情報がある場合のみ）
+logger = logging.getLogger(__name__)
 _drive_client = None
 _DRIVE_CREDS = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON', '')
 _DRIVE_PARENT_ID = os.getenv('DRIVE_PARENT_FOLDER_ID', '')
+
+
+def _has_streamlit_secret(key: str) -> bool:
+    """st.secrets に key が存在するかを安全に判定する。
+
+    ローカル開発で secrets.toml が無い場合、`'key' in st.secrets` が
+    StreamlitSecretNotFoundError を出すため try で包む。Cloud では正常動作。
+    """
+    try:
+        return hasattr(st, 'secrets') and key in st.secrets
+    except Exception:
+        return False
 
 
 def _get_drive_client():
@@ -81,14 +94,20 @@ def _get_drive_client():
         return _drive_client
 
     # 方法2: Streamlit Secrets（Cloud用）
+    # ローカルで secrets.toml が無い場合や、Cloud で形式不正な場合を吸収する。
+    # 失敗時は return None でローカル認証経路へフォールバックさせる設計。
+    # 観測性のため WARN 出力（ロガーは Streamlit Cloud のログから確認可能）。
     try:
-        if 'gcp_service_account' in st.secrets:
+        if _has_streamlit_secret('gcp_service_account'):
             _drive_client = DriveClient(
                 credentials_dict=dict(st.secrets['gcp_service_account']),
             )
             return _drive_client
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(
+            f'Streamlit Secrets経由のDrive認証に失敗: {e}',
+            exc_info=True,
+        )
 
     return None
 
@@ -496,14 +515,18 @@ with st.sidebar:
 
     # データソース選択
     _has_local_creds = bool(_DRIVE_CREDS and Path(_DRIVE_CREDS).exists())
-    _has_cloud_creds = 'gcp_service_account' in st.secrets if hasattr(st, 'secrets') else False
+    # secrets.toml が無いローカルでの StreamlitSecretNotFoundError をヘルパーで吸収
+    _has_cloud_creds = _has_streamlit_secret('gcp_service_account')
     drive_available = (_has_local_creds or _has_cloud_creds) and bool(_DRIVE_PARENT_ID)
     # Secrets経由の場合もPARENT_IDを取得
     if not _DRIVE_PARENT_ID and _has_cloud_creds:
         try:
             drive_available = bool(st.secrets.get('drive_parent_folder_id', ''))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                f'Streamlit Secrets の drive_parent_folder_id 取得に失敗: {e}',
+                exc_info=True,
+            )
     if drive_available:
         data_source = st.radio(
             'データソース',
@@ -723,8 +746,11 @@ if data_source == 'Google Drive':
         if not parent_id:
             try:
                 parent_id = st.secrets.get('drive_parent_folder_id', '')
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f'Streamlit Secrets の drive_parent_folder_id 取得に失敗: {e}',
+                    exc_info=True,
+                )
 
         @st.cache_data(ttl=60)
         def _list_customer_folders():
@@ -905,16 +931,17 @@ has_drive_required = (
     if has_drive_files else False
 )
 
+# 必須ファイル不足時はボタンを押せないようにする（不完全ファイルでのAPI消費防止）
 if data_source == 'Google Drive':
-    if task_type == 'bonus':
-        can_run = bool(company_name) and has_drive_files and bool(prefecture)
-    else:
-        can_run = bool(company_name) and has_drive_files
+    has_data = has_drive_files
+    required_ok = has_drive_required
 else:
-    if task_type == 'bonus':
-        can_run = bool(company_name) and has_files and bool(prefecture)
-    else:
-        can_run = bool(company_name) and has_files
+    has_data = has_files
+    required_ok = has_required
+
+can_run = bool(company_name) and has_data and required_ok
+if task_type == 'bonus':
+    can_run = can_run and bool(prefecture)
 
 if not company_name:
     st.warning('⬅️ サイドバーで会社名を入力してください')
