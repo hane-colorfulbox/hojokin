@@ -670,8 +670,22 @@ def _read_wage_report(path: Path) -> tuple[list[dict], int, int, int]:
     if ws is None:
         ws = wb[wb.sheetnames[0]]
 
+    def _to_num(v) -> float:
+        # 賃金状況報告シートのセルは数値想定だが、ユーザー入力で
+        # '300,000円' / '― ' / 'N/A' / '' のような文字列が混じることがあり
+        # そのまま比較すると TypeError: '>' not supported between str and int で落ちる。
+        if v is None:
+            return 0.0
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).replace(',', '').replace(' ', '').replace('円', '').replace('時間', '').strip()
+        try:
+            return float(s)
+        except (ValueError, TypeError):
+            return 0.0
+
     # 役員報酬（行13, D列）
-    yakuin_hoshu_3m = ws.cell(13, 4).value or 0
+    yakuin_hoshu_3m = _to_num(ws.cell(13, 4).value)
 
     employees = []
     for row in ws.iter_rows(min_row=19, max_row=200):
@@ -680,12 +694,12 @@ def _read_wage_report(path: Path) -> tuple[list[dict], int, int, int]:
         if name is None or no is None:
             continue
 
-        m1_base = row[5].value or 0
-        m1_hr = row[6].value or 0
-        m2_base = row[8].value or 0
-        m2_hr = row[9].value or 0
-        m3_base = row[11].value or 0
-        m3_hr = row[12].value or 0
+        m1_base = _to_num(row[5].value)
+        m1_hr = _to_num(row[6].value)
+        m2_base = _to_num(row[8].value)
+        m2_hr = _to_num(row[9].value)
+        m3_base = _to_num(row[11].value)
+        m3_hr = _to_num(row[12].value)
         judge = row[14].value if len(row) > 14 else ''
 
         # 時間推定
