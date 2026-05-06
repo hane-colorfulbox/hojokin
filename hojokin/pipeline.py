@@ -420,6 +420,15 @@ def run_wage_calculation(
                 _read_wage_report(wage_report_path)
             logger.info(f'賃金状況報告シート: 正社員{seishain_count}, パート{part_count}')
 
+        # 賃金状況報告シート未取込 + PL に役員報酬がある → PL の役員報酬 ÷ 4 で機械計算
+        # （正確な3ヶ月実績ではないが、年間役員報酬を均等割した推定値として埋めておく）
+        if yakuin_hoshu_3m == 0 and financial.officer_compensation > 0:
+            yakuin_hoshu_3m = int(financial.officer_compensation / 4)
+            logger.info(
+                f'役員報酬3ヶ月合計を PL から推定: {yakuin_hoshu_3m:,}円 '
+                f'(年額{financial.officer_compensation:,}円 ÷ 4)'
+            )
+
         # フォールバック: 賃金状況報告シートで人数が取れなかった場合、賃金台帳から補完
         if seishain_count + part_count == 0:
             # キャッシュがあれば再利用（API呼出スキップ）

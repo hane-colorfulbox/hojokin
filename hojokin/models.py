@@ -128,6 +128,12 @@ class AIJudgment:
     it_utilization_status: str = '' # IT活用状況
     it_utilization_scope: str = ''  # IT電子化範囲（インボイス枠）
     invoice_related_work: str = ''  # インボイス対応業務（インボイス枠）
+    # ── プルダウン番号で出力する選択型項目（テンプレート行172/177/179/180/181 用）──
+    weakness: str = ''              # 弱み（番号付き選択肢）
+    it_investment_process: str = '' # IT投資プロセス（番号付き選択肢）
+    improvement_process: str = ''   # 改善したい業務プロセス（番号付き選択肢）
+    expected_effect_dept: str = ''  # 強化したい部門（番号付き選択肢）
+    expected_effect: str = ''       # 期待効果（番号付き選択肢）
 
 
 @dataclass

@@ -147,6 +147,12 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
     write('business_types', ai.business_types, '行っている事業')
     write('it_investment_status', ai.it_investment_status, 'IT投資状況')
     write('it_utilization_status', ai.it_utilization_status, 'IT活用状況')
+    # ── プルダウン選択型項目（番号付き選択肢）──
+    write('weakness', ai.weakness, '弱み')
+    write('it_investment_process', ai.it_investment_process, 'IT投資プロセス')
+    write('improvement_process', ai.improvement_process, '改善プロセス')
+    write('expected_effect_dept', ai.expected_effect_dept, '強化部門')
+    write('expected_effect', ai.expected_effect, '期待効果')
 
     # ── インボイス枠特有の項目 ──
     write('it_utilization_scope', ai.it_utilization_scope, 'IT電子化範囲')
