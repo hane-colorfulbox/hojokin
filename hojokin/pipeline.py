@@ -173,6 +173,7 @@ def run_application_transfer(
     )
 
     try:
+        from .ai_extractor import APICreditExhaustedError
         mapping = get_mapping(template_type)
 
         if extractor is None:
@@ -184,7 +185,11 @@ def run_application_transfer(
 
         extraction = ExtractionResult()
 
-        # ヒアリングシート読取（Excel直接読取 - API不要）
+        # API残高切れ等で Phase 2 が部分実行になった場合の理由
+        api_skipped_reason: str = ''
+
+        # ===== Phase 1: API不要な処理（確実に動く・コスト¥0）=====
+        # ヒアリングシート読取（Excel直接読取）
         hearing_path = detector.get('hearing')
         hearing_data = {}
         if hearing_path:
@@ -193,40 +198,15 @@ def run_application_transfer(
         else:
             logger.warning('ヒアリングシートが見つかりません')
 
-        # 履歴事項PDF → CompanyInfo
-        registry_path = detector.get('registry')
-        if registry_path:
-            images = pdf_to_images(registry_path)
-            extraction.company = extractor.extract_registry(images)
-            logger.info(f'履歴事項: {extraction.company.name}')
-
-        # 損益計算書PDF → FinancialData
-        # 製造原価報告書がある場合は画像を結合してAIに送る
-        pl_path = detector.get_pl_latest()
-        if pl_path:
-            images = pdf_to_images(pl_path)
-            cost_report_path = detector.get('cost_report')
-            if cost_report_path:
-                images += pdf_to_images(cost_report_path)
-                logger.info(f'製造原価報告書も読取: {cost_report_path.name}')
-            extraction.financial = extractor.extract_pl(images)
-            logger.info(f'損益計算書: 売上{extraction.financial.revenue:,}')
-
-        # 納税証明書PDF
-        tax_path = detector.get('tax')
-        if tax_path:
-            images = pdf_to_images(tax_path)
-            extraction.tax = extractor.extract_tax(images)
-
-        # 見積書
+        # 見積書: Excel なら API 不要なのでここで処理（PDF は Phase 2）
         estimate_path = detector.get('estimate')
+        estimate_pdf_path = None
         if estimate_path:
             if estimate_path.suffix == '.xlsx':
-                # Excelの見積書は直接読取
+                # Excel の見積書は直接読取（API不要）
                 import openpyxl
                 wb_est = openpyxl.load_workbook(estimate_path, data_only=True)
                 ws = wb_est[wb_est.sheetnames[0]]
-                # 「件名」「品名」「ツール名」等のラベル横のセルからツール名を取得
                 tool_name_keywords = ['件名', '品名', 'ツール名', '商品名', 'サービス名']
                 found = False
                 for row in ws.iter_rows(min_row=1, max_row=30):
@@ -234,21 +214,17 @@ def run_application_transfer(
                         v = cell.value
                         if v and isinstance(v, str):
                             if any(kw in v for kw in tool_name_keywords):
-                                # 同じ行の次のセルを取得
                                 if i + 1 < len(row) and row[i + 1].value:
                                     extraction.estimate.tool_name = str(row[i + 1].value)
                                     found = True
                                     break
                     if found:
                         break
-                # 見つからなければファイル名から推測
                 if not found:
                     import re
                     name = estimate_path.stem
-                    # 「様」「お見積り」等を除去
                     for remove in ['お見積り', 'お見積', '見積り', '見積', '御見積', '_', '様']:
                         name = name.replace(remove, '')
-                    # 日付パターン除去 (20250519, 2025-05-19 等)
                     name = re.sub(r'\d{8}', '', name)
                     name = re.sub(r'\d{4}[-/]\d{2}[-/]\d{2}', '', name)
                     name = name.strip()
@@ -256,24 +232,74 @@ def run_application_transfer(
                         extraction.estimate.tool_name = name
                 wb_est.close()
             else:
-                images = pdf_to_images(estimate_path)
+                # PDF は Phase 2 で処理
+                estimate_pdf_path = estimate_path
+
+        # ===== Phase 2: API使用（残高切れなら部分スキップ。Phase 1 結果は維持）=====
+        try:
+            # 履歴事項PDF → CompanyInfo
+            registry_path = detector.get('registry')
+            if registry_path:
+                images = pdf_to_images(registry_path)
+                extraction.company = extractor.extract_registry(images)
+                logger.info(f'履歴事項: {extraction.company.name}')
+
+            # 損益計算書PDF → FinancialData
+            pl_path = detector.get_pl_latest()
+            if pl_path:
+                images = pdf_to_images(pl_path)
+                cost_report_path = detector.get('cost_report')
+                if cost_report_path:
+                    images += pdf_to_images(cost_report_path)
+                    logger.info(f'製造原価報告書も読取: {cost_report_path.name}')
+                extraction.financial = extractor.extract_pl(images)
+                logger.info(f'損益計算書: 売上{extraction.financial.revenue:,}')
+
+            # 納税証明書PDF
+            tax_path = detector.get('tax')
+            if tax_path:
+                images = pdf_to_images(tax_path)
+                extraction.tax = extractor.extract_tax(images)
+
+            # 見積書PDF (Excelは Phase 1 で処理済)
+            if estimate_pdf_path:
+                images = pdf_to_images(estimate_pdf_path)
                 extraction.estimate = extractor.extract_estimate(images)
 
-        # AI判断（ヒアリングデータも渡してIT投資状況等の矛盾を防ぐ）
-        extraction.ai_judgment = extractor.generate_ai_judgment(
-            extraction.company,
-            extraction.financial,
-            extraction.estimate.tool_name,
-            hearing_data=hearing_data,
-        )
+            # AI判断（ヒアリングデータも渡してIT投資状況等の矛盾を防ぐ）
+            extraction.ai_judgment = extractor.generate_ai_judgment(
+                extraction.company,
+                extraction.financial,
+                extraction.estimate.tool_name,
+                hearing_data=hearing_data,
+            )
+        except APICreditExhaustedError as e:
+            # API残高切れ → Phase 1 の結果（ヒアリング・賃金台帳Excel等）で申請書を出力
+            # 確認キューにAI由来項目が「未取得」として一覧される
+            api_skipped_reason = str(e)
+            logger.warning(
+                f'[Phase 2] API残高切れで以降の API 呼出をスキップ: {e}'
+            )
 
         # 賃金台帳 → 1人当たり給与支給総額の計画値 + 一覧Excel出力
-        # AI抽出経路を活かすため extractor を渡す。失敗時は決定論パーサーにフォールバック。
-        wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
-            detector, extraction.financial, extractor=extractor,
-        )
+        # 賃金台帳処理: AI 経路（PDF）が残高切れになっても Phase 1 結果は維持
+        try:
+            wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
+                detector, extraction.financial, extractor=extractor,
+            )
+        except APICreditExhaustedError as e:
+            api_skipped_reason = api_skipped_reason or str(e)
+            logger.warning(f'[Phase 2] 賃金台帳AI抽出で残高切れ: {e}')
+            # フォールバック: extractor=None で決定論パーサーのみで再試行
+            try:
+                wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
+                    detector, extraction.financial, extractor=None,
+                )
+            except Exception as e2:
+                logger.warning(f'決定論パーサーも失敗: {e2}')
+                wage_plan, ledger_employees, wage_status = None, [], 'error'
 
-        # テンプレート転記
+        # テンプレート転記（Phase 1 + Phase 2成功分のみ。残高切れ項目は confidence='low' で空欄）
         empty_cells = fill_template(
             template_path=template_path,
             output_path=output_path,
@@ -283,7 +309,7 @@ def run_application_transfer(
             wage_plan=wage_plan,
         )
 
-        status.status = '完了'
+        status.status = '完了' if not api_skipped_reason else '部分完了'
         status.output_files = [output_path.name]
         status.empty_cells = empty_cells
         # 後続タスク（給与計算/加点判定）で再利用するためAI抽出結果をstatusに保持
@@ -301,7 +327,18 @@ def run_application_transfer(
             wage_warning = ' ⚠ 賃金台帳処理中にエラーが発生しました'
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
         consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
-        status.message = f'完了。空欄{len(empty_cells)}件{wage_warning}{consistency_warning}'
+        # API残高切れで Phase 2 がスキップされた場合は冒頭にお知らせを追加
+        api_skip_msg = ''
+        if api_skipped_reason:
+            api_skip_msg = (
+                f'⛔ APIエラーでAI抽出部分がスキップされました ({api_skipped_reason})。'
+                f'ヒアリングシート・賃金台帳など API不要部分のみ転記しました。'
+                f'残高チャージ後に再実行すると AI 部分も埋まります。 '
+            )
+        status.message = (
+            api_skip_msg
+            + f'完了。空欄{len(empty_cells)}件{wage_warning}{consistency_warning}'
+        )
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件{wage_warning})')
 
         # 賃金台帳一覧Excel出力（チェック用）— AI抽出結果をそのまま再利用してAPI呼出しの2重化を防ぐ
@@ -312,19 +349,11 @@ def run_application_transfer(
             status.output_files.append(ledger_output.name)
 
     except Exception as e:
-        # API残高切れは即停止（後続のAPI呼出を試行しないことで無駄なログ汚染防止）
-        from .ai_extractor import APICreditExhaustedError
-        if isinstance(e, APICreditExhaustedError):
-            status.status = 'エラー'
-            status.message = (
-                f'⛔ {e}\n'
-                f'処理を中断しました。チャージ後にもう一度実行してください。'
-            )
-            logger.error(f'API残高切れ: 処理中断 ({e})')
-        else:
-            status.status = 'エラー'
-            status.message = str(e)
-            logger.error(f'エラー: {e}', exc_info=True)
+        # 通常の例外（ファイル不在等）: ステータスをエラーに
+        # API残高切れは Phase 2 内で個別ハンドル済みなのでここには到達しない
+        status.status = 'エラー'
+        status.message = str(e)
+        logger.error(f'エラー: {e}', exc_info=True)
 
     return status
 
