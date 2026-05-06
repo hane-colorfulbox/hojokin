@@ -111,6 +111,20 @@ def _get_drive_client():
 
     return None
 
+
+# ── Drive 取得用キャッシュ関数（モジュールレベル定義 = cache_key が引数で確定する） ──
+@st.cache_data(ttl=60)
+def _cached_list_drive_folders(folder_id: str) -> list[dict]:
+    c = _get_drive_client()
+    return c.list_folders(folder_id) if c else []
+
+
+@st.cache_data(ttl=30)
+def _cached_list_drive_files_recursive(folder_id: str) -> list[dict]:
+    c = _get_drive_client()
+    return c.list_files_recursive(folder_id) if c else []
+
+
 # ── 定数 ──
 TEMPLATE_OPTIONS = {
     '通常枠 2026（法人）': '通常枠_2026',
@@ -894,87 +908,86 @@ if data_source == 'Google Drive':
                     exc_info=True,
                 )
 
-        @st.cache_data(ttl=60)
-        def _list_customer_folders():
-            c = _get_drive_client()
-            return c.list_folders(parent_id) if c else []
+        # 顧客フォルダ一覧（モジュールレベルのキャッシュ関数を使用）
+        folders = _cached_list_drive_folders(parent_id)
+        # 表示はラベル、選択値は folder ID（同名フォルダ対策）。None は未選択 sentinel。
+        folder_id_to_name = {f['id']: f['name'] for f in folders}
+        folder_options: list = [None] + [f['id'] for f in folders]
 
-        folders = _list_customer_folders()
-        folder_names = ['（選択してください）'] + [f['name'] for f in folders]
-
-        selected_folder_name = st.selectbox(
+        selected_folder_id = st.selectbox(
             '顧客フォルダを選択',
-            folder_names,
+            folder_options,
+            format_func=lambda fid: '（選択してください）' if fid is None else folder_id_to_name.get(fid, fid),
             help='Driveの2026フォルダ直下の顧客フォルダ一覧です。',
         )
 
-        if selected_folder_name != '（選択してください）':
-            selected_folder = next(f for f in folders if f['name'] == selected_folder_name)
-            parent_folder_id = selected_folder['id']
+        drive_folder_id = None  # サブフォルダ未選択 / 顧客未選択 の場合は None で実行ガード
+
+        if selected_folder_id is not None:
+            selected_folder_name = folder_id_to_name[selected_folder_id]
+            parent_folder_id = selected_folder_id
 
             # サブフォルダ（案件単位）があるかチェック
-            # 例: 紹介会社/代理店の親フォルダ直下に複数の顧客企業案件フォルダが並ぶケースに対応
-            @st.cache_data(ttl=60)
-            def _list_subfolders(folder_id):
-                c = _get_drive_client()
-                return c.list_folders(folder_id) if c else []
-
-            sub_folders = _list_subfolders(parent_folder_id)
-            drive_folder_id = parent_folder_id  # デフォルトは親
+            # 例: 紹介会社/代理店の親フォルダ直下に複数の顧客企業案件フォルダが並ぶケース
+            sub_folders = _cached_list_drive_folders(parent_folder_id)
 
             if sub_folders:
-                sub_names = (
-                    [f'（{selected_folder_name} 直下のファイルのみ使用）']
-                    + [f['name'] for f in sub_folders]
-                )
-                selected_sub_name = st.selectbox(
+                # サブフォルダがある場合は **必ず案件を選ばせる**（直下のみ使用は再帰取得で
+                # 全案件混在になるため、選択肢として提供しない）
+                sub_id_to_name = {f['id']: f['name'] for f in sub_folders}
+                sub_options: list = [None] + [f['id'] for f in sub_folders]
+                selected_sub_id = st.selectbox(
                     '案件フォルダを選択',
-                    sub_names,
+                    sub_options,
+                    format_func=lambda fid: (
+                        '（案件を選択してください）' if fid is None
+                        else sub_id_to_name.get(fid, fid)
+                    ),
                     help=(
                         f'「{selected_folder_name}」の下に {len(sub_folders)}件の案件フォルダがあります。'
                         '対象の案件を選んでください。'
                     ),
                 )
-                if not selected_sub_name.startswith('（'):
-                    sub_folder = next(
-                        f for f in sub_folders if f['name'] == selected_sub_name
-                    )
-                    drive_folder_id = sub_folder['id']
-
-            # フォルダ内のファイル一覧（サブフォルダ含む）
-            @st.cache_data(ttl=30)
-            def _list_folder_files(folder_id):
-                c = _get_drive_client()
-                return c.list_files_recursive(folder_id) if c else []
-
-            all_files = _list_folder_files(drive_folder_id)
-
-            if all_files:
-                drive_files_to_download = all_files
-
-                drive_analysis = _analyze_files([f['name'] for f in all_files], task_type)
-                _render_file_check_result(drive_analysis, len(all_files))
-                # 容量・件数の事前警告（Drive ファイルのサイズは f['size'] が文字列の場合があるので int 変換）
-                size_pairs = []
-                for f in all_files:
-                    sz = f.get('size', 0)
-                    try:
-                        sz = int(sz) if sz else 0
-                    except (TypeError, ValueError):
-                        sz = 0
-                    size_pairs.append((f['name'], sz))
-                # 案件規模・処理時間・APIコスト予想（実行前にユーザーに把握してもらう）
-                _render_case_scale_estimate(size_pairs)
-                for w in _check_size_warnings(size_pairs):
-                    st.warning(w)
-
-                with st.expander('ファイル一覧（Drive上の場所）', expanded=False):
-                    for f in all_files:
-                        loc = f.get('folder_name', 'ルート')
-                        st.text(f'  [{loc}] {f["name"]}')
-
+                if selected_sub_id is not None:
+                    drive_folder_id = selected_sub_id
             else:
-                st.warning('このフォルダにはファイルがありません。')
+                # サブフォルダなし = フラットな顧客フォルダ → 親フォルダ直下のファイルを使用
+                drive_folder_id = parent_folder_id
+
+        # ファイル一覧取得（drive_folder_id が確定している時のみ）
+        all_files = (
+            _cached_list_drive_files_recursive(drive_folder_id)
+            if drive_folder_id else []
+        )
+
+        if all_files:
+            drive_files_to_download = all_files
+
+            drive_analysis = _analyze_files([f['name'] for f in all_files], task_type)
+            _render_file_check_result(drive_analysis, len(all_files))
+            # 容量・件数の事前警告（Drive ファイルのサイズは f['size'] が文字列の場合があるので int 変換）
+            size_pairs = []
+            for f in all_files:
+                sz = f.get('size', 0)
+                try:
+                    sz = int(sz) if sz else 0
+                except (TypeError, ValueError):
+                    sz = 0
+                size_pairs.append((f['name'], sz))
+            # 案件規模・処理時間・APIコスト予想（実行前にユーザーに把握してもらう）
+            _render_case_scale_estimate(size_pairs)
+            for w in _check_size_warnings(size_pairs):
+                st.warning(w)
+
+            with st.expander('ファイル一覧（Drive上の場所）', expanded=False):
+                for f in all_files:
+                    loc = f.get('folder_name', 'ルート')
+                    st.text(f'  [{loc}] {f["name"]}')
+
+        elif drive_folder_id:
+            # フォルダ選択済みだがファイル0件
+            st.warning('このフォルダにはファイルがありません。')
+        # drive_folder_id が None（顧客/案件未選択）の場合は何も表示しない
 
     uploaded_files = None
 
