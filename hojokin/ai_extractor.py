@@ -202,7 +202,9 @@ def _merge_wage_employees_by_month(
 
 # ── プロンプトテンプレート ──
 
-PROMPT_REGISTRY = """この履歴事項全部証明書の画像から、以下の情報をJSON形式で抽出してください。
+PROMPT_REGISTRY = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict で返すこと。**
+
+この履歴事項全部証明書の画像から、以下の情報をJSON形式で抽出してください。
 読み取れない項目はnullにしてください。
 
 重要ルール:
@@ -228,9 +230,12 @@ PROMPT_REGISTRY = """この履歴事項全部証明書の画像から、以下�
 }
 ```"""
 
-PROMPT_PL = """この損益計算書・販管費内訳書の画像から、以下をJSON形式で抽出してください。
+PROMPT_PL = """**出力は ```json コードブロック1個のみ。前置き・解説・複数年度の配列禁止。単一の dict で返すこと。**
+
+この損益計算書・販管費内訳書の画像から、以下をJSON形式で抽出してください。
 製造原価報告書の画像が含まれている場合は、そこからも減価償却費を読み取り、販管費の減価償却費と合算してください。
 該当項目がない場合はnullにしてください。金額は円単位の整数で。
+複数年度の決算書がある場合は **直近期1期分のみ** を dict で返してください（配列にしないこと）。
 
 個人事業主の「所得税の青色申告決算書」または「収支内訳書」の場合:
 - revenue = 売上（収入）金額
@@ -261,7 +266,9 @@ PROMPT_PL = """この損益計算書・販管費内訳書の画像から、以�
 }
 ```"""
 
-PROMPT_TAX = """この納税証明書の画像から、以下をJSON形式で抽出してください。
+PROMPT_TAX = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict で返すこと（配列禁止）。**
+
+この納税証明書の画像から、以下をJSON形式で抽出してください。
 
 ```json
 {
@@ -296,7 +303,9 @@ PROMPT_WAGES = """この給与支給控除一覧表の画像から、従業員�
 - 社員番号100xxx台 → 正社員、200xxx台 → パート・アルバイト
 - 所属欄に「正社員」「アルバイト」の記載があればそれを使う"""
 
-PROMPT_ESTIMATE = """この見積書の画像から、以下をJSON形式で抽出してください。
+PROMPT_ESTIMATE = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict で返すこと。**
+
+この見積書の画像から、以下をJSON形式で抽出してください。
 
 ```json
 {
@@ -354,7 +363,12 @@ PROMPT_AI_JUDGMENT = """以下の会社情報に基づいて、補助金申請�
 ```"""
 
 
-PROMPT_WAGE_LEDGER = """以下は賃金台帳のExcelをTSV形式に変換したテキストです。
+PROMPT_WAGE_LEDGER = """**最優先指示: 出力は ```json コードブロック1個のみ。**
+**前置き・解説・分析過程・後書き・思考の説明は厳禁。**
+**応答の最初の文字は ``` で始め、最後の文字は ``` で終わること。**
+（前置きで出力トークンを使い切ると応答が途中で打ち切られ、抽出失敗します）
+
+以下は賃金台帳のExcelをTSV形式に変換したテキストです。
 各従業員の月別給与データ・労働時間データを抽出し、JSON形式で返してください。
 
 【抽出ルール】
@@ -739,9 +753,31 @@ class ClaudeExtractor(BaseExtractor):
 
         return json.loads(text)
 
+    def _ensure_dict(self, data, caller: str) -> dict:
+        """dict 期待の API 応答が list で返ってきた時のフォールバック。
+
+        Sonnet が「複数年度の決算書を返したい」等の理由で JSON 配列を返すケースが
+        実本番で観測された。プロンプト指定は dict だが、Sonnet が独自解釈で list 化
+        することがあるため、安全側で list の最初の要素 (dict) を採用する。
+        どちらでもなければ空 dict を返して呼出側でデフォルト値で埋める。
+        """
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            logger.warning(
+                f'[{caller}] AI 応答が JSON 配列で返却されました '
+                f'(要素数={len(data)}) → 先頭要素を採用します'
+            )
+            return data[0]
+        logger.error(
+            f'[{caller}] AI 応答が dict でも有効な list でもありません: '
+            f'type={type(data).__name__}'
+        )
+        return {}
+
     def extract_registry(self, images: list[bytes]) -> CompanyInfo:
         text = self._call_api(images, PROMPT_REGISTRY)
-        data = self._parse_json(text)
+        data = self._ensure_dict(self._parse_json(text), 'extract_registry')
 
         # 役員リスト（同一人物の重複を排除）
         officers = []
@@ -781,7 +817,7 @@ class ClaudeExtractor(BaseExtractor):
 
     def extract_pl(self, images: list[bytes]) -> FinancialData:
         text = self._call_api(images, PROMPT_PL)
-        d = self._parse_json(text)
+        d = self._ensure_dict(self._parse_json(text), 'extract_pl')
 
         # 決算月を事業年度終了日から推定
         fiscal_month = ''
@@ -814,7 +850,7 @@ class ClaudeExtractor(BaseExtractor):
 
     def extract_tax(self, images: list[bytes]) -> TaxCertificate:
         text = self._call_api(images, PROMPT_TAX)
-        d = self._parse_json(text)
+        d = self._ensure_dict(self._parse_json(text), 'extract_tax')
         return TaxCertificate(
             tax_type=d.get('tax_type', ''),
             tax_amount=d.get('tax_amount', 0) or 0,
@@ -845,10 +881,10 @@ class ClaudeExtractor(BaseExtractor):
 
     def extract_estimate(self, images: list[bytes]) -> EstimateData:
         text = self._call_api(images, PROMPT_ESTIMATE)
-        d = self._parse_json(text)
+        d = self._ensure_dict(self._parse_json(text), 'extract_estimate')
 
         items = [{'name': i.get('name', ''), 'amount': i.get('amount', 0)}
-                 for i in d.get('items', [])]
+                 for i in d.get('items', []) if isinstance(i, dict)]
 
         return EstimateData(
             vendor_name=d.get('vendor_name', ''),
