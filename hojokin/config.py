@@ -27,6 +27,12 @@ USE_STRUCTURED_PL_EXTRACTION = os.getenv('USE_STRUCTURED_PL_EXTRACTION', 'true')
 # トークン使用量も削減。3ページ以下のPDFはスキップ（コスト最適化）。
 USE_PL_PAGE_INVENTORY = os.getenv('USE_PL_PAGE_INVENTORY', 'true').strip().lower() not in ('false', '0', 'off', 'no')
 
+# 賃金台帳PDF抽出で Anthropic Prompt Caching を使うか。デフォルト ON。
+# 賃金台帳プロンプトは長文かつ固定（指示部分のみで ~3KB/~1500トークン）。
+# 顧客間でプレフィックスマッチさせれば入力トークン費用 90%削減（5分TTL内）。
+# ロールバックが必要な場合は false に。設定変更不要で旧動作に戻る。
+USE_PROMPT_CACHING = os.getenv('USE_PROMPT_CACHING', 'true').strip().lower() not in ('false', '0', 'off', 'no')
+
 # ── 標準パス ──
 BASE_DIR = Path(os.getenv('HOJOKIN_BASE_DIR', '.'))
 

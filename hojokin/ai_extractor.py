@@ -605,6 +605,80 @@ PROMPT_AI_JUDGMENT = """以下の会社情報に基づいて、補助金申請�
 ```"""
 
 
+# ============================================================
+# Prompt Caching 用に PROMPT_WAGE_LEDGER を固定部 / 動的部 で分離
+# - STATIC: 顧客間で共通の指示・出力形式・重要な注意。cache_control 対象。
+# - TAIL: fiscal_period_section と tsv_data の挿入。顧客ごとに変動するため cache 対象外。
+# 順序を STATIC → TAIL にすることで「期間フィルタ → 賃金台帳データ」が末尾に並び、
+# 元の PROMPT_WAGE_LEDGER と意味的に等価（AIの判断に影響しない範囲の再配置）。
+# 既存の PROMPT_WAGE_LEDGER は USE_PROMPT_CACHING=false 時のフォールバックとして維持。
+# ============================================================
+PROMPT_WAGE_LEDGER_STATIC = """**最優先指示: 出力は ```json コードブロック1個のみ。**
+**前置き・解説・分析過程・後書き・思考の説明は厳禁。**
+**応答の最初の文字は ``` で始め、最後の文字は ``` で終わること。**
+（前置きで出力トークンを使い切ると応答が途中で打ち切られ、抽出失敗します）
+
+以下は賃金台帳のExcelをTSV形式に変換したテキストです。
+各従業員の月別給与データ・労働時間データを抽出し、JSON形式で返してください。
+
+【抽出ルール】
+1. 全シート・全テーブルを横断して、登場するすべての従業員を抽出してください。
+2. monthly_wages: 月別の課税支給合計（または支給合計、税込支給額、給与+賞与の合算）。
+   - **★ 配列の Index は必ず西暦/和暦カレンダーの月で固定**: Index 0=1月, Index 1=2月, ..., Index 11=12月
+   - **★ 台帳の列の物理的順序とは無関係**: 例えば「R6.12月, R7.1月, R7.2月, ..., R7.11月」の順で並んでいても、
+     R7.1月→Index 0, R7.2月→Index 1, ..., R7.11月→Index 10, **R6.12月→Index 11** に格納する
+   - **★ 24ヶ月以上ある台帳**: 同じ月（例: R6.5月とR7.5月）は重複しないため、対象期間（後述の【期間フィルタ】参照）の月だけ抽出する
+   - データがない月は null
+3. monthly_hours: 月別の **総労働時間 / 実労働時間 / 所定労働時間**。Index は monthly_wages と同じ規則（Index 0=1月固定）。
+   - **重要**: 「残業時間」「所定時間外」「時間外労働」は労働時間ではありません。混同しないでください。
+   - 賃金台帳に労働時間の欄が存在しない（労働日数のみ等）場合は **必ず null** にしてください。推測値は禁止。
+4. monthly_work_days: 月別の **労働日数 / 出勤日数 / 勤務日数**。Index は monthly_wages と同じ規則。
+   - 「有給休暇日数」は労働日数ではないので含めないこと。
+5. employment_type: 雇用形態（正社員・パート・アルバイト・役員等）。元の表記をそのまま入れてください。役員は「役員」を含む表記に。
+6. **【名前抽出の厳密ルール】**
+   - 賃金台帳の各行は通常、以下の列構成：フリガナ / 氏名 / 性別 / 生年月日 / 住所 / 給与・労働時間...
+   - 氏名は『氏名』『社員名』『名前』など明示的なラベルが付いた欄 **からのみ** 抽出。決して隣接する「住所」「市町村」欄から文字を引っ張らない
+   - 抽出後、名前に「市」「県」「区」「都」「道」「町」「村」など行政地名が含まれていないか確認。含まれていたら、その行の住所欄を参照して誤抽出部分を削除する
+   - 住所欄が参照できず確実に分離できない場合は、その従業員レコード全体を除外する（name=null）
+7. 給与と賞与が別行・別シートに分かれている場合は、同月分を**合算**してください。
+8. 月の判定は以下のいずれかを使用:
+   - 列ヘッダ「1月」「5月」等のプレーン表記
+   - 「R6.5月」「R7.4月」「令和6年5月」等の和暦付き表記（年は無視して月だけ使用）
+   - 「2024年5月」「2024/05」「202405」等の西暦表記
+   - 「対象年月」「給与年月」列の値
+
+【出力形式（厳密に従ってください）】
+```json
+[
+  {
+    "name": "従業員名",
+    "employment_type": "正社員",
+    "monthly_wages": [430000, 316000, null, null, null, null, null, null, null, null, null, null],
+    "monthly_hours": [160, 160, null, null, null, null, null, null, null, null, null, null],
+    "monthly_work_days": [20, 21, null, null, null, null, null, null, null, null, null, null]
+  }
+]
+```
+↑ 上の例では Index 0=1月(430000円), Index 1=2月(316000円), 残り全 null。
+   仮に「12月のみ給与あり」なら `[null,null,null,null,null,null,null,null,null,null,null,500000]` となる。
+
+【重要な注意】
+- monthly_wages / monthly_hours / monthly_work_days は **必ず12要素** の配列にしてください。データがない月は null。
+- 金額は **円単位の整数**。コンマや「円」記号は付けないでください。
+- 労働時間が記載されていない賃金台帳では monthly_hours は全て null で構いません（後段で労働日数×8hで補完します）。
+- 役員報酬は役員として抽出してください（employment_type に「役員」を含める）。
+- 名前のフリガナや空欄行は無視してください。
+- **登場するすべての従業員を漏れなく出力してください。N名いれば N要素のJSON配列にする。最初の数名で打ち切ったり、代表者だけ抽出することは禁止です。**
+- JSON以外のコメント・説明文は一切含めないでください（先頭・末尾とも純粋なJSON配列のみ）。
+"""
+
+PROMPT_WAGE_LEDGER_TAIL = """{fiscal_period_section}
+
+【賃金台帳データ】
+{tsv_data}
+"""
+
+
 PROMPT_WAGE_LEDGER = """**最優先指示: 出力は ```json コードブロック1個のみ。**
 **前置き・解説・分析過程・後書き・思考の説明は厳禁。**
 **応答の最初の文字は ``` で始め、最後の文字は ``` で終わること。**
@@ -1300,25 +1374,19 @@ class ClaudeExtractor(BaseExtractor):
             fiscal_section = PROMPT_WAGE_LEDGER_NO_FILTER
 
         tsv_for_prompt = tsv_data if tsv_data else '(Excel(TSV)データなし、添付PDFのみを参照してください)'
-        prompt = PROMPT_WAGE_LEDGER.format(
-            tsv_data=tsv_for_prompt,
-            fiscal_period_section=fiscal_section,
-        )
-        if pdf_files:
-            prompt = prompt + '\n\n' + PROMPT_WAGE_LEDGER_PDF_NOTE
 
         # 出力JSONは従業員数に比例して大きくなるため最大16Kトークン
         max_tokens = 16384
 
-        # メッセージ content を構築（PDFがあれば document ブロックを先に積む）
-        content: list = []
+        # PDF document ブロック（prompt caching 有無で配置位置が変わるため先に作っておく）
+        pdf_blocks: list = []
         pdf_total_bytes = 0
         if pdf_files:
             import base64
             for fname, pdf_bytes in pdf_files:
                 pdf_total_bytes += len(pdf_bytes)
                 b64 = base64.standard_b64encode(pdf_bytes).decode('ascii')
-                content.append({
+                pdf_blocks.append({
                     'type': 'document',
                     'source': {
                         'type': 'base64',
@@ -1327,12 +1395,43 @@ class ClaudeExtractor(BaseExtractor):
                     },
                     'title': fname,
                 })
-        content.append({'type': 'text', 'text': prompt})
+
+        # メッセージ content を構築。
+        # USE_PROMPT_CACHING=true: 固定指示(cache対象) → 動的指示 → PDF の順
+        # USE_PROMPT_CACHING=false: PDF → プロンプト全体（1テキスト）の旧構成
+        from .config import USE_PROMPT_CACHING
+        content: list = []
+        if USE_PROMPT_CACHING:
+            tail_text = PROMPT_WAGE_LEDGER_TAIL.format(
+                tsv_data=tsv_for_prompt,
+                fiscal_period_section=fiscal_section,
+            )
+            if pdf_blocks:
+                tail_text += '\n\n' + PROMPT_WAGE_LEDGER_PDF_NOTE
+            content.append({
+                'type': 'text',
+                'text': PROMPT_WAGE_LEDGER_STATIC,
+                'cache_control': {'type': 'ephemeral'},
+            })
+            content.append({'type': 'text', 'text': tail_text})
+            content.extend(pdf_blocks)
+            prompt_for_log = PROMPT_WAGE_LEDGER_STATIC + tail_text
+        else:
+            prompt = PROMPT_WAGE_LEDGER.format(
+                tsv_data=tsv_for_prompt,
+                fiscal_period_section=fiscal_section,
+            )
+            if pdf_blocks:
+                prompt = prompt + '\n\n' + PROMPT_WAGE_LEDGER_PDF_NOTE
+            content.extend(pdf_blocks)
+            content.append({'type': 'text', 'text': prompt})
+            prompt_for_log = prompt
 
         pdf_count = len(pdf_files) if pdf_files else 0
         stats = (
             f'pdfs={pdf_count}件 pdf合計={pdf_total_bytes/1_000_000:.2f}MB '
-            f'prompt={len(prompt)}chars max_tokens={max_tokens} retry={_retry_depth}'
+            f'prompt={len(prompt_for_log)}chars max_tokens={max_tokens} '
+            f'retry={_retry_depth} cache={"on" if USE_PROMPT_CACHING else "off"}'
         )
         logger.warning(f'[API送信] caller=extract_wage_ledger {stats}')
         response = self._messages_create_with_retry(
@@ -1344,11 +1443,14 @@ class ClaudeExtractor(BaseExtractor):
         )
         text = response.content[0].text
         output_tokens = response.usage.output_tokens
+        cache_create = getattr(response.usage, 'cache_creation_input_tokens', 0) or 0
+        cache_read = getattr(response.usage, 'cache_read_input_tokens', 0) or 0
         stop_reason = getattr(response, 'stop_reason', None)
         logger.warning(
             f'[API成功] caller=extract_wage_ledger '
             f'応答={len(text)}chars '
             f'tokens={response.usage.input_tokens}in+{output_tokens}out '
+            f'cache={cache_create}create/{cache_read}read '
             f'stop_reason={stop_reason}'
         )
 
