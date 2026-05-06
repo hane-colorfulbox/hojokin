@@ -180,10 +180,11 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
             return
         c = fi_conf.get(conf_key)
         if c and getattr(c, 'level', 'high') == 'low':
-            row, col = mapping.shinsei[field]
-            col_letter = chr(64 + col)
+            # mapping.shinsei は dict[str, int] (行番号のみ、C列固定)。
+            # mapping.kyuyo の dict[str, tuple] と混同しないこと。
+            row = mapping.shinsei[field]
             writes.append(
-                f'⚠ 申請内容 行{row:3d} {col_letter}列 [{label}]: 低信頼のため空欄 '
+                f'⚠ 申請内容 行{row:3d} C列 [{label}]: 低信頼のため空欄 '
                 f'(理由: {getattr(c, "reason", "")})'
             )
             return
@@ -201,10 +202,10 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
         for k in ('salary', 'misc_wages', 'bonus', 'travel_expense')
     )
     if personnel_low and 'fin_personnel' in mapping.shinsei:
-        row, col = mapping.shinsei['fin_personnel']
-        col_letter = chr(64 + col)
+        # mapping.shinsei は int（行番号のみ）、C列固定
+        row = mapping.shinsei['fin_personnel']
         writes.append(
-            f'⚠ 申請内容 行{row:3d} {col_letter}列 [人件費]: 低信頼項目を含むため空欄'
+            f'⚠ 申請内容 行{row:3d} C列 [人件費]: 低信頼項目を含むため空欄'
         )
     else:
         write('fin_personnel', personnel, '人件費')
