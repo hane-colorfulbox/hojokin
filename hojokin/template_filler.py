@@ -347,6 +347,13 @@ def check_empty_cells(wb: openpyxl.Workbook) -> list[str]:
         if is_empty_officer_slot(label_str, row_num):
             continue
 
+        # 数値だけのラベル（テンプレート上で「数値=ラベル」になってしまっているセル）はスキップ
+        # 例: 行149 のラベルが「67146344」（粗利の数値そのまま）になっているケース
+        # これは check 対象としては誤検出（実際は計算式参照セルで、表示用の数値）
+        ascii_only = label_str.replace(',', '').replace('-', '').replace('.', '').replace(' ', '').replace('　', '')
+        if ascii_only.isdigit():
+            continue
+
         empty.append(f'行{row_num:3d} [{label_str[:60]}]')
 
     return empty
