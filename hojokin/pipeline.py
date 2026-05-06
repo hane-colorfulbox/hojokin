@@ -450,12 +450,15 @@ def run_wage_calculation(
                 employees_detail = _build_employees_detail_from_ledger(
                     ledger_emps, fiscal_period_hint=_fiscal_hint_for_detail,
                 )
+                # 「契約社員」は正規雇用相当として seishain_count にカウント
+                # （wage_calculator.is_full_time_employment と整合）
+                from .wage_calculator import is_full_time_employment
                 seishain_count = sum(
-                    1 for e in employees_detail if e['type'] == '正社員'
+                    1 for e in employees_detail if is_full_time_employment(e['type'])
                 )
                 part_count = sum(
                     1 for e in employees_detail
-                    if e['type'] in ('パート・アルバイト', '契約社員')
+                    if e['type'] in ('パート・アルバイト',)
                 )
                 logger.info(
                     f'賃金台帳フォールバック: 正社員{seishain_count}, '

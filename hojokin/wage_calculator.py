@@ -68,15 +68,24 @@ class PerCapitaWageResult:
         }
 
 
-def _calc_fte(emp: PayrollEmployee, annual_hours: float) -> float:
-    """パート・アルバイトを正社員換算。
+def is_full_time_employment(employment_type: str | None) -> bool:
+    """雇用区分が「正規雇用相当（フルタイム）」か判定する共通 predicate。
 
-    employment_type の判定は contains マッチ。'正社員', '正社員(推定)',
-    '契約社員', '契約社員(臨時)' 等の provenance 付き表記を 1.0 として扱う。
-    'パート', 'アルバイト', '日雇い' 等は労働時間ベースで換算。
+    `_calc_fte` / 給与計算の人数集計 / 詳細表示の3箇所で同じ判定を使うことで、
+    「契約社員」が場所によって正規雇用扱いになったりパート扱いになったりする
+    不整合を避ける（Codex Round 4 指摘）。
+
+    判定: '正社員' か '契約社員' を文字列に含む（provenance/修飾付きも許容）。
+    例: '正社員', '正社員(推定)', '契約社員', '契約社員(臨時)' → True
+        'パート', 'アルバイト', '日雇い', '役員' → False
     """
-    et = emp.employment_type or ''
-    if '正社員' in et or '契約社員' in et:
+    et = employment_type or ''
+    return '正社員' in et or '契約社員' in et
+
+
+def _calc_fte(emp: PayrollEmployee, annual_hours: float) -> float:
+    """パート・アルバイトを正社員換算。フルタイム雇用は FTE 1.0。"""
+    if is_full_time_employment(emp.employment_type):
         return 1.0
     if not emp.monthly_hours:
         return 1.0
@@ -179,7 +188,7 @@ def create_wage_calculation(
     fte_part = 0
     if employees_detail:
         for e in employees_detail:
-            if '正社員' not in (e.get('type') or '') and e.get('monthly_hours', 0) > 0:
+            if not is_full_time_employment(e.get('type')) and e.get('monthly_hours', 0) > 0:
                 fte_part += e['monthly_hours'] / standard_monthly
     fte_adjusted = seishain_count + fte_part
 
@@ -344,7 +353,7 @@ def create_wage_calculation(
         for e in employees_detail:
             r += 1
             avg3 = (e.get('m1', 0) + e.get('m2', 0) + e.get('m3', 0)) / 3
-            is_seishain = '正社員' in (e.get('type') or '')
+            is_seishain = is_full_time_employment(e.get('type'))
             fte = 1.0 if is_seishain else e.get('monthly_hours', 0) / standard_monthly
 
             vals = [e['no'], e['name'], e['type'],
