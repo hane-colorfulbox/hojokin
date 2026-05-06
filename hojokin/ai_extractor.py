@@ -121,6 +121,68 @@ def _split_pdfs_in_half(
     return part1, part2
 
 
+def _is_pl_extraction_suspicious(d: dict) -> tuple[bool, str]:
+    """PL抽出結果が「製造原価/完成工事原価の見落とし疑い」かを複合条件で検知。
+
+    Codex指摘: 単一閾値は会社規模差で誤判定する。
+    複数条件の OR で「明らかに小さすぎる」ケースを拾う。
+
+    Returns: (suspicious, reason)
+    """
+    if not isinstance(d, dict):
+        return False, ''
+    salary = d.get('salary') or 0
+    misc = d.get('misc_wages') or 0
+    bonus = d.get('bonus') or 0
+    revenue = d.get('revenue') or 0
+    operating = d.get('operating_profit') or 0
+    gross = d.get('gross_profit') or 0
+    cost_of_sales = d.get('cost_of_sales') or 0
+
+    total_personnel = salary + misc + bonus
+
+    # 条件1: 売上があるのに人件費合計が0
+    if total_personnel == 0 and revenue > 0:
+        return True, '人件費合計0で売上あり'
+
+    # 条件2: 給料手当が極端に小さく売上が大きい中小企業（建設業/製造業の典型）
+    if salary < 1_000_000 and revenue > 10_000_000:
+        return True, f'給料手当{salary:,}で売上{revenue:,}（製造原価/工事原価の見落とし疑い）'
+
+    # 条件3: 給料/売上比率が異常に低い + 営業利益プラス
+    if revenue > 0 and (salary / revenue) < 0.01 and operating > 0:
+        ratio = salary / revenue * 100
+        return True, f'給料/売上比率{ratio:.2f}%で営業利益プラス'
+
+    # 条件4: 売上原価が大きいのに人件費合計が小さい（労務費が原価に流れている疑い）
+    if cost_of_sales > 5_000_000 and total_personnel > 0 and total_personnel < cost_of_sales * 0.05:
+        return True, (
+            f'売上原価{cost_of_sales:,}に対して人件費{total_personnel:,}が極端に小さい'
+            f'（原価部に労務費がある可能性）'
+        )
+
+    # 条件5: 売上総利益が大きいのに人件費が3M未満で営業利益プラス
+    if total_personnel < 3_000_000 and operating > 0 and gross > 10_000_000:
+        return True, f'売上総利益{gross:,}・営業利益プラスなのに人件費{total_personnel:,}'
+
+    return False, ''
+
+
+def _merge_pl_with_cost_report(pl: dict, cost: dict) -> dict:
+    """販管費抽出結果と原価フォーカス抽出結果をマージする（人件費系のみ加算）"""
+    if not isinstance(pl, dict):
+        pl = {}
+    if not isinstance(cost, dict):
+        return pl
+    merged = dict(pl)
+    for key in ('salary', 'misc_wages', 'bonus', 'legal_welfare', 'welfare', 'depreciation'):
+        pl_val = pl.get(key) or 0
+        cost_val = cost.get(key) or 0
+        if cost_val > 0:
+            merged[key] = pl_val + cost_val
+    return merged
+
+
 def _merge_wage_employees_by_month(
     chunks: list[list[dict]],
 ) -> list[dict]:
@@ -232,10 +294,30 @@ PROMPT_REGISTRY = """**出力は ```json コードブロック1個のみ。前�
 
 PROMPT_PL = """**出力は ```json コードブロック1個のみ。前置き・解説・複数年度の配列禁止。単一の dict で返すこと。**
 
-この損益計算書・販管費内訳書の画像から、以下をJSON形式で抽出してください。
-製造原価報告書の画像が含まれている場合は、そこからも減価償却費を読み取り、販管費の減価償却費と合算してください。
+この決算書類（損益計算書・販管費内訳書・製造原価報告書・完成工事原価報告書・工事原価報告書・売上原価内訳書 など全体）から、以下をJSON形式で抽出してください。
 該当項目がない場合はnullにしてください。金額は円単位の整数で。
 複数年度の決算書がある場合は **直近期1期分のみ** を dict で返してください（配列にしないこと）。
+
+【必須・契約: 原価部の人件費は販管費と必ず合算する】
+PDF/画像の中に以下のいずれかが含まれる場合、**販管費部分の同種項目と必ず合算した値** を返してください:
+  - 製造原価報告書 / 製造原価明細書
+  - 完成工事原価報告書 / 工事原価報告書（建設業）
+  - 売上原価内訳書 / 売上原価報告書
+  - 役務原価報告書（サービス業）
+
+合算ルール（**販管費の値 + 原価部の値**）:
+  - salary  ← 販管費「給料手当」 + 原価部「賃金」「給料」「労務費」
+  - misc_wages ← 販管費「雑給」 + 原価部「雑給」
+  - bonus ← 販管費「賞与」 + 原価部「賞与」
+  - legal_welfare ← 販管費「法定福利費」 + 原価部「法定福利費」
+  - welfare ← 販管費「福利厚生費」 + 原価部「福利厚生費」
+  - depreciation ← 販管費「減価償却費」 + 原価部「減価償却費」
+
+例（建設業、製造原価報告書がある決算書）:
+  販管費 給料手当 200,000 + 完成工事原価 賃金 13,900,000 → salary: 14,100,000
+  販管費 法定福利費 100,000 + 工事原価 法定福利費 2,500,000 → legal_welfare: 2,600,000
+
+**販管費の値だけで返すのは抽出ミスです。原価部があれば必ず加算してください。**
 
 個人事業主の「所得税の青色申告決算書」または「収支内訳書」の場合:
 - revenue = 売上（収入）金額
@@ -265,6 +347,34 @@ PROMPT_PL = """**出力は ```json コードブロック1個のみ。前置き�
   "travel_expense": 旅費交通費
 }
 ```"""
+
+PROMPT_PL_COST_REPORT_FOCUS = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict で返すこと。**
+
+この決算書類のうち、**製造原価報告書 / 完成工事原価報告書 / 工事原価報告書 / 売上原価内訳書 / 役務原価報告書** に
+記載されている人件費・減価償却費 **のみ** を抽出してください。販管費部分は無視してください。
+
+各項目は **原価部の値のみ** を返してください（販管費との合算は呼出側で行います）:
+  - salary: 原価部の「給料手当」「賃金」「労務費」「給料」の合計
+  - misc_wages: 原価部の「雑給」
+  - bonus: 原価部の「賞与」
+  - legal_welfare: 原価部の「法定福利費」
+  - welfare: 原価部の「福利厚生費」
+  - depreciation: 原価部の「減価償却費」
+
+該当項目がなければ 0 を返してください（null ではなく 0）。
+原価報告書が含まれていない（販管費のみの決算書）場合は、すべて 0 を返してください。
+
+```json
+{
+  "salary": 0,
+  "misc_wages": 0,
+  "bonus": 0,
+  "legal_welfare": 0,
+  "welfare": 0,
+  "depreciation": 0
+}
+```"""
+
 
 PROMPT_TAX = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict で返すこと（配列禁止）。**
 
@@ -819,6 +929,20 @@ class ClaudeExtractor(BaseExtractor):
         text = self._call_api(images, PROMPT_PL)
         d = self._ensure_dict(self._parse_json(text), 'extract_pl')
 
+        # 異常検知: 製造原価/完成工事原価の見落とし疑いがあれば、原価フォーカスで再抽出して合算
+        # （建設業・製造業の決算書で、販管費しか抽出しない事象が本番で多発したため）
+        suspicious, reason = _is_pl_extraction_suspicious(d)
+        if suspicious and images:
+            logger.warning(
+                f'[extract_pl] PL抽出に異常検知: {reason} → 原価報告書フォーカスで再抽出'
+            )
+            cost_data = self._extract_pl_cost_report_only(images)
+            d = _merge_pl_with_cost_report(d, cost_data)
+            logger.warning(
+                f'[extract_pl] 原価合算後: salary={d.get("salary", 0):,} '
+                f'misc_wages={d.get("misc_wages", 0):,} bonus={d.get("bonus", 0):,}'
+            )
+
         # 決算月を事業年度終了日から推定
         fiscal_month = ''
         if d.get('fiscal_year_end'):
@@ -1116,6 +1240,26 @@ class ClaudeExtractor(BaseExtractor):
             )
 
         return data
+
+    def _extract_pl_cost_report_only(self, images: list[bytes]) -> dict:
+        """原価報告書（製造原価/完成工事原価/工事原価/売上原価/役務原価）のみフォーカスで再抽出。
+
+        販管費は無視し、原価部の人件費・減価償却費だけ取る。
+        異常検知 (_is_pl_extraction_suspicious) で True になった時だけ呼ばれるため、
+        全案件のコストを増やさず、必要な案件だけ +1回 API。
+        """
+        try:
+            text = self._call_api(images, PROMPT_PL_COST_REPORT_FOCUS)
+            d = self._ensure_dict(self._parse_json(text), 'extract_pl_cost_report')
+            logger.warning(
+                f'[extract_pl_cost_report] 原価部抽出: '
+                f'salary={d.get("salary", 0):,} misc_wages={d.get("misc_wages", 0):,} '
+                f'bonus={d.get("bonus", 0):,} depreciation={d.get("depreciation", 0):,}'
+            )
+            return d
+        except Exception as e:
+            logger.warning(f'[extract_pl_cost_report] 失敗: {e} → 原価部=0で進める')
+            return {}
 
     def _extract_with_pre_split(
         self,
