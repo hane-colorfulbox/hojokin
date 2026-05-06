@@ -539,8 +539,9 @@ with st.sidebar:
     st.divider()
 
     st.markdown('**処理の目安**')
-    st.caption('所要時間: 約1〜3分')
-    st.caption('API利用料: 約7〜15円/社')
+    st.caption('所要時間: 約1〜10分（案件規模により変動）')
+    st.caption('API利用料: 約10〜100円/社（案件規模により変動）')
+    st.caption('実行前に「案件規模の予想」で詳細目安が表示されます')
 
 # ── ファイル判別ヘルパー（ローカル/Drive 共通） ──
 _FILE_CATEGORIES = [
@@ -771,7 +772,7 @@ def _estimate_case_scale(file_size_pairs: list[tuple[str, int]]) -> dict | None:
     if pre_split:
         notes.append('賃金台帳PDFが大きいため、自動で分割処理します（処理時間+1〜2分）')
     if scale in ('大型', '超大型'):
-        notes.append('Excel/CSV形式の賃金台帳があれば数十秒で完了します（坂平さんから取引先様にご相談を）')
+        notes.append('Excel/CSV形式の賃金台帳があれば数十秒で完了します')
     if scale == '超大型':
         notes.append('処理時間が長くなる可能性があるため、画面を閉じずにお待ちください')
 
@@ -909,7 +910,36 @@ if data_source == 'Google Drive':
 
         if selected_folder_name != '（選択してください）':
             selected_folder = next(f for f in folders if f['name'] == selected_folder_name)
-            drive_folder_id = selected_folder['id']
+            parent_folder_id = selected_folder['id']
+
+            # サブフォルダ（案件単位）があるかチェック
+            # 例: 紹介会社/代理店の親フォルダ直下に複数の顧客企業案件フォルダが並ぶケースに対応
+            @st.cache_data(ttl=60)
+            def _list_subfolders(folder_id):
+                c = _get_drive_client()
+                return c.list_folders(folder_id) if c else []
+
+            sub_folders = _list_subfolders(parent_folder_id)
+            drive_folder_id = parent_folder_id  # デフォルトは親
+
+            if sub_folders:
+                sub_names = (
+                    [f'（{selected_folder_name} 直下のファイルのみ使用）']
+                    + [f['name'] for f in sub_folders]
+                )
+                selected_sub_name = st.selectbox(
+                    '案件フォルダを選択',
+                    sub_names,
+                    help=(
+                        f'「{selected_folder_name}」の下に {len(sub_folders)}件の案件フォルダがあります。'
+                        '対象の案件を選んでください。'
+                    ),
+                )
+                if not selected_sub_name.startswith('（'):
+                    sub_folder = next(
+                        f for f in sub_folders if f['name'] == selected_sub_name
+                    )
+                    drive_folder_id = sub_folder['id']
 
             # フォルダ内のファイル一覧（サブフォルダ含む）
             @st.cache_data(ttl=30)
