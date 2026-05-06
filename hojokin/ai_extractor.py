@@ -36,6 +36,14 @@ RETRYABLE_STATUS_CODES = {422, 429, 500, 502, 503, 504, 529}
 # 残高切れ判定用の文字列（400 invalid_request_error の message に含まれる）
 CREDIT_BALANCE_MARKER = 'credit balance is too low'
 
+# 賃金台帳PDFの事前分割閾値（ページ数 / バイト数）
+# どちらかを超えたら 1 PDF を半分に分割して送信する。
+# 経験則:
+#   - 15ページを超えると Sonnet が出力打ち切り (max_tokens) する確率が上がる
+#   - 4MB を超えると API timeout (300〜480秒) に近づく
+WAGE_LEDGER_SPLIT_PAGE_THRESHOLD = 15
+WAGE_LEDGER_SPLIT_BYTES_THRESHOLD = 4 * 1024 * 1024
+
 # 進捗コールバックの型: (attempt, max_attempts, wait_seconds, error_summary) -> None
 RetryCallback = Callable[[int, int, float, str], None]
 
@@ -43,6 +51,153 @@ RetryCallback = Callable[[int, int, float, str], None]
 class APICreditExhaustedError(RuntimeError):
     """API残高切れ（400 credit_balance_too_low）を表す専用例外"""
     pass
+
+
+# ============================================================
+# 賃金台帳PDF分割・マージ ヘルパ
+# ============================================================
+
+def _pdf_should_be_split(pdf_bytes: bytes) -> bool:
+    """PDF が事前分割の閾値を超えているか判定。
+
+    - WAGE_LEDGER_SPLIT_BYTES_THRESHOLD バイト超 → True
+    - WAGE_LEDGER_SPLIT_PAGE_THRESHOLD ページ超 → True
+    PyMuPDF を使う。失敗時はサイズだけで判定。
+    """
+    if len(pdf_bytes) > WAGE_LEDGER_SPLIT_BYTES_THRESHOLD:
+        return True
+    try:
+        import fitz  # type: ignore
+        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        n_pages = len(doc)
+        doc.close()
+        return n_pages > WAGE_LEDGER_SPLIT_PAGE_THRESHOLD
+    except Exception as e:
+        logger.warning(f'PDF ページ数判定失敗: {e}')
+        return False
+
+
+def _split_pdfs_in_half(
+    pdf_files: list[tuple[str, bytes]],
+) -> tuple[list[tuple[str, bytes]], list[tuple[str, bytes]]]:
+    """PDFリストを前半・後半に分割。
+
+    - 各 PDF を PyMuPDF で前半・後半に分割
+    - 2 ページ以下の PDF は分割せず part1 にだけ含める（情報量保持）
+    - 分割失敗した PDF は元のまま part1 に入れる
+    Returns: (part1_files, part2_files)
+    """
+    import fitz  # type: ignore
+
+    part1: list[tuple[str, bytes]] = []
+    part2: list[tuple[str, bytes]] = []
+    for fname, pdf_bytes in pdf_files:
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+            n_pages = len(doc)
+            if n_pages <= 2:
+                part1.append((fname, pdf_bytes))
+                doc.close()
+                continue
+            half = n_pages // 2
+            doc1 = fitz.open()
+            doc1.insert_pdf(doc, from_page=0, to_page=half - 1)
+            buf1 = doc1.tobytes()
+            doc1.close()
+            doc2 = fitz.open()
+            doc2.insert_pdf(doc, from_page=half, to_page=n_pages - 1)
+            buf2 = doc2.tobytes()
+            doc2.close()
+            doc.close()
+            part1.append((f'{fname}#part1of2', buf1))
+            part2.append((f'{fname}#part2of2', buf2))
+            logger.info(
+                f'PDF分割: {fname} ({n_pages}P, {len(pdf_bytes)/1_000_000:.2f}MB) → '
+                f'{half}P + {n_pages-half}P'
+            )
+        except Exception as e:
+            logger.warning(f'PDF分割失敗 ({fname}): {e} → 元のまま part1 に入れる')
+            part1.append((fname, pdf_bytes))
+    return part1, part2
+
+
+def _merge_wage_employees_by_month(
+    chunks: list[list[dict]],
+) -> list[dict]:
+    """複数チャンクの従業員データを NFKC 正規化キーで統合し、**月単位で補完マージ**する。
+
+    Codex 指摘 (2026-05): 同名見つけたら捨てる方式だと、同一人物の月データが
+    別チャンクに分かれた場合に欠落する（例: 山田太郎が前半PDFに 1-6月、後半PDFに 7-12月のデータ）。
+
+    同月衝突ポリシー:
+        - 片方null → もう片方を採用（補完）
+        - 両方値あり・差小 → そのまま
+        - 両方値あり・差大 → max を採用（部分入力・欠損で値が小さくなるミスを救う）
+    """
+    import re as _re
+    import unicodedata as _ud
+
+    def _key(name: str) -> str:
+        return _re.sub(r'[\s　]+', '', _ud.normalize('NFKC', str(name)))
+
+    def _merge_arr(a: list, b: list, threshold: float = 1.0) -> list:
+        """12要素配列を月単位補完マージ"""
+        a = a or [None] * 12
+        b = b or [None] * 12
+        merged = []
+        for i in range(12):
+            va = a[i] if i < len(a) else None
+            vb = b[i] if i < len(b) else None
+            if va is None:
+                merged.append(vb)
+            elif vb is None:
+                merged.append(va)
+            else:
+                try:
+                    fa, fb = float(va), float(vb)
+                    if abs(fa - fb) < threshold:
+                        merged.append(va)
+                    else:
+                        merged.append(max(fa, fb))
+                except (TypeError, ValueError):
+                    merged.append(va)
+        return merged
+
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    for chunk in chunks:
+        for emp in chunk or []:
+            name = emp.get('name', '')
+            if not name:
+                continue
+            key = _key(name)
+            if not key:
+                continue
+            if key not in merged:
+                # 新規 — 配列フィールドはコピーで持つ（in-place変更を防ぐ）
+                merged[key] = {
+                    'name': emp.get('name', ''),
+                    'employment_type': emp.get('employment_type', ''),
+                    'monthly_wages': list(emp.get('monthly_wages') or [None] * 12),
+                    'monthly_hours': list(emp.get('monthly_hours') or [None] * 12),
+                    'monthly_work_days': list(emp.get('monthly_work_days') or [None] * 12),
+                }
+                order.append(key)
+                continue
+            ex = merged[key]
+            ex['monthly_wages'] = _merge_arr(
+                ex.get('monthly_wages'), emp.get('monthly_wages'), threshold=1.0,
+            )
+            ex['monthly_hours'] = _merge_arr(
+                ex.get('monthly_hours'), emp.get('monthly_hours'), threshold=0.1,
+            )
+            ex['monthly_work_days'] = _merge_arr(
+                ex.get('monthly_work_days'), emp.get('monthly_work_days'), threshold=0.5,
+            )
+            # employment_type は空でない方を優先
+            if not ex.get('employment_type') and emp.get('employment_type'):
+                ex['employment_type'] = emp['employment_type']
+    return [merged[k] for k in order]
 
 
 # ── プロンプトテンプレート ──
@@ -416,7 +571,7 @@ class ClaudeExtractor(BaseExtractor):
         api_key: str,
         model: str = 'claude-sonnet-4-6',
         retry_callback: Optional[RetryCallback] = None,
-        timeout: float = 300.0,
+        timeout: float = 480.0,
     ):
         try:
             import anthropic
@@ -424,8 +579,8 @@ class ClaudeExtractor(BaseExtractor):
             raise ImportError('anthropic パッケージが必要です: pip install anthropic')
 
         # PDF含む長時間レスポンスでクライアント側がぶら下がるのを防ぐ。
-        # 300秒応答なしで例外 → _messages_create_with_retry が指数バックオフで再試行。
-        # （6MB級のPDF×2件ぐらいまでは1発で完走する想定）
+        # 480秒応答なしで例外 → _messages_create_with_retry が指数バックオフで再試行。
+        # （事前分割で 15P/4MB 超は分割送信するため、1チャンクあたりは確実にこの範囲内に収まる）
         self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
         self.model = model
         self.retry_callback = retry_callback
@@ -435,7 +590,7 @@ class ClaudeExtractor(BaseExtractor):
         """messages.create をバックオフ付きで呼び出す。
 
         - 422/429/5xx/529/connection エラーは最大1回まで再試行
-        - **timeout（300秒経過）は即失敗**（再試行しても同条件で再度 timeout するだけのため）
+        - **timeout（480秒経過）は即失敗**（再試行しても同条件で再度 timeout するだけのため）
         - 400 credit_balance_too_low は APICreditExhaustedError に変換して即失敗
         - その他の 400/401/403/404/413 は即失敗
         - 再試行時は retry_callback(attempt, max_attempts, wait, err_summary) を呼ぶ
@@ -800,8 +955,39 @@ class ClaudeExtractor(BaseExtractor):
         """賃金台帳のTSV/PDFから従業員データを抽出。
 
         Args:
-            _retry_depth: 内部用。0=初回、1=分割再抽出中（再々分割しないためのカウンタ）
+            _retry_depth: 内部用。0=初回、1=分割中（再々分割しないためのカウンタ）
+
+        事前分割（API呼出 +1回）:
+            初回のみ、PDF が WAGE_LEDGER_SPLIT_PAGE_THRESHOLD ページ超または
+            WAGE_LEDGER_SPLIT_BYTES_THRESHOLD バイト超なら、最初から半分に分割して送信。
+            timeout (480秒) 前に確実に処理できる規模に抑える。
+
+        事後分割（API呼出 +1回）:
+            事前分割しなかった場合、stop_reason=='max_tokens' を検出した時に
+            分割再抽出する。誤発動防止のため発動条件は max_tokens のみ。
+
+        API呼出上限:
+            事前分割した場合は事後分割を発動しない（既に分割済みのため）→ 最大 2回
+            事前分割しなかった場合は事後分割を最大 1回発動 → 最大 2回
+            → 1案件あたり API呼出は最大 2回に制限される（コスト爆増防止）
         """
+        # ── 事前分割判定（初回のみ） ──
+        if _retry_depth == 0 and pdf_files:
+            should_pre_split = any(
+                _pdf_should_be_split(pdf_bytes)
+                for _, pdf_bytes in pdf_files
+            )
+            if should_pre_split:
+                logger.warning(
+                    f'[extract_wage_ledger] 事前分割発動: '
+                    f'PDF {len(pdf_files)}件中に閾値超 '
+                    f'(>{WAGE_LEDGER_SPLIT_PAGE_THRESHOLD}P or '
+                    f'>{WAGE_LEDGER_SPLIT_BYTES_THRESHOLD/1_000_000:.0f}MB) があります'
+                )
+                return self._extract_with_pre_split(
+                    tsv_data, fiscal_period_hint, pdf_files,
+                )
+
         if fiscal_period_hint:
             fiscal_section = PROMPT_WAGE_LEDGER_FISCAL_FILTER.format(
                 fiscal_period=fiscal_period_hint
@@ -895,6 +1081,45 @@ class ClaudeExtractor(BaseExtractor):
 
         return data
 
+    def _extract_with_pre_split(
+        self,
+        tsv_data: str,
+        fiscal_period_hint: str | None,
+        pdf_files: list[tuple[str, bytes]],
+    ) -> list[dict]:
+        """大型PDFを最初から半分に分割して送信し、月単位補完マージで統合。
+
+        各チャンクは _retry_depth=1 で呼ばれるため、事後分割は発動しない。
+        → 1案件あたり API 呼出は **最大 2回** （前半 + 後半）に制限される。
+        """
+        split_part1, split_part2 = _split_pdfs_in_half(pdf_files)
+
+        chunks: list[list[dict]] = []
+        for label, part_pdfs, with_tsv in [
+            ('part1', split_part1, True),   # TSV は最初の chunk のみ送信
+            ('part2', split_part2, False),
+        ]:
+            if not part_pdfs:
+                continue
+            try:
+                partial = self.extract_wage_ledger(
+                    tsv_data=tsv_data if with_tsv else '',
+                    fiscal_period_hint=fiscal_period_hint,
+                    pdf_files=part_pdfs,
+                    _retry_depth=1,  # 事後分割を禁止（無限再帰防止 + コスト上限）
+                )
+                logger.info(f'事前分割 {label}: {len(partial)}名')
+                chunks.append(partial)
+            except Exception as e:
+                logger.warning(f'事前分割 {label} 失敗（{type(e).__name__}: {e}）→ skip')
+
+        merged = _merge_wage_employees_by_month(chunks)
+        logger.warning(
+            f'[extract_wage_ledger] 事前分割マージ完了: '
+            f'チャンク{len(chunks)}個 → 統合後{len(merged)}名'
+        )
+        return merged
+
     def _retry_extract_with_split_pdf(
         self,
         tsv_data: str,
@@ -902,46 +1127,17 @@ class ClaudeExtractor(BaseExtractor):
         pdf_files: list[tuple[str, bytes]],
         partial_data: list[dict],
     ) -> list[dict]:
-        """賃金台帳PDFを2分割して再抽出し、partial_data とマージする。
+        """事後分割: max_tokens 打ち切り検出時のみ呼ばれる。
 
-        - PDF を PyMuPDF で前半・後半に分割
-        - 各分割を _retry_depth=1 で再 API 呼出（再々分割は禁止 = 最大 +2回API呼出）
-        - 同名人物は NFKC 正規化キーで重複排除し、partial_data 側を優先採用
-          （初回呼出は完全データ、分割側はサブセット）
+        - PDF を PyMuPDF で前半・後半に分割（事前分割と同じヘルパ使用）
+        - 各分割を _retry_depth=1 で再 API 呼出
+        - partial_data + retry_results を月単位補完マージで統合
+          （同一人物の月データが別チャンクに分かれた場合の欠落を防ぐ）
         - 失敗時は partial_data をそのまま返す
         """
-        import fitz  # type: ignore
+        split_part1, split_part2 = _split_pdfs_in_half(pdf_files)
 
-        split_part1: list[tuple[str, bytes]] = []
-        split_part2: list[tuple[str, bytes]] = []
-        for fname, pdf_bytes in pdf_files:
-            try:
-                doc = fitz.open(stream=pdf_bytes, filetype='pdf')
-                n_pages = len(doc)
-                if n_pages <= 2:
-                    # 2ページ以下は分割不能 → 元のまま part1 に入れる
-                    split_part1.append((fname, pdf_bytes))
-                    doc.close()
-                    continue
-                half = n_pages // 2
-                doc1 = fitz.open()
-                doc1.insert_pdf(doc, from_page=0, to_page=half - 1)
-                buf1 = doc1.tobytes()
-                doc1.close()
-                doc2 = fitz.open()
-                doc2.insert_pdf(doc, from_page=half, to_page=n_pages - 1)
-                buf2 = doc2.tobytes()
-                doc2.close()
-                doc.close()
-                split_part1.append((f'{fname}#part1of2', buf1))
-                split_part2.append((f'{fname}#part2of2', buf2))
-                logger.info(f'PDF分割: {fname} ({n_pages}P) → {half}P + {n_pages-half}P')
-            except Exception as e:
-                logger.warning(f'PDF分割失敗 ({fname}): {e} → 元のまま part1 に入れる')
-                split_part1.append((fname, pdf_bytes))
-
-        # 各分割で再抽出（再帰禁止のため _retry_depth=1）
-        retry_results: list[dict] = []
+        retry_chunks: list[list[dict]] = []
         for label, split_pdfs in [('part1', split_part1), ('part2', split_part2)]:
             if not split_pdfs:
                 continue
@@ -953,28 +1149,17 @@ class ClaudeExtractor(BaseExtractor):
                     _retry_depth=1,
                 )
                 logger.info(f'分割再抽出 {label}: {len(partial)}名')
-                retry_results.extend(partial)
+                retry_chunks.append(partial)
             except Exception as e:
                 logger.warning(f'分割再抽出 {label} 失敗: {e}')
 
-        # マージ: 初回 partial_data を優先採用、分割側で漏れた人物を追加
-        seen: dict[str, dict] = {}
-        order: list[str] = []
-        for emp in (partial_data or []) + retry_results:
-            name = emp.get('name', '')
-            if not name:
-                continue
-            import re as _re
-            import unicodedata as _ud
-            key = _re.sub(r'[\s　]+', '', _ud.normalize('NFKC', str(name)))
-            if key in seen:
-                continue  # 既出 → 既存優先（初回 partial_data が完全データ前提）
-            seen[key] = emp
-            order.append(key)
-        merged = [seen[k] for k in order]
+        # 月単位補完マージ: partial_data + retry_chunks を統合
+        all_chunks = ([partial_data] if partial_data else []) + retry_chunks
+        merged = _merge_wage_employees_by_month(all_chunks)
         logger.warning(
-            f'[extract_wage_ledger] 分割再抽出マージ完了: '
-            f'初回{len(partial_data or [])}名 + 再抽出{len(retry_results)}名 → 重複排除後{len(merged)}名'
+            f'[extract_wage_ledger] 事後分割マージ完了: '
+            f'初回{len(partial_data or [])}名 + 再抽出{sum(len(c) for c in retry_chunks)}名 '
+            f'→ 月単位補完マージ後{len(merged)}名'
         )
         return merged
 
