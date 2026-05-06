@@ -24,6 +24,25 @@ class CompanyInfo:
 
 
 @dataclass
+class FieldConfidence:
+    """1フィールドの信頼度メタ情報（Phase 2）
+
+    抽出結果の各値に「どのコンポーネントから取れたか」「信頼度」を付与し、
+    低信頼項目は申請書転記時に空欄+警告マーカーとして扱う。
+    "迷ったら空欄+根拠を示す" 設計思想の根幹。
+    """
+    # 'high' / 'medium' / 'low'
+    # high = AIが正常応答 + 整合性チェックOK
+    # medium = AIが正常応答だが、整合性チェックで疑わしい
+    # low = 抽出失敗 or 明らかに異常値
+    level: str = 'high'
+    # 値の取得元コンポーネント: 'PL'(販管費) / 'cost'(原価部) / 'PL+cost' / 'basic' / 'unknown'
+    source_component: str = 'unknown'
+    # 異常検知時の理由文字列（UI表示・警告ログ用）
+    reason: str = ''
+
+
+@dataclass
 class FinancialData:
     """損益計算書から抽出するデータ"""
     fiscal_year_start: str = ''
@@ -44,6 +63,10 @@ class FinancialData:
     welfare: int = 0                # 福利厚生費
     depreciation: int = 0           # 減価償却費
     travel_expense: int = 0         # 旅費交通費
+
+    # Phase 2: 各フィールドの信頼度メタ（フィールド名→FieldConfidence）
+    # 例: {'salary': FieldConfidence(level='high', source_component='PL+cost', reason='')}
+    confidence: dict = field(default_factory=dict)
 
 
 @dataclass

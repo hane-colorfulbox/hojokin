@@ -171,13 +171,43 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
         write('tool_name', data.estimate.tool_name, 'ツール名')
 
     # ── 財務情報（数式参照を直接値で上書き）──
-    write('fin_revenue', fi.revenue, '売上高')
-    write('fin_gross_profit', fi.gross_profit, '粗利益')
-    write('fin_operating_profit', fi.operating_profit, '営業利益')
-    write('fin_ordinary_profit', fi.ordinary_profit, '経常利益')
-    write('fin_depreciation', fi.depreciation, '減価償却費')
+    # Phase 2: 低信頼項目は空欄+警告（write 関数を信頼度対応に拡張）
+    fi_conf = getattr(fi, 'confidence', None) or {}
+
+    def write_fin(field: str, value, label: str, conf_key: str):
+        """財務系の write: confidence['xxx'].level == 'low' なら空欄+警告"""
+        if field not in mapping.shinsei:
+            return
+        c = fi_conf.get(conf_key)
+        if c and getattr(c, 'level', 'high') == 'low':
+            row, col = mapping.shinsei[field]
+            col_letter = chr(64 + col)
+            writes.append(
+                f'⚠ 申請内容 行{row:3d} {col_letter}列 [{label}]: 低信頼のため空欄 '
+                f'(理由: {getattr(c, "reason", "")})'
+            )
+            return
+        write(field, value, label)
+
+    write_fin('fin_revenue', fi.revenue, '売上高', 'revenue')
+    write_fin('fin_gross_profit', fi.gross_profit, '粗利益', 'gross_profit')
+    write_fin('fin_operating_profit', fi.operating_profit, '営業利益', 'operating_profit')
+    write_fin('fin_ordinary_profit', fi.ordinary_profit, '経常利益', 'ordinary_profit')
+    write_fin('fin_depreciation', fi.depreciation, '減価償却費', 'depreciation')
+    # 人件費合計の信頼度: salary/misc_wages/bonus/travel いずれかが low なら全体 low
     personnel = (fi.salary or 0) + (fi.misc_wages or 0) + (fi.bonus or 0) + (fi.travel_expense or 0)
-    write('fin_personnel', personnel, '人件費')
+    personnel_low = any(
+        fi_conf.get(k) and getattr(fi_conf[k], 'level', 'high') == 'low'
+        for k in ('salary', 'misc_wages', 'bonus', 'travel_expense')
+    )
+    if personnel_low and 'fin_personnel' in mapping.shinsei:
+        row, col = mapping.shinsei['fin_personnel']
+        col_letter = chr(64 + col)
+        writes.append(
+            f'⚠ 申請内容 行{row:3d} {col_letter}列 [人件費]: 低信頼項目を含むため空欄'
+        )
+    else:
+        write('fin_personnel', personnel, '人件費')
     # fin_capital は個人事業主の場合、上部で0固定済み。法人のみ co.capital を転記
     if not mapping.is_kojin:
         write('fin_capital', co.capital, '資本金(財務)')
@@ -190,29 +220,44 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
 
 
 def fill_kyuyo_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> list[str]:
-    """給与計算シートに財務データを転記"""
+    """給与計算シートに財務データを転記。
+
+    Phase 2: financial.confidence を見て、低信頼項目は空欄+警告マーカー扱い。
+    申請書側の処理タスクの empty_cells に追加されるよう writes に '⚠' マーカー付き行を返す。
+    """
     writes = []
     fi = data.financial
+    conf = getattr(fi, 'confidence', None) or {}
     m = mapping.kyuyo
 
-    def write(field: str, value, label: str):
+    def write(field: str, value, label: str, conf_key: str = ''):
         if field not in m:
+            return
+        # 信頼度チェック: low なら空欄+警告マーカー（書込スキップ）
+        c = conf.get(conf_key) if conf_key else None
+        if c and getattr(c, 'level', 'high') == 'low':
+            row, col = m[field]
+            col_letter = chr(64 + col)
+            writes.append(
+                f'⚠ 給与計算 行{row:3d} {col_letter}列 [{label}]: 低信頼のため空欄 '
+                f'(理由: {getattr(c, "reason", "")})'
+            )
             return
         row, col = m[field]
         _safe_write_cell(ws, row, col, value)
         col_letter = chr(64 + col)
         writes.append(f'給与計算 行{row:3d} {col_letter}列 [{label}]: {value:,}')
 
-    write('revenue', fi.revenue, '売上高')
-    write('gross_profit', fi.gross_profit, '粗利益')
-    write('operating_profit', fi.operating_profit, '営業利益')
-    write('ordinary_profit', fi.ordinary_profit, '経常利益')
-    write('depreciation', fi.depreciation, '減価償却費')
-    write('salary', fi.salary, '給料手当')
-    write('misc_wages', fi.misc_wages, '雑給')
-    write('bonus', fi.bonus, '賞与手当')
-    write('officer_comp', fi.officer_compensation, '役員報酬')
-    write('travel_expense', fi.travel_expense, '旅費交通費')
+    write('revenue', fi.revenue, '売上高', 'revenue')
+    write('gross_profit', fi.gross_profit, '粗利益', 'gross_profit')
+    write('operating_profit', fi.operating_profit, '営業利益', 'operating_profit')
+    write('ordinary_profit', fi.ordinary_profit, '経常利益', 'ordinary_profit')
+    write('depreciation', fi.depreciation, '減価償却費', 'depreciation')
+    write('salary', fi.salary, '給料手当', 'salary')
+    write('misc_wages', fi.misc_wages, '雑給', 'misc_wages')
+    write('bonus', fi.bonus, '賞与手当', 'bonus')
+    write('officer_comp', fi.officer_compensation, '役員報酬', 'officer_compensation')
+    write('travel_expense', fi.travel_expense, '旅費交通費', 'travel_expense')
 
     return writes
 

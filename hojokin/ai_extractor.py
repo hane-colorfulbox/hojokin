@@ -1349,7 +1349,7 @@ class ClaudeExtractor(BaseExtractor):
         return data
 
     def _extract_pl_structured(self, images: list[bytes]) -> FinancialData:
-        """構造分解 PL 抽出: 3つの専門呼出 → コード側で合算。
+        """構造分解 PL 抽出: 3つの専門呼出 → コード側で合算 + 信頼度付与（Phase 1+2）。
 
         - basic: 売上・利益基本（PL本表のみフォーカス）
         - pl_section: 販管費の人件費系（販管費明細のみフォーカス）
@@ -1357,7 +1357,12 @@ class ClaudeExtractor(BaseExtractor):
 
         各プロンプトを1枚絵レベルに単純化することで Sonnet の揺らぎを抑える。
         二重計上を避けるため、各プロンプトが排他的範囲を抽出し、コード側で機械的に加算。
+
+        Phase 2: 各フィールドに FieldConfidence (level / source_component / reason) を付与。
+        異常検知に引っかかったフィールドは level='low' として扱い、
+        申請書転記側で「空欄+警告」として処理する。
         """
+        from .models import FieldConfidence
         if not images:
             return FinancialData()
 
@@ -1366,6 +1371,11 @@ class ClaudeExtractor(BaseExtractor):
         basic = self._extract_pl_basic_section(images)
         pl_part = self._extract_pl_pl_section(images)
         cost_part = self._extract_pl_cost_section(images)
+
+        # 抽出失敗判定（空dict = API例外 or JSON parse失敗）
+        basic_failed = not basic
+        pl_failed = not pl_part
+        cost_failed = not cost_part
 
         # 決算月を事業年度終了日から推定
         fiscal_month = ''
@@ -1386,12 +1396,71 @@ class ClaudeExtractor(BaseExtractor):
             except (TypeError, ValueError):
                 return 0
 
+        # 信頼度メタ: 各フィールドの source_component と level を判定
+        confidence: dict = {}
+
+        def _basic_conf(key: str) -> FieldConfidence:
+            if basic_failed:
+                return FieldConfidence(level='low', source_component='basic', reason='basic 抽出失敗')
+            if basic.get(key) is None:
+                return FieldConfidence(level='low', source_component='basic', reason=f'{key} が null')
+            return FieldConfidence(level='high', source_component='basic')
+
+        def _personnel_conf(key: str) -> FieldConfidence:
+            """人件費系（販管費 + 原価部）の信頼度判定"""
+            if pl_failed and cost_failed:
+                return FieldConfidence(level='low', source_component='unknown',
+                                        reason='販管費・原価部とも抽出失敗')
+            if pl_failed:
+                return FieldConfidence(level='medium', source_component='cost',
+                                        reason='販管費抽出失敗、原価部のみ')
+            if cost_failed:
+                return FieldConfidence(level='medium', source_component='PL',
+                                        reason='原価部抽出失敗、販管費のみ')
+            v_pl = pl_part.get(key) or 0
+            v_cost = cost_part.get(key) or 0
+            if v_pl > 0 and v_cost > 0:
+                src = 'PL+cost'
+            elif v_pl > 0:
+                src = 'PL'
+            elif v_cost > 0:
+                src = 'cost'
+            else:
+                src = 'unknown'
+            return FieldConfidence(level='high', source_component=src)
+
+        for key in ('fiscal_year_start', 'fiscal_year_end', 'revenue', 'cost_of_sales',
+                    'gross_profit', 'operating_profit', 'ordinary_profit', 'net_profit'):
+            confidence[key] = _basic_conf(key)
+        for key in ('salary', 'misc_wages', 'bonus', 'legal_welfare', 'welfare',
+                    'depreciation', 'travel_expense'):
+            confidence[key] = _personnel_conf(key)
+        # 役員報酬は販管費のみ
+        if pl_failed:
+            confidence['officer_compensation'] = FieldConfidence(
+                level='low', source_component='PL', reason='販管費抽出失敗')
+        else:
+            confidence['officer_compensation'] = FieldConfidence(
+                level='high', source_component='PL')
+
+        # 整合性チェック: 売上原価/(販管費人件費+原価部人件費) > 50倍 など極端な値を low に降格
+        total_personnel = _sum('salary') + _sum('misc_wages') + _sum('bonus')
+        cost_of_sales = int(basic.get('cost_of_sales') or 0)
+        if cost_of_sales > 5_000_000 and total_personnel > 0:
+            ratio = cost_of_sales / total_personnel
+            if ratio > 50:
+                # 50倍超 = 原価部抽出も含めても人件費が極端に小さい = 何か根本的におかしい
+                for k in ('salary', 'misc_wages', 'bonus'):
+                    confidence[k] = FieldConfidence(
+                        level='low', source_component=confidence[k].source_component,
+                        reason=f'売上原価/人件費={ratio:.1f}倍で異常（人件費抽出全体に問題）')
+
         result = FinancialData(
             fiscal_year_start=basic.get('fiscal_year_start') or '',
             fiscal_year_end=end,
             fiscal_month=fiscal_month,
             revenue=int(basic.get('revenue') or 0),
-            cost_of_sales=int(basic.get('cost_of_sales') or 0),
+            cost_of_sales=cost_of_sales,
             gross_profit=int(basic.get('gross_profit') or 0),
             operating_profit=int(basic.get('operating_profit') or 0),
             ordinary_profit=int(basic.get('ordinary_profit') or 0),
@@ -1399,13 +1468,22 @@ class ClaudeExtractor(BaseExtractor):
             salary=_sum('salary'),
             misc_wages=_sum('misc_wages'),
             bonus=_sum('bonus'),
-            officer_compensation=int(pl_part.get('officer_compensation') or 0),  # 役員報酬は販管費のみ
+            officer_compensation=int(pl_part.get('officer_compensation') or 0),
             legal_welfare=_sum('legal_welfare'),
             welfare=_sum('welfare'),
             depreciation=_sum('depreciation'),
             travel_expense=_sum('travel_expense'),
+            confidence=confidence,
         )
 
+        # 低信頼項目をログに集約
+        low_fields = [k for k, c in confidence.items() if c.level == 'low']
+        if low_fields:
+            logger.warning(
+                f'[extract_pl_structured] 低信頼フィールド {len(low_fields)}件: '
+                f'{", ".join(low_fields[:5])}'
+                f'{"..." if len(low_fields) > 5 else ""}'
+            )
         logger.warning(
             f'[extract_pl_structured] 統合結果: '
             f'salary={result.salary:,} (販管費{int(pl_part.get("salary") or 0):,} + '
