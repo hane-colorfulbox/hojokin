@@ -556,7 +556,9 @@ with st.sidebar:
 
     st.markdown('**処理の目安**')
     st.caption('所要時間: 約1〜10分（案件規模により変動）')
-    st.caption('API利用料: 約10〜100円/社（案件規模により変動）')
+    st.caption('API利用料: 約30〜300円/社（案件規模により変動）')
+    st.caption('└ 賃金台帳PDFが大きい案件では数百円〜になることがあります')
+    st.caption('└ Sonnet 4.6 の従量課金。確定額は Anthropic の請求でご確認ください')
     st.caption('実行前に「案件規模の予想」で詳細目安が表示されます')
 
 # ── ファイル判別ヘルパー（ローカル/Drive 共通） ──
@@ -700,7 +702,7 @@ def _estimate_case_scale(file_size_pairs: list[tuple[str, int]]) -> dict | None:
     Returns: {
         'scale': '小型' | '中型' | '大型' | '超大型',
         'time_label': '約1〜3分',
-        'cost_label': '約15〜25円',
+        'cost_label': '約30〜80円',
         'pre_split': bool,  # 事前分割発動の見込み
         'pdf_total_mb': float,
         'wage_pdf_mb': float,
@@ -768,20 +770,21 @@ def _estimate_case_scale(file_size_pairs: list[tuple[str, int]]) -> dict | None:
         time_label = f'約 {round(total_min_sec/60)}〜{round(total_max_sec/60)}分（PDFが大きいため長めです）'
 
     # ── APIコスト予想（円、Sonnet 4.6 / 1USD=150円） ──
-    # 共通処理（履歴/PL/税/見積/AI判断）: ~10円
-    # 賃金台帳: PDF 1MB あたり ~3〜5円
-    # 事前分割発動時: 賃金台帳側が +50%（API呼出 +1回）
-    common_cost = 10
-    wage_cost_min = wage_pdf_mb * 3
-    wage_cost_max = wage_pdf_mb * 6
+    # 実態に合わせ上方寄りに見積もる（過去案件で表示より高くなる傾向があったため）
+    # 共通処理（履歴/PL/税/見積/AI判断）: ~30円
+    # 賃金台帳: PDF 1MB あたり ~8〜15円
+    # 事前分割発動時: 賃金台帳側が +50〜80%（API呼出 +1回）
+    common_cost = 30
+    wage_cost_min = wage_pdf_mb * 8
+    wage_cost_max = wage_pdf_mb * 15
     if pre_split:
-        wage_cost_max *= 1.6  # 分割発動でAPIコール+1回
-        wage_cost_min *= 1.3
+        wage_cost_max *= 1.8  # 分割発動でAPIコール+1回
+        wage_cost_min *= 1.5
     total_cost_min = common_cost + wage_cost_min
     total_cost_max = common_cost + wage_cost_max
 
-    # 多めに見積もる（最大値を1.2倍に切り上げ）
-    cost_label = f'約 {max(15, int(total_cost_min))}〜{int(total_cost_max * 1.2)}円'
+    # さらに上方寄りに（最大値を1.5倍に切り上げ）
+    cost_label = f'約 {max(30, int(total_cost_min))}〜{int(total_cost_max * 1.5)}円'
 
     # 補足メッセージ
     notes: list[str] = []
@@ -828,7 +831,10 @@ def _render_case_scale_estimate(file_size_pairs: list[tuple[str, int]]):
             for n in est['note'].split(' / '):
                 st.info(n)
         st.caption(
-            'コスト・時間は控えめに見積もった目安です。実際は前後する可能性があります。'
+            'コスト・時間は上方寄りに見積もった目安です。'
+            '実際はこれより安く済むこともありますが、'
+            'PDFが多い・賃金台帳が大きい案件では上振れすることもあります。'
+            '確定額は Anthropic の請求でご確認ください。'
         )
 
 
