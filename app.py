@@ -64,6 +64,20 @@ from hojokin.wage_reader import (
 
 # Drive連携（認証情報がある場合のみ）
 logger = logging.getLogger(__name__)
+
+# ── Streamlit Cloud Secrets を os.environ に橋渡し ──
+# config.py は os.getenv() で環境変数を読む構造のため、Streamlit Cloud では
+# Secrets を環境変数として展開しないと USE_* フラグや DOCUMENT_AI_* などが反映されない。
+# 既に環境変数で設定済みのキーは上書きしない（ローカル .env / OSの環境変数を優先）。
+# dict 値（gcp_service_account など TOML セクション）は別経路で読むため対象外。
+try:
+    if hasattr(st, 'secrets'):
+        for _k, _v in st.secrets.items():
+            if isinstance(_v, (str, int, float, bool)) and _k not in os.environ:
+                os.environ[_k] = str(_v)
+except Exception as _e:
+    logger.warning(f'Streamlit Secrets→os.environ 橋渡し失敗: {_e}', exc_info=True)
+
 _drive_client = None
 _DRIVE_CREDS = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON', '')
 _DRIVE_PARENT_ID = os.getenv('DRIVE_PARENT_FOLDER_ID', '')
