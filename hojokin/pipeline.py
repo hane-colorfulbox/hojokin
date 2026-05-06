@@ -289,6 +289,8 @@ def run_application_transfer(
         # 後続タスク（給与計算/加点判定）で再利用するためAI抽出結果をstatusに保持
         status.financial = extraction.financial
         status.ledger_employees = ledger_employees or []
+        # Phase 4: 低信頼項目を「確認キュー」として集約
+        status.confidence_warnings = _build_confidence_warnings(extraction.financial)
         # 賃金台帳の読み取り状況に応じて完了メッセージに警告を追記（処理は続行）
         wage_warning = ''
         if wage_status == 'no_data':
@@ -584,6 +586,59 @@ def _calc_wage_plan_from_ledger(
     except Exception as e:
         logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}', exc_info=True)
         return None, [], 'error'
+
+
+def _build_confidence_warnings(financial) -> list[dict]:
+    """FinancialData.confidence から「確認キュー」用の警告リストを構築（Phase 4）。
+
+    UI で「📋 確認キュー」セクションに表示する：項目・元値・根拠・警告理由。
+    level='low' のフィールドだけを抽出（high/medium はスルー）。
+    """
+    if financial is None:
+        return []
+    conf = getattr(financial, 'confidence', None) or {}
+    if not conf:
+        return []
+    # フィールド名 → 表示ラベル
+    label_map = {
+        'fiscal_year_start': '事業年度開始日',
+        'fiscal_year_end': '事業年度終了日',
+        'revenue': '売上高',
+        'cost_of_sales': '売上原価',
+        'gross_profit': '売上総利益',
+        'operating_profit': '営業利益',
+        'ordinary_profit': '経常利益',
+        'net_profit': '当期純利益',
+        'salary': '給料手当',
+        'misc_wages': '雑給',
+        'bonus': '賞与',
+        'officer_compensation': '役員報酬',
+        'legal_welfare': '法定福利費',
+        'welfare': '福利厚生費',
+        'depreciation': '減価償却費',
+        'travel_expense': '旅費交通費',
+    }
+    # source_component → 表示ラベル
+    source_map = {
+        'basic': '損益計算書本表',
+        'PL': '販管費明細',
+        'cost': '原価報告書',
+        'PL+cost': '販管費 + 原価報告書',
+        'unknown': '不明',
+    }
+    warnings = []
+    for field, c in conf.items():
+        if not c or getattr(c, 'level', 'high') != 'low':
+            continue
+        value = getattr(financial, field, None)
+        warnings.append({
+            'field': field,
+            'label': label_map.get(field, field),
+            'value': str(value) if value is not None else '(空)',
+            'source': source_map.get(getattr(c, 'source_component', ''), getattr(c, 'source_component', '')),
+            'reason': getattr(c, 'reason', '') or '抽出失敗',
+        })
+    return warnings
 
 
 def _check_wage_pl_consistency(

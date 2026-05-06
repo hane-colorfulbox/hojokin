@@ -155,3 +155,6 @@ class ProcessingStatus:
     # 'WageEmployee' は循環import回避のため文字列で型注釈
     financial: FinancialData | None = None
     ledger_employees: list = field(default_factory=list)
+    # Phase 4: 確認キュー（低信頼項目を UI で「要確認」一覧として表示）
+    # 各要素: {'field': str, 'label': str, 'value': str, 'source': str, 'reason': str}
+    confidence_warnings: list[dict] = field(default_factory=list)

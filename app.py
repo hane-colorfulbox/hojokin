@@ -335,6 +335,8 @@ def run_processing(
                 'message': status.message,
                 'output_path': output_path if status.status == '完了' else None,
                 'empty_cells': status.empty_cells,
+                # Phase 4: 低信頼項目の確認キュー（項目・値・根拠・警告理由）
+                'confidence_warnings': getattr(status, 'confidence_warnings', []),
                 'extra_files': extra_files,
                 # all タスクで run_wage_calculation に渡してAPI重複を防ぐためのキャッシュ
                 '_cached_financial': status.financial,
@@ -1220,6 +1222,7 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 'status': result['status'],
                 'message': result['message'],
                 'empty_cells': result.get('empty_cells', []),
+                'confidence_warnings': result.get('confidence_warnings', []),
                 'file_data': None,
                 'file_name': None,
                 'extra_files': {},
@@ -1369,6 +1372,25 @@ if 'last_results' in st.session_state:
                 with st.expander(f'⚠️ 未入力セル（{len(result["empty_cells"])}件） — 手動確認が必要'):
                     for cell in result['empty_cells']:
                         st.text(cell)
+
+            # Phase 4: 低信頼項目の確認キュー（自動転記できなかった項目を一覧）
+            warnings_list = result.get('confidence_warnings') or []
+            if warnings_list:
+                with st.expander(
+                    f'📋 確認キュー（{len(warnings_list)}件） — '
+                    f'AI が自信を持って抽出できなかった項目です',
+                    expanded=True,
+                ):
+                    st.caption(
+                        '以下の項目は信頼度が低いため**空欄にしてあります**。'
+                        '元の決算書を見て手動で入力してください。'
+                    )
+                    for w in warnings_list:
+                        st.markdown(
+                            f'**{w["label"]}** （取得元: {w["source"]}）  \n'
+                            f'　▶ AI抽出値: `{w["value"]}` （**未転記**）  \n'
+                            f'　▶ 警告理由: {w["reason"]}'
+                        )
         else:
             st.error(f'{task_display}: {result["message"]}')
 
