@@ -1156,16 +1156,38 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
         # ファイル保存（データソースに応じて）— 保存名は NFC 統一
         if data_source == 'Google Drive' and drive_files_to_download:
             with st.spinner('Google Driveからファイルをダウンロード中...'):
+                from hojokin.drive_client import GoogleFormatNotSupportedError
                 client = _get_drive_client()
                 saved = []
+                skipped: list[tuple[str, str]] = []
                 for f in drive_files_to_download:
                     name = _nfc_filename(f['name'])
                     dest = work_dir / name
-                    saved_path = client.download_file(
-                        f['id'], dest, mime_type=f.get('mimeType'),
-                    )
-                    saved.append(saved_path.name)
-                st.caption(f'{len(saved)}件のファイルをダウンロードしました')
+                    try:
+                        saved_path = client.download_file(
+                            f['id'], dest, mime_type=f.get('mimeType'),
+                        )
+                        saved.append(saved_path.name)
+                    except GoogleFormatNotSupportedError as e:
+                        # 対応外のGoogle形式（フォーム/図面/サイト/解決失敗ショートカット等）は
+                        # スキップして処理続行。Excel/PDF 等の主要書類が揃っていれば申請書は作れる。
+                        skipped.append((name, str(e)))
+                        logger.warning(f'Drive ダウンロードスキップ: {name} ({e})')
+                st.caption(
+                    f'{len(saved)}件のファイルをダウンロードしました'
+                    + (f'（{len(skipped)}件スキップ）' if skipped else '')
+                )
+                if skipped:
+                    with st.expander(
+                        f'⚠ ダウンロードできなかったファイル {len(skipped)}件',
+                        expanded=False,
+                    ):
+                        for name, reason in skipped:
+                            st.text(f'  {name}  — {reason}')
+                        st.caption(
+                            '上記は Google フォーム / 図面 / サイト等の対応外形式です。'
+                            '主要書類（Excel/PDF）が揃っていれば申請書は作成できます。'
+                        )
         else:
             saved = save_uploaded_files(uploaded_files, work_dir)
 

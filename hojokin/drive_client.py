@@ -18,6 +18,15 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
 
+
+class GoogleFormatNotSupportedError(ValueError):
+    """対応外のGoogle形式ファイル (フォーム / 図面 / サイト / スクリプト等)
+
+    呼出側で個別にスキップしてダウンロード処理を継続するために使う専用例外。
+    ValueError を継承しているので、明示 catch しなければ従来通り例外として伝播する。
+    """
+    pass
+
 # Google Docs Editors 形式 → Office 形式へのエクスポートマッピング
 GOOGLE_EXPORT_MAP = {
     'application/vnd.google-apps.spreadsheet': (
@@ -125,6 +134,8 @@ class DriveClient:
 
         Returns:
             (request, export_ext): Google形式なら補正すべき拡張子、それ以外はNone
+        Raises:
+            GoogleFormatNotSupportedError: 対応外のGoogle形式（form, drawing, site等）
         """
         if mime_type is None:
             meta = self.service.files().get(
@@ -132,6 +143,26 @@ class DriveClient:
                 supportsAllDrives=True,
             ).execute()
             mime_type = meta.get('mimeType', '')
+
+        # ショートカットの解決：リンク先のファイルをたどる
+        if mime_type == 'application/vnd.google-apps.shortcut':
+            meta = self.service.files().get(
+                fileId=file_id,
+                fields='shortcutDetails',
+                supportsAllDrives=True,
+            ).execute()
+            shortcut = meta.get('shortcutDetails') or {}
+            target_id = shortcut.get('targetId')
+            target_mime = shortcut.get('targetMimeType')
+            if target_id:
+                logger.info(
+                    f'ショートカット解決: {file_id} → {target_id} '
+                    f'(mime={target_mime})'
+                )
+                return self._build_download_request(target_id, target_mime)
+            raise GoogleFormatNotSupportedError(
+                f'ショートカットのリンク先が解決できません (id={file_id})'
+            )
 
         if mime_type in GOOGLE_EXPORT_MAP:
             export_mime, ext = GOOGLE_EXPORT_MAP[mime_type]
@@ -141,7 +172,9 @@ class DriveClient:
             return request, ext
 
         if mime_type.startswith('application/vnd.google-apps.'):
-            raise ValueError(f'未対応のGoogle形式ファイルです: {mime_type}')
+            raise GoogleFormatNotSupportedError(
+                f'未対応のGoogle形式ファイルです: {mime_type}'
+            )
 
         request = self.service.files().get_media(
             fileId=file_id, supportsAllDrives=True,
