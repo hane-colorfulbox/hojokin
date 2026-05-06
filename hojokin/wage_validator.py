@@ -215,6 +215,97 @@ def check_bonus_omission(
     )
 
 
+def check_similar_name_duplicates(ledger_employees: list[dict] | None) -> str:
+    """OCR 誤読による別人扱いが疑われる類似氏名ペアを検出。
+
+    判定: 「姓が同じ」かつ「名が編集距離1以内」の従業員ペア。
+    実観測例: 「吉田 壽」と「吉田 靖」、「大嶋 晃輔」と「大崎 晃輔」
+    （これらは _normalize_name_key の異体字辞書で救えるものは既に統合済み。
+    残るのはより微妙な誤読ペア）
+
+    統合は危険（実は別人の可能性もある）ので、警告のみ返して人間判断に委ねる。
+    """
+    if not ledger_employees or len(ledger_employees) < 2:
+        return ''
+
+    def _surname_given(name: str) -> tuple[str, str]:
+        """姓名を空白で分割。空白が無ければ最初の2文字を姓・残りを名とする"""
+        import unicodedata
+        n = unicodedata.normalize('NFKC', name or '').strip()
+        for sep in (' ', '　', '\t'):
+            if sep in n:
+                a, b = n.split(sep, 1)
+                return a.strip(), b.strip()
+        # 空白なし → 先頭2文字を姓と仮定
+        if len(n) >= 3:
+            return n[:2], n[2:]
+        return n, ''
+
+    def _edit_distance_le_1(a: str, b: str) -> bool:
+        """編集距離が 1 以下か（最大長差1で済むかも判定）"""
+        if a == b:
+            return True
+        if abs(len(a) - len(b)) > 1:
+            return False
+        if len(a) == len(b):
+            diffs = sum(1 for x, y in zip(a, b) if x != y)
+            return diffs <= 1
+        # 長さ差1: 長い方から1文字消して一致するか
+        long_s, short_s = (a, b) if len(a) > len(b) else (b, a)
+        for i in range(len(long_s)):
+            if long_s[:i] + long_s[i+1:] == short_s:
+                return True
+        return False
+
+    pairs = []
+    parsed = [(_surname_given(e.get('name') or ''), e.get('name') or '') for e in ledger_employees]
+    n = len(parsed)
+    for i in range(n):
+        (sa, ga), na = parsed[i]
+        if not sa or not ga:
+            continue
+        for j in range(i + 1, n):
+            (sb, gb), nb = parsed[j]
+            if not sb or not gb:
+                continue
+            if sa == sb and _edit_distance_le_1(ga, gb) and ga != gb:
+                pairs.append(f'「{na}」と「{nb}」')
+
+    if not pairs:
+        return ''
+    sample = '、'.join(pairs[:3])
+    suffix = '...' if len(pairs) > 3 else ''
+    return (
+        f' ⚠ 類似氏名ペア{len(pairs)}件あり: {sample}{suffix}。'
+        f'OCR誤読により同一人物が別人扱いされている可能性があります（壽⇔靖等）'
+    )
+
+
+def check_employment_type_missing(ledger_employees: list[dict] | None) -> str:
+    """雇用区分（employment_type）が空欄の従業員を検出。
+
+    プロンプトで「明示されていない場合は『正社員』を既定値」と指示しているが、
+    指示違反した出力を検出する。
+    """
+    if not ledger_employees:
+        return ''
+    missing = [
+        e.get('name') or '(無名)'
+        for e in ledger_employees
+        if not (e.get('employment_type') or '').strip()
+    ]
+    if not missing:
+        return ''
+    if len(missing) >= max(2, len(ledger_employees) // 3):
+        sample = '、'.join(missing[:3])
+        suffix = '...' if len(missing) > 3 else ''
+        return (
+            f' ⚠ 雇用区分が空欄の従業員が{len(missing)}名います: {sample}{suffix}。'
+            f'抽出時に雇用形態列を読み取れていない可能性があります'
+        )
+    return ''
+
+
 def run_all_validations(
     hearing_data: dict | None,
     ledger_employees: list[dict] | None,
@@ -232,5 +323,7 @@ def run_all_validations(
         check_monthly_coverage(ledger_employees),
         check_value_distribution(ledger_employees),
         check_bonus_omission(ledger_employees, financial),
+        check_similar_name_duplicates(ledger_employees),
+        check_employment_type_missing(ledger_employees),
     ]
     return [w for w in warnings if w]

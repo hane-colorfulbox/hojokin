@@ -1095,20 +1095,59 @@ def read_wage_ledgers_with_ai(
     return employees
 
 
+# OCR が混同しやすい異体字・類似字形の正規化辞書。
+# 同一人物判定の取りこぼしを防ぐため、代表字に統一する（読みやすさより一貫性優先）。
+# ここに足すかどうかの基準: 字形が似ていて OCR が両方候補に挙げる + 同一人物のはずが
+# 別人扱いされる典型例を実観測している こと。
+_OCR_VARIANT_MAP = {
+    # 旧字 ⇔ 新字（実観測: 吉田 壽 ⇔ 吉田 靖）
+    '壽': '寿',
+    # 旧字柳 / 櫛 の混乱（実観測: 栁井 ⇔ 櫛井）
+    '栁': '柳',
+    '櫛': '柳',
+    # 嶋 / 崎 / 島 の OCR 混乱（実観測: 大嶋 ⇔ 大崎、宮嶋 ⇔ 宮崎）
+    '嶋': '島',
+    '崎': '島',
+    # 高 / 髙 の混乱（実観測: 髙橋 ⇔ 高橋）
+    '髙': '高',
+    # 斉 / 齊 / 斎 / 齋 の混乱（実観測: 斉藤 ⇔ 斎藤）
+    '齊': '斉',
+    '齋': '斉',
+    '斎': '斉',
+    # 渡辺 / 渡邉 / 渡邊 の混乱
+    '邉': '辺',
+    '邊': '辺',
+    # 沢 / 澤 の混乱
+    '澤': '沢',
+    # 浜 / 濱 の混乱
+    '濱': '浜',
+}
+
+
+def _apply_variant_normalization(s: str) -> str:
+    """OCR 異体字を代表字に置換"""
+    return ''.join(_OCR_VARIANT_MAP.get(c, c) for c in s)
+
+
 def _normalize_name_key(name: str) -> str:
     """同一人物判定用の正規化キー。
 
     - NFKC正規化（全角英数→半角、半角カナ→全角等）
     - 全角・半角の空白をすべて除去
+    - OCR 異体字を代表字に置換（壽→寿、栁→柳、嶋→島 等）
     - 大文字小文字統一はしない（漢字氏名の運用なので影響小）
 
-    例: '長塚 典子' / '長塚　典子' / '長塚典子' / 'NAGATSUKA' は別キーになるが、
-        前3者は同じキー '長塚典子' になる。
+    例: '長塚 典子' / '長塚　典子' / '長塚典子' は同じキー '長塚典子' になる。
+    例: '吉田 壽' と '吉田 靖' は字形違いで別人扱いされやすいが、
+        '壽' は '寿' に正規化される。'靖' は別字なので統合されないが、
+        '吉田寿' に近い候補として後段（_merge_similar_names）で統合判定される。
     """
     if not name:
         return ''
     n = unicodedata.normalize('NFKC', str(name))
-    return re.sub(r'[\s　]+', '', n)
+    n = re.sub(r'[\s　]+', '', n)
+    n = _apply_variant_normalization(n)
+    return n
 
 
 def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
