@@ -54,6 +54,14 @@ IT導入補助金の申請書類を、ヒアリングシート・PDF資料・Exc
 - ロールバックは `git revert` または Streamlit Cloud secrets での機能フラグ切替
 - `USE_AI_WAGE_EXTRACTION=false` で AI 抽出を旧経路（決定論パーサー）に戻せる
 
+## テスト方針（暗黙ルール）
+
+- **テスト実行時に Anthropic API は絶対に呼ばない**（API課金ゼロが原則）。
+  `_debug/test_*.py` は `StubExtractor` / `MagicMock` / Sonnet サブエージェント代用で動くこと
+- AI モデルは **Sonnet 4.6** を仮定（コードのデフォルト `claude-sonnet-4-6` 通り）。
+  Haiku 等への切替は別途検討。現状は **Sonnet 統一方針**
+- 大規模変更後は `_debug/` 配下のテストを全件回し、回帰なしを確認してから push
+
 ## ロールバック・運用フラグ
 
 | フラグ | デフォルト | 役割 |
