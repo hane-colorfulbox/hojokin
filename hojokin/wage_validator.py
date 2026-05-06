@@ -190,13 +190,20 @@ def check_bonus_omission(
 
     if salary <= 0 or bonus <= 0:
         return ''
-    # 賞与が小さすぎる場合は検出意義薄（小数点以下%は誤検出元）
+    # 賞与が小さすぎる場合は検出意義薄
     if bonus / salary < 0.05:
         return ''
 
-    # 「賃金台帳合計 ≒ PL の (給料+雑給) のみ」を判定（±10% 以内で一致）
-    diff_ratio = abs(ledger_total - salary) / salary
-    if diff_ratio > 0.10:
+    # 二仮説比較: 賃金台帳合計が「salary-only」と「salary+bonus」のどちらに近いか。
+    # salary+bonus の方が近い、または同等なら賞与込みの健全パターン → 警告なし。
+    # salary-only に明確に近い場合のみ「賞与未参照」と判定する（Codex 指摘の false positive 対策）。
+    diff_to_salary_only = abs(ledger_total - salary)
+    diff_to_full = abs(ledger_total - (salary + bonus))
+    if diff_to_salary_only >= diff_to_full:
+        return ''  # 賞与込み集計の方が近い = 健全
+
+    # salary-only により近いとして、それでも誤差大ければ別問題（人数異常など）
+    if diff_to_salary_only / salary > 0.10:
         return ''
 
     return (

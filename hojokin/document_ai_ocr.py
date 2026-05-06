@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 # Document AI 同期API のサイズ上限（公式 20MB、安全マージン込で 18MB）
 DOCUMENT_AI_MAX_BYTES = 18 * 1024 * 1024
 DOCUMENT_AI_MAX_PAGES = 30  # 同期処理上限（Enterprise OCR）
+# 再帰分割の保険上限（これを超えるとバッチAPI 利用を案内するエラー）
+DOCUMENT_AI_RECURSION_PAGE_CEILING = 480
+# 分割チャンク間の境界マーカー（下流プロンプトに「ここでチャンクが切れた」と知らせる）
+CHUNK_BOUNDARY_MARKER = '\n\n----- pdf chunk boundary -----\n\n'
 
 
 def _get_credentials():
@@ -73,6 +77,9 @@ def _count_pdf_pages(pdf_bytes: bytes) -> int:
 def _split_pdf_in_half(pdf_bytes: bytes) -> tuple[bytes, bytes]:
     """PyMuPDF で PDF を前半・後半に分割。
 
+    garbage=4, deflate=True で再シリアライズ時の肥大化を防ぐ
+    （元PDFが圧縮済の場合でも、再書き出しで未圧縮になるのを抑制）。
+
     Returns: (前半 bytes, 後半 bytes)
     """
     import fitz  # type: ignore
@@ -81,11 +88,11 @@ def _split_pdf_in_half(pdf_bytes: bytes) -> tuple[bytes, bytes]:
     half = n // 2
     doc1 = fitz.open()
     doc1.insert_pdf(doc, from_page=0, to_page=half - 1)
-    buf1 = doc1.tobytes()
+    buf1 = doc1.tobytes(garbage=4, deflate=True)
     doc1.close()
     doc2 = fitz.open()
     doc2.insert_pdf(doc, from_page=half, to_page=n - 1)
-    buf2 = doc2.tobytes()
+    buf2 = doc2.tobytes(garbage=4, deflate=True)
     doc2.close()
     doc.close()
     return buf1, buf2
@@ -122,25 +129,39 @@ def extract_pdf_via_document_ai(
             f'Document AI 設定不足 (project_id={project_id!r}, processor_id={processor_id!r}). '
             f'.env の DOCUMENT_AI_PROJECT_ID / DOCUMENT_AI_PROCESSOR_ID を確認'
         )
-    if len(pdf_bytes) > DOCUMENT_AI_MAX_BYTES:
+
+    # ── ページ分割で解消できない極大PDFは即エラー（同期APIでは非効率） ──
+    pages = _count_pdf_pages(pdf_bytes)
+    if pages > DOCUMENT_AI_RECURSION_PAGE_CEILING:
         raise ValueError(
-            f'PDFサイズ {len(pdf_bytes)/1_000_000:.1f}MB が同期API上限 '
-            f'{DOCUMENT_AI_MAX_BYTES/1_000_000:.0f}MB を超えています'
+            f'PDF {pages} ページが再帰分割上限 {DOCUMENT_AI_RECURSION_PAGE_CEILING} を超過。'
+            f'同期API では非効率なため、Document AI バッチAPI（非同期）を検討してください'
         )
 
-    # ── 30ページ超は事前分割（同期 API 上限回避） ──
-    pages = _count_pdf_pages(pdf_bytes)
-    if pages > DOCUMENT_AI_MAX_PAGES:
-        logger.warning(
-            f'[document_ai] {pages}ページ > 上限{DOCUMENT_AI_MAX_PAGES}ページ → 半分ずつ分割してOCR'
+    # ── ページ数 or サイズが上限超過 → ページ分割を試す ──
+    # ページ単位で分割すれば多くの場合サイズも縮む（PyMuPDF の garbage+deflate 効果あり）。
+    # 単ページPDFがサイズ超過しているケースのみ救えない（その時だけエラー）。
+    over_pages = pages > DOCUMENT_AI_MAX_PAGES
+    over_bytes = len(pdf_bytes) > DOCUMENT_AI_MAX_BYTES
+    if over_pages or over_bytes:
+        if pages < 2:
+            raise ValueError(
+                f'PDFサイズ {len(pdf_bytes)/1_000_000:.1f}MB が同期API上限 '
+                f'{DOCUMENT_AI_MAX_BYTES/1_000_000:.0f}MB を超過、かつ単ページのため分割不可'
+            )
+        reason = (
+            f'{pages}ページ > 上限{DOCUMENT_AI_MAX_PAGES}'
+            if over_pages else
+            f'サイズ{len(pdf_bytes)/1_000_000:.1f}MB > 上限{DOCUMENT_AI_MAX_BYTES/1_000_000:.0f}MB'
         )
+        logger.warning(f'[document_ai] {reason} → 半分ずつ分割してOCR')
         try:
             buf1, buf2 = _split_pdf_in_half(pdf_bytes)
         except Exception as e:
             raise ValueError(f'PDF分割失敗: {type(e).__name__}: {e}') from e
         text1 = extract_pdf_via_document_ai(buf1, project_id, location, processor_id)
         text2 = extract_pdf_via_document_ai(buf2, project_id, location, processor_id)
-        return text1 + '\n' + text2
+        return text1 + CHUNK_BOUNDARY_MARKER + text2
 
     from google.cloud import documentai
     from google.api_core.client_options import ClientOptions
