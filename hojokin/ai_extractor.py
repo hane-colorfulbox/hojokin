@@ -1463,17 +1463,22 @@ class ClaudeExtractor(BaseExtractor):
             content.append({'type': 'text', 'text': prompt})
             prompt_for_log = prompt
 
+        # Haiku モード: OCR テキストを Haiku 4.5 で抽出（コスト 1/3）
+        from .config import USE_OCR_HAIKU_EXTRACTION, HAIKU_MODEL
+        effective_model = HAIKU_MODEL if USE_OCR_HAIKU_EXTRACTION else self.model
+
         pdf_count = len(pdf_files) if pdf_files else 0
         stats = (
             f'pdfs={pdf_count}件 pdf合計={pdf_total_bytes/1_000_000:.2f}MB '
             f'prompt={len(prompt_for_log)}chars max_tokens={max_tokens} '
-            f'retry={_retry_depth} cache={"on" if USE_PROMPT_CACHING else "off"}'
+            f'retry={_retry_depth} cache={"on" if USE_PROMPT_CACHING else "off"} '
+            f'model={effective_model}'
         )
         logger.warning(f'[API送信] caller=extract_wage_ledger {stats}')
         response = self._messages_create_with_retry(
             caller='extract_wage_ledger',
             stats=stats,
-            model=self.model,
+            model=effective_model,
             max_tokens=max_tokens,
             messages=[{'role': 'user', 'content': content}],
         )

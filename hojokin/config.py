@@ -45,12 +45,30 @@ USE_PDF_TEXT_PREPROCESSING = os.getenv('USE_PDF_TEXT_PREPROCESSING', 'false').st
 # 効果: 画像 78,000 tokens → OCRテキスト 数千 tokens で Sonnet 入力コスト圧縮。
 # Document AI 単価: $0.0015/ページ (Enterprise OCR)、39ページで約9円。
 # 失敗時は USE_PDF_TEXT_PREPROCESSING の経路、それも失敗なら画像経路に自動フォールバック。
-USE_DOCUMENT_AI_OCR = os.getenv('USE_DOCUMENT_AI_OCR', 'false').strip().lower() in ('true', '1', 'on', 'yes')
+# 注意: 実測で OCR テキスト > 画像トークンになるため、Sonnet入力に投げると逆にコスト増。
+#       Haiku 4.5 抽出と組み合わせる USE_OCR_HAIKU_EXTRACTION の方が現実的。
+_USE_DOCUMENT_AI_OCR_RAW = os.getenv('USE_DOCUMENT_AI_OCR', 'false').strip().lower() in ('true', '1', 'on', 'yes')
+
+# 賃金台帳を「Document AI で OCR → Haiku 4.5 で抽出」ルートに切り替えるか。
+# デフォルト OFF。実機検証済の本命コスト削減ルート。
+# - Document AI で画像PDFをテキスト化（無料トライアル中は無料、その後 $0.0015/ページ）
+# - 抽出モデルを Sonnet 4.6 から Haiku 4.5 ($1/MTok) に切替えて入力コスト 1/3
+# - 1案件 約46円 → 約18円 (無料中) / 約27円 (90日後) と試算
+# 精度検証: クリーンニイガタ・後藤造園・Kデザインの3社で
+#           Sonnet ベースラインと同等以上 (むしろ漏れが減る方向) を確認済。
+# 失敗時は通常の Sonnet 画像経路にフォールバック (既存挙動維持)。
+USE_OCR_HAIKU_EXTRACTION = os.getenv('USE_OCR_HAIKU_EXTRACTION', 'false').strip().lower() in ('true', '1', 'on', 'yes')
+
+# Haiku モードは Document AI 必須なので、片方ONなら Document AI も自動有効化
+USE_DOCUMENT_AI_OCR = _USE_DOCUMENT_AI_OCR_RAW or USE_OCR_HAIKU_EXTRACTION
 
 # Document AI 接続情報（USE_DOCUMENT_AI_OCR=true のときのみ参照される）
 DOCUMENT_AI_PROJECT_ID = os.getenv('DOCUMENT_AI_PROJECT_ID', '')
 DOCUMENT_AI_LOCATION = os.getenv('DOCUMENT_AI_LOCATION', 'us')
 DOCUMENT_AI_PROCESSOR_ID = os.getenv('DOCUMENT_AI_PROCESSOR_ID', '')
+
+# Haiku モード時に使うモデル ID（明示的に固定）
+HAIKU_MODEL = os.getenv('HAIKU_MODEL', 'claude-haiku-4-5-20251001')
 
 # ── 標準パス ──
 BASE_DIR = Path(os.getenv('HOJOKIN_BASE_DIR', '.'))
