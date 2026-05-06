@@ -11,6 +11,7 @@ Region: us (Enterprise OCR の安定対応リージョン)
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from pathlib import Path
@@ -24,14 +25,35 @@ DOCUMENT_AI_MAX_PAGES = 30  # 同期処理上限（Enterprise OCR）
 
 
 def _get_credentials():
-    """Service Account 認証情報を構築。GOOGLE_SERVICE_ACCOUNT_JSON を優先参照。"""
+    """Service Account 認証情報を構築。
+
+    優先順:
+    1. 環境変数 GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT に JSON 文字列が直接入っていればそれを使う。
+       Streamlit Cloud / Cloud Run など、Service Account JSON ファイルを配置できない環境向け。
+       app.py 側で st.secrets['gcp_service_account'] (TOML テーブル) を JSON 文字列化して
+       この環境変数に橋渡しする想定。
+    2. 環境変数 GOOGLE_SERVICE_ACCOUNT_JSON にファイルパスが指定されていてファイルが存在すれば、
+       それを使う。ローカル開発向け（デフォルト credentials/service_account.json）。
+    """
     from google.oauth2 import service_account
+
+    sa_content = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT', '').strip()
+    if sa_content:
+        try:
+            info = json.loads(sa_content)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f'GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT が不正な JSON: {e}'
+            ) from e
+        return service_account.Credentials.from_service_account_info(info)
 
     sa_path = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON', 'credentials/service_account.json')
     if not Path(sa_path).exists():
         raise FileNotFoundError(
             f'Service Account JSON が見つかりません: {sa_path}\n'
-            f'.env の GOOGLE_SERVICE_ACCOUNT_JSON を確認してください'
+            f'ローカル: .env の GOOGLE_SERVICE_ACCOUNT_JSON を確認してください\n'
+            f'本番(Streamlit Cloud): Secrets に [gcp_service_account] セクション、'
+            f'または GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT を設定してください'
         )
     return service_account.Credentials.from_service_account_file(sa_path)
 

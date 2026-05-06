@@ -64,6 +64,20 @@ except Exception:
     # ローカル開発で secrets.toml が無い場合は無害（os.getenv は load_dotenv 経由で .env を読む）
     pass
 
+# ── gcp_service_account TOML セクションを JSON 文字列として env に橋渡し ──
+# document_ai_ocr.py など、ファイル配置できないクラウド環境で Service Account 認証を
+# 必要とするモジュールは、この環境変数を読んで from_service_account_info() を呼ぶ。
+# Drive 連携は credentials_dict 引数で直接渡す既存経路があるためここでは触らない。
+try:
+    if hasattr(st, 'secrets') and 'gcp_service_account' in st.secrets:
+        if 'GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT' not in os.environ:
+            import json as _json
+            os.environ['GOOGLE_SERVICE_ACCOUNT_JSON_CONTENT'] = _json.dumps(
+                dict(st.secrets['gcp_service_account'])
+            )
+except Exception:
+    pass
+
 # パッケージパス追加
 sys.path.insert(0, str(Path(__file__).parent))
 
