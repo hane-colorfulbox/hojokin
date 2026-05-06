@@ -327,10 +327,10 @@ def run_application_transfer(
             wage_warning = ' ⚠ 賃金台帳処理中にエラーが発生しました'
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
         consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
-        # 賃金台帳抽出結果の自動品質検証（人数妥当性・月別カバレッジ・値分布の異常）
+        # 賃金台帳抽出結果の自動品質検証（人数妥当性・月別カバレッジ・値分布・賞与未参照）
         from .wage_validator import run_all_validations
         validation_warnings = ''.join(
-            run_all_validations(hearing_data, ledger_employees)
+            run_all_validations(hearing_data, ledger_employees, extraction.financial)
         )
         # API残高切れで Phase 2 がスキップされた場合は冒頭にお知らせを追加
         api_skip_msg = ''

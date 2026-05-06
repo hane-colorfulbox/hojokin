@@ -156,14 +156,74 @@ def check_value_distribution(ledger_employees: list[dict] | None) -> str:
     )
 
 
+def check_bonus_omission(
+    ledger_employees: list[dict] | None,
+    financial,
+) -> str:
+    """賞与シート未参照を検出。
+
+    健全な賃金台帳: 月別合計 ≒ PL の (給料+雑給+賞与)（賞与込みで集計されている）
+    賞与未参照: 月別合計 ≒ PL の (給料+雑給) のみ（賞与分が抽出から抜けている）
+
+    本番で観測された23%差ケース: 賞与が別タブシートにあり、Haiku が拾えなかった。
+    PL の bonus と賃金台帳合計の関係から、この状態を機械的に検出する。
+    """
+    if not ledger_employees or not financial:
+        return ''
+
+    # 賃金台帳合計（役員除外、月別値の総和）
+    ledger_total = 0
+    for e in ledger_employees:
+        if '役員' in (e.get('employment_type') or ''):
+            continue
+        wages = e.get('monthly_wages') or []
+        ledger_total += sum(
+            w for w in wages if isinstance(w, (int, float)) and w > 0
+        )
+    if ledger_total <= 0:
+        return ''
+
+    salary = (getattr(financial, 'salary', None) or 0) + (
+        getattr(financial, 'misc_wages', None) or 0
+    )
+    bonus = getattr(financial, 'bonus', None) or 0
+
+    if salary <= 0 or bonus <= 0:
+        return ''
+    # 賞与が小さすぎる場合は検出意義薄（小数点以下%は誤検出元）
+    if bonus / salary < 0.05:
+        return ''
+
+    # 「賃金台帳合計 ≒ PL の (給料+雑給) のみ」を判定（±10% 以内で一致）
+    diff_ratio = abs(ledger_total - salary) / salary
+    if diff_ratio > 0.10:
+        return ''
+
+    return (
+        f' ⚠ 賞与未参照の可能性: 賃金台帳合計({ledger_total:,}円)が損益計算書の'
+        f'給料手当+雑給({salary:,}円)とほぼ一致し、PL に計上されている'
+        f'賞与{bonus:,}円が抽出に含まれていません。'
+        f'賃金台帳PDFに賞与シートが別タブで存在する場合、Haiku/Document AI 経路で'
+        f'拾えていない可能性があります'
+    )
+
+
 def run_all_validations(
     hearing_data: dict | None,
     ledger_employees: list[dict] | None,
+    financial=None,
 ) -> list[str]:
-    """全検証を実行し、警告文字列のリストを返す（空は除外）。"""
+    """全検証を実行し、警告文字列のリストを返す（空は除外）。
+
+    Args:
+        hearing_data: ヒアリングシート読込結果（{行番号: {label, value}}）
+        ledger_employees: 賃金台帳から抽出された従業員リスト
+        financial: PL 抽出結果（FinancialData）。賞与未参照検出に使用
+    """
     warnings = [
         check_employee_count_mismatch(hearing_data, ledger_employees),
         check_monthly_coverage(ledger_employees),
         check_value_distribution(ledger_employees),
+        check_bonus_omission(ledger_employees, financial),
     ]
     return [w for w in warnings if w]

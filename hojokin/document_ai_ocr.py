@@ -58,6 +58,39 @@ def _get_credentials():
     return service_account.Credentials.from_service_account_file(sa_path)
 
 
+def _count_pdf_pages(pdf_bytes: bytes) -> int:
+    """PyMuPDF で PDF のページ数を取得（失敗時は 0）"""
+    try:
+        import fitz  # type: ignore
+        doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        n = len(doc)
+        doc.close()
+        return n
+    except Exception:
+        return 0
+
+
+def _split_pdf_in_half(pdf_bytes: bytes) -> tuple[bytes, bytes]:
+    """PyMuPDF で PDF を前半・後半に分割。
+
+    Returns: (前半 bytes, 後半 bytes)
+    """
+    import fitz  # type: ignore
+    doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+    n = len(doc)
+    half = n // 2
+    doc1 = fitz.open()
+    doc1.insert_pdf(doc, from_page=0, to_page=half - 1)
+    buf1 = doc1.tobytes()
+    doc1.close()
+    doc2 = fitz.open()
+    doc2.insert_pdf(doc, from_page=half, to_page=n - 1)
+    buf2 = doc2.tobytes()
+    doc2.close()
+    doc.close()
+    return buf1, buf2
+
+
 def extract_pdf_via_document_ai(
     pdf_bytes: bytes,
     project_id: str,
@@ -66,6 +99,9 @@ def extract_pdf_via_document_ai(
 ) -> str:
     """Document AI (Enterprise Document OCR) で PDF をテキスト化して返す。
 
+    30ページ超の PDF は同期API 上限を超えるため、再帰的に半分ずつ分割して OCR し、
+    結果を連結する。サイズ超過は分割しても解消しないため即エラー。
+
     Args:
         pdf_bytes: PDFのバイト列
         project_id: GCP プロジェクトID（例 'hojokin-automation'）
@@ -73,8 +109,7 @@ def extract_pdf_via_document_ai(
         processor_id: Processor のID（例 'a9bacc9ec399367b'）
 
     Returns:
-        OCR で抽出されたテキスト全文（ページ区切りは含まない、Document AI が自然な
-        順序で結合したもの）。
+        OCR で抽出されたテキスト全文。分割した場合はチャンクをページ順に連結。
 
     Raises:
         ValueError: 設定不足、サイズ超過、API失敗、空テキストのいずれか。
@@ -92,6 +127,20 @@ def extract_pdf_via_document_ai(
             f'PDFサイズ {len(pdf_bytes)/1_000_000:.1f}MB が同期API上限 '
             f'{DOCUMENT_AI_MAX_BYTES/1_000_000:.0f}MB を超えています'
         )
+
+    # ── 30ページ超は事前分割（同期 API 上限回避） ──
+    pages = _count_pdf_pages(pdf_bytes)
+    if pages > DOCUMENT_AI_MAX_PAGES:
+        logger.warning(
+            f'[document_ai] {pages}ページ > 上限{DOCUMENT_AI_MAX_PAGES}ページ → 半分ずつ分割してOCR'
+        )
+        try:
+            buf1, buf2 = _split_pdf_in_half(pdf_bytes)
+        except Exception as e:
+            raise ValueError(f'PDF分割失敗: {type(e).__name__}: {e}') from e
+        text1 = extract_pdf_via_document_ai(buf1, project_id, location, processor_id)
+        text2 = extract_pdf_via_document_ai(buf2, project_id, location, processor_id)
+        return text1 + '\n' + text2
 
     from google.cloud import documentai
     from google.api_core.client_options import ClientOptions
@@ -125,12 +174,12 @@ def extract_pdf_via_document_ai(
         raise ValueError(f'Document AI 呼出失敗: {type(e).__name__}: {e}') from e
 
     text = result.document.text or ''
-    pages = len(result.document.pages) if result.document.pages else 0
+    pages_processed = len(result.document.pages) if result.document.pages else 0
     if not text.strip():
-        raise ValueError(f'Document AI が空テキスト返却 (pages={pages})')
+        raise ValueError(f'Document AI が空テキスト返却 (pages={pages_processed})')
 
     logger.warning(
-        f'[document_ai] OCR成功: pages={pages}, text={len(text)}chars '
-        f'(概算コスト: ${pages * 0.0015:.4f})'
+        f'[document_ai] OCR成功: pages={pages_processed}, text={len(text)}chars '
+        f'(概算コスト: ${pages_processed * 0.0015:.4f})'
     )
     return text
