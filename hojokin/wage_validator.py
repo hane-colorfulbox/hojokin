@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 
 # 月別値が中央値の何倍を超えたら「年間合計混入」を疑うか。
 # 健全な従業員は給与変動があっても max/median <= 2 程度。
-# 3 倍超は明らかに異常（年間合計値 ≒ 中央値 × 12 のため、12 倍前後で出ることが多い）。
-VALUE_OUTLIER_RATIO_THRESHOLD = 3.0
+# **賞与月は月給の 3〜5 倍**になるのが正常なので、閾値は 5 倍より上に取る。
+# 年間合計混入は max/median ≒ 12 になるため、5 倍超で検出すれば誤検出を避けつつ
+# 年合計混入を確実に拾える。
+VALUE_OUTLIER_RATIO_THRESHOLD = 5.0
 
 # 人数乖離の許容範囲（前期従業員数 ± この割合）
 EMPLOYEE_COUNT_TOLERANCE = 0.30
@@ -281,6 +283,46 @@ def check_similar_name_duplicates(ledger_employees: list[dict] | None) -> str:
     )
 
 
+def check_extraction_size_vs_pl(
+    ledger_employees: list[dict] | None,
+    financial,
+) -> str:
+    """PL の人件費規模に対して抽出人数が極端に少ない場合を検出。
+
+    hearing_data が無い時でも「明らかに抽出失敗」を捉えるためのフォールバック。
+    判定: PL の人件費（給料+雑給+賞与）から推定される人数(規模) に対して、
+    抽出人数が著しく少ないなら警告。
+
+    推定: 1人あたり年収の現実的下限 200万円（パート想定）として、
+    PL人件費 / 200万 を超えていない人数なら「明らかに不足」。
+    """
+    if not ledger_employees or not financial:
+        return ''
+    salary = (
+        (getattr(financial, 'salary', None) or 0)
+        + (getattr(financial, 'misc_wages', None) or 0)
+        + (getattr(financial, 'bonus', None) or 0)
+    )
+    if salary <= 0:
+        return ''
+    ledger_count = sum(
+        1 for e in ledger_employees
+        if '役員' not in (e.get('employment_type') or '')
+    )
+    # PL人件費 / 200万 = 最低限の従業員数の目安
+    min_expected = max(1, int(salary / 2_000_000))
+    if ledger_count >= min_expected:
+        return ''
+    # それでも乖離が小さい場合は警告しない（半数程度は許容）
+    if ledger_count >= min_expected // 2:
+        return ''
+    return (
+        f' ⚠ 抽出従業員数({ledger_count}名)が PL人件費規模({salary:,}円)に対して'
+        f'明らかに少ないです（最低{min_expected}名は期待される）。'
+        f'抽出処理が大量に取りこぼしている可能性があります（OCR失敗・大型PDF処理失敗等）'
+    )
+
+
 def check_employment_type_missing(ledger_employees: list[dict] | None) -> str:
     """雇用区分（employment_type）が空欄の従業員を検出。
 
@@ -325,5 +367,6 @@ def run_all_validations(
         check_bonus_omission(ledger_employees, financial),
         check_similar_name_duplicates(ledger_employees),
         check_employment_type_missing(ledger_employees),
+        check_extraction_size_vs_pl(ledger_employees, financial),
     ]
     return [w for w in warnings if w]
