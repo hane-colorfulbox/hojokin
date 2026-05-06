@@ -628,7 +628,7 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
         if ext == '.pdf' and size > PDF_LIMIT:
             warnings.append(
                 f'📦 大容量PDF: {n} ({size/1024/1024:.1f}MB) — '
-                f'AI 抽出に時間がかかる可能性があります（タイムアウト 300秒）'
+                f'AI 抽出に時間がかかる可能性があります（タイムアウト 480秒）'
             )
         if ext in ('.xlsx', '.xlsm', '.csv') and size > EXCEL_CSV_LIMIT:
             warnings.append(
@@ -643,7 +643,7 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
 
     # 賃金台帳PDF合計サイズに応じた処理時間目安（情報レベル）
     # 経験則: PDF 1MB あたり約 6 ページ、1 ページあたり 2〜3 秒の API 処理。
-    # 7MB → 約 1.5〜2分 / 10MB → 2〜3分 / 14MB → 3〜5分（タイムアウト 300秒に近づく）
+    # 7MB → 約 1.5〜2分 / 10MB → 2〜3分 / 14MB → 3〜5分（タイムアウト 480秒に近づく）
     if wage_pdf_files:
         pdf_total = sum(s for _, s in wage_pdf_files)
         if pdf_total > WAGE_PDF_NOTICE_LIMIT:
@@ -672,6 +672,147 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
             )
 
     return warnings
+
+
+def _estimate_case_scale(file_size_pairs: list[tuple[str, int]]) -> dict | None:
+    """案件規模・処理時間・APIコストを推定する。
+
+    ユーザー（坂平さん）が実行前に「これは何分かかりそう」「いくらぐらい」が
+    把握できるよう、控えめ（多め見積もり）の数値を返す。
+
+    Returns: {
+        'scale': '小型' | '中型' | '大型' | '超大型',
+        'time_label': '約1〜3分',
+        'cost_label': '約15〜25円',
+        'pre_split': bool,  # 事前分割発動の見込み
+        'pdf_total_mb': float,
+        'wage_pdf_mb': float,
+        'note': str,  # ユーザー向け補足（推奨ファイル形式等）
+    }
+    None: 推定不能（ファイルなし）
+    """
+    if not file_size_pairs:
+        return None
+
+    PRE_SPLIT_BYTES = 4 * 1024 * 1024  # 賃金台帳PDF 4MB超で事前分割発動
+
+    # 賃金台帳PDFのサイズ
+    wage_pdf_total = 0
+    pdf_total = 0
+    for name, size in file_size_pairs:
+        if not name or size is None or size <= 0:
+            continue
+        n = unicodedata.normalize('NFC', name)
+        ext = Path(n).suffix.lower()
+        if ext != '.pdf':
+            continue
+        pdf_total += size
+        if '賃金台帳' in n:
+            wage_pdf_total += size
+
+    wage_pdf_mb = wage_pdf_total / 1024 / 1024
+    pdf_total_mb = pdf_total / 1024 / 1024
+
+    # サイズクラス判定（賃金台帳PDFのサイズが支配的）
+    if wage_pdf_mb >= 10:
+        scale = '超大型'
+    elif wage_pdf_mb >= 5:
+        scale = '大型'
+    elif wage_pdf_mb >= 2:
+        scale = '中型'
+    else:
+        scale = '小型'
+
+    # 事前分割発動見込み（4MB超で発動）
+    pre_split = wage_pdf_total > PRE_SPLIT_BYTES
+
+    # ── 処理時間予想 ──
+    # 控えめ（多め見積もり）の値を出す。
+    # 内訳の経験則:
+    #   履歴事項抽出 ~30秒、PL ~30秒、納税証明 ~20秒、見積 ~20秒、AI判断 ~30秒
+    #   = 共通 ~2分 (上振れで 3分)
+    #   賃金台帳: PDF 1MB あたり 12〜25秒（経験値）
+    #   事前分割発動時: API呼出が +1回 → +1〜2分
+    common_min = 60   # 共通処理 1分（楽観）
+    common_max = 180  # 共通処理 3分（悲観）
+    wage_min = wage_pdf_mb * 12
+    wage_max = wage_pdf_mb * 25
+    if pre_split:
+        wage_max += 90  # 事前分割発動時は最大1.5分追加
+        wage_min += 30
+    total_min_sec = common_min + wage_min
+    total_max_sec = common_max + wage_max
+
+    if total_max_sec < 120:
+        time_label = f'約 30秒〜{round(total_max_sec/60)+1}分'
+    elif total_max_sec < 600:
+        time_label = f'約 {max(1, round(total_min_sec/60))}〜{round(total_max_sec/60)}分'
+    else:
+        time_label = f'約 {round(total_min_sec/60)}〜{round(total_max_sec/60)}分（PDFが大きいため長めです）'
+
+    # ── APIコスト予想（円、Sonnet 4.6 / 1USD=150円） ──
+    # 共通処理（履歴/PL/税/見積/AI判断）: ~10円
+    # 賃金台帳: PDF 1MB あたり ~3〜5円
+    # 事前分割発動時: 賃金台帳側が +50%（API呼出 +1回）
+    common_cost = 10
+    wage_cost_min = wage_pdf_mb * 3
+    wage_cost_max = wage_pdf_mb * 6
+    if pre_split:
+        wage_cost_max *= 1.6  # 分割発動でAPIコール+1回
+        wage_cost_min *= 1.3
+    total_cost_min = common_cost + wage_cost_min
+    total_cost_max = common_cost + wage_cost_max
+
+    # 多めに見積もる（最大値を1.2倍に切り上げ）
+    cost_label = f'約 {max(15, int(total_cost_min))}〜{int(total_cost_max * 1.2)}円'
+
+    # 補足メッセージ
+    notes: list[str] = []
+    if pre_split:
+        notes.append('賃金台帳PDFが大きいため、自動で分割処理します（処理時間+1〜2分）')
+    if scale in ('大型', '超大型'):
+        notes.append('Excel/CSV形式の賃金台帳があれば数十秒で完了します（坂平さんから取引先様にご相談を）')
+    if scale == '超大型':
+        notes.append('処理時間が長くなる可能性があるため、画面を閉じずにお待ちください')
+
+    return {
+        'scale': scale,
+        'time_label': time_label,
+        'cost_label': cost_label,
+        'pre_split': pre_split,
+        'pdf_total_mb': pdf_total_mb,
+        'wage_pdf_mb': wage_pdf_mb,
+        'note': ' / '.join(notes) if notes else '',
+    }
+
+
+def _render_case_scale_estimate(file_size_pairs: list[tuple[str, int]]):
+    """案件規模・処理時間・APIコスト予想を UI に表示。"""
+    est = _estimate_case_scale(file_size_pairs)
+    if not est:
+        return
+
+    scale_emoji = {'小型': '🟢', '中型': '🟡', '大型': '🟠', '超大型': '🔴'}
+    emoji = scale_emoji.get(est['scale'], '📊')
+
+    with st.expander(
+        f'{emoji} 案件規模の予想: **{est["scale"]}** — '
+        f'処理時間 {est["time_label"]} / APIコスト {est["cost_label"]}',
+        expanded=(est['scale'] in ('大型', '超大型')),
+    ):
+        st.markdown(
+            f'- **規模**: {emoji} {est["scale"]}（賃金台帳PDF {est["wage_pdf_mb"]:.1f}MB '
+            f'/ 全PDF {est["pdf_total_mb"]:.1f}MB）\n'
+            f'- **処理時間目安**: {est["time_label"]}\n'
+            f'- **APIコスト目安**: {est["cost_label"]}\n'
+            f'- **事前PDF分割**: {"✅ 発動見込み（精度向上のため）" if est["pre_split"] else "発動なし（小型のため不要）"}'
+        )
+        if est['note']:
+            for n in est['note'].split(' / '):
+                st.info(n)
+        st.caption(
+            'コスト・時間は控えめに見積もった目安です。実際は前後する可能性があります。'
+        )
 
 
 def _render_file_check_result(result, total_count):
@@ -792,6 +933,8 @@ if data_source == 'Google Drive':
                     except (TypeError, ValueError):
                         sz = 0
                     size_pairs.append((f['name'], sz))
+                # 案件規模・処理時間・APIコスト予想（実行前にユーザーに把握してもらう）
+                _render_case_scale_estimate(size_pairs)
                 for w in _check_size_warnings(size_pairs):
                     st.warning(w)
 
@@ -892,10 +1035,11 @@ else:
     if uploaded_files:
         upload_analysis = _analyze_files([f.name for f in uploaded_files], task_type)
         _render_file_check_result(upload_analysis, len(uploaded_files))
+        # 案件規模・処理時間・APIコスト予想
+        size_pairs_upload = [(f.name, f.size) for f in uploaded_files]
+        _render_case_scale_estimate(size_pairs_upload)
         # 容量・件数の事前警告（処理は続行可能、ユーザーに確認を促すだけ）
-        size_warnings = _check_size_warnings(
-            [(f.name, f.size) for f in uploaded_files]
-        )
+        size_warnings = _check_size_warnings(size_pairs_upload)
         for w in size_warnings:
             st.warning(w)
 
