@@ -165,6 +165,18 @@ def _is_pl_extraction_suspicious(d: dict) -> tuple[bool, str]:
     if total_personnel < 3_000_000 and operating > 0 and gross > 10_000_000:
         return True, f'売上総利益{gross:,}・営業利益プラスなのに人件費{total_personnel:,}'
 
+    # 条件6: 売上原価/人件費 比 > 10倍 = 建設業/製造業で原価部に労務費が大量にある典型
+    # （後藤造園の実本番ケース: 売上原価160M / 人件費12.7M = 12.6倍 で検知される）
+    # 医療法人など製造原価のない業種は売上原価そのものが小さいので発動しない
+    if cost_of_sales > 0 and total_personnel > 0:
+        ratio = cost_of_sales / total_personnel
+        if ratio > 10:
+            return True, (
+                f'売上原価/人件費 = {ratio:.1f}倍 '
+                f'（売上原価{cost_of_sales:,} / 人件費{total_personnel:,}、'
+                f'建設業/製造業の原価部労務費未合算疑い）'
+            )
+
     return False, ''
 
 
