@@ -36,9 +36,22 @@ class FileDetector:
         'cost_report': ['製造原価報告書', '原価報告書'],
         'estimate': ['見積', 'お見積'],
         'wage_report': ['賃金状況報告'],
-        'wage_ledger': ['賃金台帳'],
+        # 賃金台帳: 「給与台帳」「賃金台帳」両方を検出（給与ソフト出力で「給与台帳」表記が多い）
+        'wage_ledger': ['賃金台帳', '給与台帳'],
         'wage_data': ['支給控除一覧', '給与データ'],
     }
+
+    # 自己参照ループ防止: 過去の出力ファイル（前回ツールで生成された Excel）を入力として誤検出しないよう、
+    # ファイル名にこれらのパターンを含むファイルは検出対象から除外する。
+    # 出力ファイル命名規則 (app.py / pipeline.py を参照):
+    #   - {会社名}_{枠}_AI版.xlsx
+    #   - {会社名}_給与支給総額計算.xlsx
+    #   - {会社名}_賃金台帳一覧.xlsx
+    #   - {会社名}_加点①_結果.xlsx / 加点②_結果.xlsx
+    OUTPUT_FILE_MARKERS = (
+        '_AI版', '_給与支給総額計算', '_賃金台帳一覧',
+        '_加点①', '_加点②',
+    )
 
     # カテゴリ別の許可拡張子（小文字で比較）
     # openpyxl系のカテゴリに .csv が混入すると読み込み時に例外が出て pipeline が全滅するため、
@@ -71,6 +84,11 @@ class FileDetector:
             # 保存されていることがあり、NFCのキーワードと素直にin比較すると一致しない。
             # 正規化してから判定する。
             name_nfc = unicodedata.normalize('NFC', p.name)
+            # 自己参照ループ防止: 過去の出力ファイルは入力として扱わない
+            if any(marker in name_nfc for marker in self.OUTPUT_FILE_MARKERS):
+                self.skipped.append(('output_file', p.name, '過去の出力ファイル（処理対象外）'))
+                logger.info(f'除外: [output_file] {p.name} (過去の出力ファイル)')
+                continue
             for category, keywords in self.PATTERNS.items():
                 if any(kw in name_nfc for kw in keywords):
                     allowed = self.ALLOWED_EXTS.get(category)
