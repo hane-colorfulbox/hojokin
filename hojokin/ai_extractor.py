@@ -1348,7 +1348,43 @@ class ClaudeExtractor(BaseExtractor):
             事前分割した場合は事後分割を発動しない（既に分割済みのため）→ 最大 2回
             事前分割しなかった場合は事後分割を最大 1回発動 → 最大 2回
             → 1案件あたり API呼出は最大 2回に制限される（コスト爆増防止）
+
+        Phase 2 — PDFテキスト前処理（USE_PDF_TEXT_PREPROCESSING=true 時）:
+            画像PDFを送る前に pdfplumber/PyMuPDF でテキスト化してtsv_dataに統合し、
+            PDF送信そのものをスキップする。画像トークンが消えるため、賃金台帳のような
+            大量PDF案件で総コストを 1/5〜1/10 に圧縮できる。
+            テキスト化失敗時は自動的に画像経路にフォールバック（既存挙動維持）。
         """
+        # ── Phase 2/3: PDFテキスト前処理 (pdfplumber) / OCR (Document AI) ──
+        # どちらかのフラグONかつ初回のみ。pdf_text_extractor 側で経路判定する。
+        from .config import USE_PDF_TEXT_PREPROCESSING, USE_DOCUMENT_AI_OCR
+        if (USE_PDF_TEXT_PREPROCESSING or USE_DOCUMENT_AI_OCR) and pdf_files and _retry_depth == 0:
+            try:
+                from .pdf_text_extractor import extract_pdf_as_text
+                blocks = []
+                for fname, pdf_bytes in pdf_files:
+                    text = extract_pdf_as_text(pdf_bytes)
+                    blocks.append(f'### {fname}（PDFテキスト化済み）\n{text}')
+                pdf_as_text = '\n\n'.join(blocks)
+                if tsv_data and tsv_data.strip():
+                    tsv_data = (
+                        tsv_data
+                        + '\n\n=== 賃金台帳PDF（テキスト化済み・原本順） ===\n'
+                        + pdf_as_text
+                    )
+                else:
+                    tsv_data = '=== 賃金台帳PDF（テキスト化済み・原本順） ===\n' + pdf_as_text
+                logger.warning(
+                    f'[extract_wage_ledger] PDF→テキスト化成功: '
+                    f'{len(pdf_files)}件 → 統合TSV={len(tsv_data)}chars, 画像送信スキップ'
+                )
+                pdf_files = None  # 以降の経路は PDF なし扱い
+            except Exception as e:
+                logger.warning(
+                    f'[extract_wage_ledger] PDF→テキスト化失敗、画像経路にフォールバック: {e}'
+                )
+                # pdf_files はそのまま、既存経路へ
+
         # ── 事前分割判定（初回のみ） ──
         if _retry_depth == 0 and pdf_files:
             should_pre_split = any(

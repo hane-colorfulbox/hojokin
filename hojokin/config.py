@@ -33,6 +33,25 @@ USE_PL_PAGE_INVENTORY = os.getenv('USE_PL_PAGE_INVENTORY', 'true').strip().lower
 # ロールバックが必要な場合は false に。設定変更不要で旧動作に戻る。
 USE_PROMPT_CACHING = os.getenv('USE_PROMPT_CACHING', 'true').strip().lower() not in ('false', '0', 'off', 'no')
 
+# 賃金台帳PDFを「画像」ではなく「テキスト前処理→TSV化」してSonnetに渡すか。
+# デフォルト OFF（精度低下リスクがあるため、案件ごとの動作確認後に有効化）。
+# 効果: 画像PDF 1ページ ~2000トークンが、テキスト化で数百〜千トークンに削減。
+# 賃金台帳のような大量PDF案件で総コストを 1/5〜1/10 に圧縮可能。
+# pdfplumber が表抽出に失敗した場合は自動的に画像経路にフォールバックする。
+USE_PDF_TEXT_PREPROCESSING = os.getenv('USE_PDF_TEXT_PREPROCESSING', 'false').strip().lower() in ('true', '1', 'on', 'yes')
+
+# 賃金台帳PDFを Google Document AI (Enterprise Document OCR) でテキスト化するか。
+# デフォルト OFF。スキャン画像PDF (テキストレイヤー無し) でも OCR でテキスト化可能。
+# 効果: 画像 78,000 tokens → OCRテキスト 数千 tokens で Sonnet 入力コスト圧縮。
+# Document AI 単価: $0.0015/ページ (Enterprise OCR)、39ページで約9円。
+# 失敗時は USE_PDF_TEXT_PREPROCESSING の経路、それも失敗なら画像経路に自動フォールバック。
+USE_DOCUMENT_AI_OCR = os.getenv('USE_DOCUMENT_AI_OCR', 'false').strip().lower() in ('true', '1', 'on', 'yes')
+
+# Document AI 接続情報（USE_DOCUMENT_AI_OCR=true のときのみ参照される）
+DOCUMENT_AI_PROJECT_ID = os.getenv('DOCUMENT_AI_PROJECT_ID', '')
+DOCUMENT_AI_LOCATION = os.getenv('DOCUMENT_AI_LOCATION', 'us')
+DOCUMENT_AI_PROCESSOR_ID = os.getenv('DOCUMENT_AI_PROCESSOR_ID', '')
+
 # ── 標準パス ──
 BASE_DIR = Path(os.getenv('HOJOKIN_BASE_DIR', '.'))
 
