@@ -388,6 +388,89 @@ PROMPT_PL_COST_REPORT_FOCUS = """**出力は ```json コードブロック1個�
 ```"""
 
 
+# ============================================================
+# Phase 1: 構造分解 PL 抽出（3呼出方式）
+# ============================================================
+# 1回の視覚抽出に「ページ選別・年度選択・販管費/原価合算・検算」を背負わせると
+# Sonnet が揺らいで抽出ミスする問題への抜本対策。
+# タスクを「基本PL」「販管費部の人件費」「原価部の人件費」の3つに分解し、
+# 各プロンプトを1枚絵レベルに単純化することでブレを抑える。
+# 結果はコード側で機械的に合算（二重計上リスクなし）。
+
+PROMPT_PL_BASIC = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict。配列禁止。**
+
+この決算書類の **損益計算書本表（一番表紙のPL）** から、財務サマリ項目だけを抽出してください。
+販管費明細・製造原価報告書・貸借対照表は**無視**してください。
+
+複数年度がある場合は **直近期1期分のみ** を返してください。
+個人事業主の場合: revenue=売上(収入)金額、operating_profit=所得金額、salary系はnull。
+
+```json
+{
+  "fiscal_year_start": "yyyy-mm-dd",
+  "fiscal_year_end": "yyyy-mm-dd",
+  "revenue": 売上高,
+  "cost_of_sales": 売上原価,
+  "gross_profit": 売上総利益,
+  "operating_profit": 営業利益（損失ならマイナス）,
+  "ordinary_profit": 経常利益（損失ならマイナス）,
+  "net_profit": 当期純利益（損失ならマイナス）
+}
+```
+
+該当項目がない/読み取り不能なら null。"""
+
+
+PROMPT_PL_PL_SECTION = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict。配列禁止。**
+
+この決算書類の **販売費及び一般管理費の内訳** から、人件費系・減価償却費の項目を抽出してください。
+**製造原価報告書 / 完成工事原価報告書 / 工事原価報告書 は無視** してください（別途抽出するため）。
+
+販管費「のみ」の値を返してください。複数年度なら直近期1期のみ。
+
+```json
+{
+  "salary": 販管費の「給料手当」（円、整数）,
+  "misc_wages": 販管費の「雑給」,
+  "bonus": 販管費の「賞与」,
+  "officer_compensation": 販管費の「役員報酬」,
+  "legal_welfare": 販管費の「法定福利費」,
+  "welfare": 販管費の「福利厚生費」,
+  "depreciation": 販管費の「減価償却費」,
+  "travel_expense": 販管費の「旅費交通費」
+}
+```
+
+該当項目がなければ 0 を返してください（null ではなく 0、合算時の不確実性を避けるため）。
+販管費明細自体が無い場合は、全て 0 を返してください。"""
+
+
+PROMPT_PL_COST_SECTION = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict。配列禁止。**
+
+この決算書類のうち、**原価部 = 製造原価報告書 / 完成工事原価報告書 / 工事原価報告書 / 売上原価内訳書 / 役務原価報告書** に
+記載されている人件費系・減価償却費の項目だけを抽出してください。
+**販売費及び一般管理費は完全に無視** してください（別途抽出するため）。
+
+原価部「のみ」の値を返してください。複数年度なら直近期1期のみ。
+
+```json
+{
+  "salary": 原価部の「給料手当 + 賃金 + 労務費 + 給料」の合計,
+  "misc_wages": 原価部の「雑給」,
+  "bonus": 原価部の「賞与」,
+  "legal_welfare": 原価部の「法定福利費」,
+  "welfare": 原価部の「福利厚生費」,
+  "depreciation": 原価部の「減価償却費」,
+  "travel_expense": 原価部の「旅費交通費」
+}
+```
+
+**該当項目がなければ 0 を返してください（null ではなく 0）。**
+**原価報告書が含まれていない（販管費のみの決算書）場合は、すべて 0 を返してください。**
+
+二重計上を避けるため、販管費部の値は絶対に含めないでください。"""
+
+
 PROMPT_TAX = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict で返すこと（配列禁止）。**
 
 この納税証明書の画像から、以下をJSON形式で抽出してください。
@@ -938,6 +1021,18 @@ class ClaudeExtractor(BaseExtractor):
         )
 
     def extract_pl(self, images: list[bytes]) -> FinancialData:
+        """PL抽出。構造分解フロー（3呼出方式）と従来フロー（1呼出方式）を切替可能。
+
+        環境変数 USE_STRUCTURED_PL_EXTRACTION で切替（デフォルト: true=新方式）。
+        新方式は「基本PL」「販管費部」「原価部」の3呼出に分けて、コード側で機械的に合算。
+        Codex 指摘の「1回の視覚抽出に複数タスクを背負わせる」問題への抜本対策。
+        """
+        from .config import USE_STRUCTURED_PL_EXTRACTION
+
+        if USE_STRUCTURED_PL_EXTRACTION:
+            return self._extract_pl_structured(images)
+
+        # ── 従来フロー（保険として残す。USE_STRUCTURED_PL_EXTRACTION=false で有効） ──
         text = self._call_api(images, PROMPT_PL)
         d = self._ensure_dict(self._parse_json(text), 'extract_pl')
 
@@ -1252,6 +1347,116 @@ class ClaudeExtractor(BaseExtractor):
             )
 
         return data
+
+    def _extract_pl_structured(self, images: list[bytes]) -> FinancialData:
+        """構造分解 PL 抽出: 3つの専門呼出 → コード側で合算。
+
+        - basic: 売上・利益基本（PL本表のみフォーカス）
+        - pl_section: 販管費の人件費系（販管費明細のみフォーカス）
+        - cost_section: 原価部の人件費系（製造原価/完成工事原価/工事原価のみフォーカス）
+
+        各プロンプトを1枚絵レベルに単純化することで Sonnet の揺らぎを抑える。
+        二重計上を避けるため、各プロンプトが排他的範囲を抽出し、コード側で機械的に加算。
+        """
+        if not images:
+            return FinancialData()
+
+        # 並列で 3 呼出（API リクエストはネットワーク I/O bound なので concurrent.futures で並列化可能だが、
+        # 現状は 同期で順次実行。コスト試算で 3呼出 ≈ ¥3-9/案件）
+        basic = self._extract_pl_basic_section(images)
+        pl_part = self._extract_pl_pl_section(images)
+        cost_part = self._extract_pl_cost_section(images)
+
+        # 決算月を事業年度終了日から推定
+        fiscal_month = ''
+        end = basic.get('fiscal_year_end') or ''
+        if end and '-' in end:
+            month = end.split('-')[1]
+            month_names = {'01': '1月', '02': '2月', '03': '3月', '04': '4月',
+                           '05': '5月', '06': '6月', '07': '7月', '08': '8月',
+                           '09': '9月', '10': '10月', '11': '11月', '12': '12月'}
+            fiscal_month = month_names.get(month, '')
+
+        # 人件費系: 販管費 + 原価部 を機械的に加算（二重計上なし）
+        def _sum(key: str) -> int:
+            v_pl = pl_part.get(key) or 0
+            v_cost = cost_part.get(key) or 0
+            try:
+                return int(float(v_pl) + float(v_cost))
+            except (TypeError, ValueError):
+                return 0
+
+        result = FinancialData(
+            fiscal_year_start=basic.get('fiscal_year_start') or '',
+            fiscal_year_end=end,
+            fiscal_month=fiscal_month,
+            revenue=int(basic.get('revenue') or 0),
+            cost_of_sales=int(basic.get('cost_of_sales') or 0),
+            gross_profit=int(basic.get('gross_profit') or 0),
+            operating_profit=int(basic.get('operating_profit') or 0),
+            ordinary_profit=int(basic.get('ordinary_profit') or 0),
+            net_profit=int(basic.get('net_profit') or 0),
+            salary=_sum('salary'),
+            misc_wages=_sum('misc_wages'),
+            bonus=_sum('bonus'),
+            officer_compensation=int(pl_part.get('officer_compensation') or 0),  # 役員報酬は販管費のみ
+            legal_welfare=_sum('legal_welfare'),
+            welfare=_sum('welfare'),
+            depreciation=_sum('depreciation'),
+            travel_expense=_sum('travel_expense'),
+        )
+
+        logger.warning(
+            f'[extract_pl_structured] 統合結果: '
+            f'salary={result.salary:,} (販管費{int(pl_part.get("salary") or 0):,} + '
+            f'原価{int(cost_part.get("salary") or 0):,}) '
+            f'misc_wages={result.misc_wages:,} bonus={result.bonus:,}'
+        )
+        return result
+
+    def _extract_pl_basic_section(self, images: list[bytes]) -> dict:
+        """構造分解PL: 損益計算書本表（売上・利益サマリ）のみ抽出"""
+        try:
+            text = self._call_api(images, PROMPT_PL_BASIC)
+            d = self._ensure_dict(self._parse_json(text), 'extract_pl_basic')
+            logger.warning(
+                f'[extract_pl_basic] 売上={d.get("revenue", 0):,} '
+                f'営業利益={d.get("operating_profit", 0):,} '
+                f'経常利益={d.get("ordinary_profit", 0):,}'
+            )
+            return d
+        except Exception as e:
+            logger.warning(f'[extract_pl_basic] 失敗: {e}')
+            return {}
+
+    def _extract_pl_pl_section(self, images: list[bytes]) -> dict:
+        """構造分解PL: 販管費の人件費系のみ抽出（原価部は無視）"""
+        try:
+            text = self._call_api(images, PROMPT_PL_PL_SECTION)
+            d = self._ensure_dict(self._parse_json(text), 'extract_pl_pl_section')
+            logger.warning(
+                f'[extract_pl_pl_section] 販管費 salary={d.get("salary", 0):,} '
+                f'misc_wages={d.get("misc_wages", 0):,} bonus={d.get("bonus", 0):,} '
+                f'officer={d.get("officer_compensation", 0):,}'
+            )
+            return d
+        except Exception as e:
+            logger.warning(f'[extract_pl_pl_section] 失敗: {e}')
+            return {}
+
+    def _extract_pl_cost_section(self, images: list[bytes]) -> dict:
+        """構造分解PL: 原価部（製造原価/完成工事原価/工事原価/売上原価/役務原価）の人件費系のみ抽出"""
+        try:
+            text = self._call_api(images, PROMPT_PL_COST_SECTION)
+            d = self._ensure_dict(self._parse_json(text), 'extract_pl_cost_section')
+            logger.warning(
+                f'[extract_pl_cost_section] 原価部 salary={d.get("salary", 0):,} '
+                f'misc_wages={d.get("misc_wages", 0):,} bonus={d.get("bonus", 0):,}'
+            )
+            return d
+        except Exception as e:
+            logger.warning(f'[extract_pl_cost_section] 失敗: {e}')
+            return {}
 
     def _extract_pl_cost_report_only(self, images: list[bytes]) -> dict:
         """原価報告書（製造原価/完成工事原価/工事原価/売上原価/役務原価）のみフォーカスで再抽出。

@@ -15,6 +15,12 @@ MANAGEMENT_SHEET_ID = os.getenv('MANAGEMENT_SHEET_ID', '')
 # 賃金台帳のAI抽出を使うか。デフォルト ON。決定論パーサーに完全に戻したい場合は false に。
 USE_AI_WAGE_EXTRACTION = os.getenv('USE_AI_WAGE_EXTRACTION', 'true').strip().lower() not in ('false', '0', 'off', 'no')
 
+# PL抽出を構造分解（3呼出方式）にするか。デフォルト ON。
+# 旧方式（1呼出+異常検知+再抽出）に戻したい場合は false に。
+# 新方式は「基本PL」「販管費部」「原価部」の3呼出に分けて、コード側で機械的に合算。
+# Sonnet の応答揺らぎを構造的に防ぎ、製造原価の見落とし問題を抜本解決。
+USE_STRUCTURED_PL_EXTRACTION = os.getenv('USE_STRUCTURED_PL_EXTRACTION', 'true').strip().lower() not in ('false', '0', 'off', 'no')
+
 # ── 標準パス ──
 BASE_DIR = Path(os.getenv('HOJOKIN_BASE_DIR', '.'))
 
