@@ -312,9 +312,19 @@ def run_application_transfer(
             status.output_files.append(ledger_output.name)
 
     except Exception as e:
-        status.status = 'エラー'
-        status.message = str(e)
-        logger.error(f'エラー: {e}', exc_info=True)
+        # API残高切れは即停止（後続のAPI呼出を試行しないことで無駄なログ汚染防止）
+        from .ai_extractor import APICreditExhaustedError
+        if isinstance(e, APICreditExhaustedError):
+            status.status = 'エラー'
+            status.message = (
+                f'⛔ {e}\n'
+                f'処理を中断しました。チャージ後にもう一度実行してください。'
+            )
+            logger.error(f'API残高切れ: 処理中断 ({e})')
+        else:
+            status.status = 'エラー'
+            status.message = str(e)
+            logger.error(f'エラー: {e}', exc_info=True)
 
     return status
 
@@ -439,9 +449,18 @@ def run_wage_calculation(
         logger.info(f'給与計算完了: {output_path.name}')
 
     except Exception as e:
-        status.status = 'エラー'
-        status.message = str(e)
-        logger.error(f'エラー: {e}', exc_info=True)
+        from .ai_extractor import APICreditExhaustedError
+        if isinstance(e, APICreditExhaustedError):
+            status.status = 'エラー'
+            status.message = (
+                f'⛔ {e}\n'
+                f'処理を中断しました。チャージ後にもう一度実行してください。'
+            )
+            logger.error(f'API残高切れ: 給与計算中断 ({e})')
+        else:
+            status.status = 'エラー'
+            status.message = str(e)
+            logger.error(f'エラー: {e}', exc_info=True)
 
     return status
 
@@ -584,6 +603,10 @@ def _calc_wage_plan_from_ledger(
         return plan, employees_raw, ''
 
     except Exception as e:
+        # API残高切れは pipeline で全体停止する必要があるので再 raise
+        from .ai_extractor import APICreditExhaustedError
+        if isinstance(e, APICreditExhaustedError):
+            raise
         logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}', exc_info=True)
         return None, [], 'error'
 

@@ -1081,6 +1081,10 @@ def read_wage_ledgers_with_ai(
             pdf_files=pdf_files if pdf_files else None,
         )
     except Exception as e:
+        # API残高切れは pipeline で全体停止する必要があるので再 raise
+        from .ai_extractor import APICreditExhaustedError
+        if isinstance(e, APICreditExhaustedError):
+            raise
         logger.error(f'AI抽出例外: {e}', exc_info=True)
         return []
 

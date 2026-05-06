@@ -1564,6 +1564,7 @@ class ClaudeExtractor(BaseExtractor):
                   'latest_fiscal_year_label': str, 'latest_fiscal_year_period': str}
                  または None（失敗時）
         失敗時は呼出側で全ページ送信にフォールバック。
+        ただし APICreditExhaustedError は即 raise（残高切れで何やっても無駄）。
         """
         try:
             text = self._call_api(images, PROMPT_PL_PAGE_INVENTORY, max_tokens=4096)
@@ -1583,6 +1584,8 @@ class ClaudeExtractor(BaseExtractor):
                 f'内訳={dict(sorted(label_summary.items(), key=lambda x: -x[1]))}'
             )
             return d
+        except APICreditExhaustedError:
+            raise  # 残高切れは即停止（他の API 呼出を試行しない）
         except Exception as e:
             logger.warning(f'[pl_page_inventory] 失敗: {e} → 全ページ送信にフォールバック')
             return None
@@ -1620,7 +1623,10 @@ class ClaudeExtractor(BaseExtractor):
         return [images[i] for i in sorted(selected_indices) if 0 <= i < len(images)]
 
     def _extract_pl_basic_section(self, images: list[bytes]) -> dict:
-        """構造分解PL: 損益計算書本表（売上・利益サマリ）のみ抽出"""
+        """構造分解PL: 損益計算書本表（売上・利益サマリ）のみ抽出。
+
+        APICreditExhaustedError は再 raise（残高切れで他の呼出も無駄なため）。
+        """
         try:
             text = self._call_api(images, PROMPT_PL_BASIC)
             d = self._ensure_dict(self._parse_json(text), 'extract_pl_basic')
@@ -1630,6 +1636,8 @@ class ClaudeExtractor(BaseExtractor):
                 f'経常利益={d.get("ordinary_profit", 0):,}'
             )
             return d
+        except APICreditExhaustedError:
+            raise
         except Exception as e:
             logger.warning(f'[extract_pl_basic] 失敗: {e}')
             return {}
@@ -1645,6 +1653,8 @@ class ClaudeExtractor(BaseExtractor):
                 f'officer={d.get("officer_compensation", 0):,}'
             )
             return d
+        except APICreditExhaustedError:
+            raise
         except Exception as e:
             logger.warning(f'[extract_pl_pl_section] 失敗: {e}')
             return {}
@@ -1659,6 +1669,8 @@ class ClaudeExtractor(BaseExtractor):
                 f'misc_wages={d.get("misc_wages", 0):,} bonus={d.get("bonus", 0):,}'
             )
             return d
+        except APICreditExhaustedError:
+            raise
         except Exception as e:
             logger.warning(f'[extract_pl_cost_section] 失敗: {e}')
             return {}
@@ -1669,6 +1681,7 @@ class ClaudeExtractor(BaseExtractor):
         販管費は無視し、原価部の人件費・減価償却費だけ取る。
         異常検知 (_is_pl_extraction_suspicious) で True になった時だけ呼ばれるため、
         全案件のコストを増やさず、必要な案件だけ +1回 API。
+        APICreditExhaustedError は再 raise（残高切れで他の呼出も無駄なため）。
         """
         try:
             text = self._call_api(images, PROMPT_PL_COST_REPORT_FOCUS)
@@ -1679,6 +1692,8 @@ class ClaudeExtractor(BaseExtractor):
                 f'bonus={d.get("bonus", 0):,} depreciation={d.get("depreciation", 0):,}'
             )
             return d
+        except APICreditExhaustedError:
+            raise
         except Exception as e:
             logger.warning(f'[extract_pl_cost_report] 失敗: {e} → 原価部=0で進める')
             return {}
