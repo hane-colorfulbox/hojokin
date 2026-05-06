@@ -914,7 +914,45 @@ class ClaudeExtractor(BaseExtractor):
         self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
         self.model = model
         self.retry_callback = retry_callback
+        # 抽出関数 (_extract_pl_pl_section 等) が API エラーで失敗した際の「失敗理由」を記録。
+        # caller名 → ユーザー向けメッセージ（_format_api_error の戻り値）を蓄積し、
+        # 上位の信頼度判定（_extract_pl_structured）が confidence.reason に転記する。
+        # 結果として pipeline._build_confidence_warnings → UI「📋 確認キュー」まで届く。
+        self._extraction_errors: dict[str, str] = {}
         logger.info(f'Claude API 初期化完了 (model={model}, timeout={timeout}s)')
+
+    def _format_api_error(self, e: Exception) -> str:
+        """API例外をユーザー向けの分かりやすい日本語メッセージに変換する。
+
+        UI の「📋 確認キュー」にそのまま表示されるため、
+        「何が起きたか」+「どう対処するか」を1文で含める。
+        """
+        import anthropic
+
+        if isinstance(e, APICreditExhaustedError):
+            return 'API残高切れ — APIキー管理担当者にチャージを依頼してください'
+        if isinstance(e, anthropic.APITimeoutError):
+            return 'APIタイムアウト (480秒) — リクエストが大きすぎる可能性があります'
+        if isinstance(e, anthropic.APIConnectionError):
+            return 'ネットワーク接続エラー — しばらく待って再実行してください'
+        if isinstance(e, anthropic.APIStatusError):
+            status = getattr(e, 'status_code', None)
+            if status == 529:
+                return (
+                    'Anthropic API 過負荷 (529 Overloaded) — 一時的な状態です。'
+                    '10〜30分待ってから再実行してください'
+                )
+            if status == 429:
+                return (
+                    'Anthropic API レート制限 (429) — '
+                    'リクエストが多すぎます。少し時間を置いて再実行してください'
+                )
+            if status in (500, 502, 503, 504):
+                return f'Anthropic API サーバー障害 ({status}) — 一時的な状態です。再実行してください'
+            if status == 422:
+                return f'API入力検証エラー (422) — {e}'
+            return f'Anthropic API エラー ({status})'
+        return f'抽出エラー ({type(e).__name__}): {e}'
 
     def _messages_create_with_retry(self, *, caller: str, stats: str, **kwargs):
         """messages.create をバックオフ付きで呼び出す。
@@ -1550,6 +1588,9 @@ class ClaudeExtractor(BaseExtractor):
         if not images:
             return FinancialData()
 
+        # 前回の抽出失敗ログをクリア（同一インスタンスで複数案件処理する場合の混入防止）
+        self._extraction_errors.clear()
+
         # ── Phase 3: ページインベントリ化（4ページ以上で発動） ──
         # 3ページ以下は分類のメリットが薄いのでスキップ（コスト最適化）
         inventory: dict | None = None
@@ -1607,9 +1648,15 @@ class ClaudeExtractor(BaseExtractor):
         # 信頼度メタ: 各フィールドの source_component と level を判定
         confidence: dict = {}
 
+        # _extract_pl_*_section の except 節で記録された失敗理由を参照（529/timeout 等を識別）
+        basic_err = self._extraction_errors.get('basic', '')
+        pl_err = self._extraction_errors.get('pl_section', '')
+        cost_err = self._extraction_errors.get('cost_section', '')
+
         def _basic_conf(key: str) -> FieldConfidence:
             if basic_failed:
-                return FieldConfidence(level='low', source_component='basic', reason='basic 抽出失敗')
+                reason = basic_err or '損益計算書本表の抽出失敗'
+                return FieldConfidence(level='low', source_component='basic', reason=reason)
             if basic.get(key) is None:
                 return FieldConfidence(level='low', source_component='basic', reason=f'{key} が null')
             return FieldConfidence(level='high', source_component='basic')
@@ -1617,14 +1664,20 @@ class ClaudeExtractor(BaseExtractor):
         def _personnel_conf(key: str) -> FieldConfidence:
             """人件費系（販管費 + 原価部）の信頼度判定"""
             if pl_failed and cost_failed:
-                return FieldConfidence(level='low', source_component='unknown',
-                                        reason='販管費・原価部とも抽出失敗')
+                # 両方失敗 → 個別の理由を結合（同じ 529 でも両方表示することで「API 障害」が明確に）
+                parts = []
+                if pl_err:
+                    parts.append(f'販管費: {pl_err}')
+                if cost_err:
+                    parts.append(f'原価部: {cost_err}')
+                reason = ' / '.join(parts) if parts else '販管費・原価部とも抽出失敗'
+                return FieldConfidence(level='low', source_component='unknown', reason=reason)
             if pl_failed:
-                return FieldConfidence(level='medium', source_component='cost',
-                                        reason='販管費抽出失敗、原価部のみ')
+                reason = f'{pl_err}（原価部のみで判定）' if pl_err else '販管費抽出失敗、原価部のみ'
+                return FieldConfidence(level='medium', source_component='cost', reason=reason)
             if cost_failed:
-                return FieldConfidence(level='medium', source_component='PL',
-                                        reason='原価部抽出失敗、販管費のみ')
+                reason = f'{cost_err}（販管費のみで判定）' if cost_err else '原価部抽出失敗、販管費のみ'
+                return FieldConfidence(level='medium', source_component='PL', reason=reason)
             v_pl = pl_part.get(key) or 0
             v_cost = cost_part.get(key) or 0
             if v_pl > 0 and v_cost > 0:
@@ -1646,7 +1699,8 @@ class ClaudeExtractor(BaseExtractor):
         # 役員報酬は販管費のみ
         if pl_failed:
             confidence['officer_compensation'] = FieldConfidence(
-                level='low', source_component='PL', reason='販管費抽出失敗')
+                level='low', source_component='PL',
+                reason=pl_err or '販管費抽出失敗')
         else:
             confidence['officer_compensation'] = FieldConfidence(
                 level='high', source_component='PL')
@@ -1782,6 +1836,7 @@ class ClaudeExtractor(BaseExtractor):
         except APICreditExhaustedError:
             raise
         except Exception as e:
+            self._extraction_errors['basic'] = self._format_api_error(e)
             logger.warning(f'[extract_pl_basic] 失敗: {e}')
             return {}
 
@@ -1799,6 +1854,7 @@ class ClaudeExtractor(BaseExtractor):
         except APICreditExhaustedError:
             raise
         except Exception as e:
+            self._extraction_errors['pl_section'] = self._format_api_error(e)
             logger.warning(f'[extract_pl_pl_section] 失敗: {e}')
             return {}
 
@@ -1815,6 +1871,7 @@ class ClaudeExtractor(BaseExtractor):
         except APICreditExhaustedError:
             raise
         except Exception as e:
+            self._extraction_errors['cost_section'] = self._format_api_error(e)
             logger.warning(f'[extract_pl_cost_section] 失敗: {e}')
             return {}
 
