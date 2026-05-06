@@ -192,34 +192,50 @@ def _find_header_rows(ws) -> list[tuple[int, dict]]:
 
 
 def _parse_month(val, paid_date_val=None) -> int | None:
-    """セル値から月インデックス(0-11)を抽出。YYYYMM数値/'〇年〇月'/支給日まで対応"""
+    """セル値から月インデックス(0-11)を抽出。YYYYMM数値/'〇年〇月'/支給日まで対応。
+
+    給与ソフトの特殊コード対応:
+      YYYYMM の月部分が 21 → 7月（夏季賞与） Index 6
+      YYYYMM の月部分が 22 → 12月（冬季賞与） Index 11
+      21,22 は一部医療機関向け給与ソフト出力で観測された賞与識別子。23,24 等は仕様不明のためスキップ
+    """
+    def _month_to_idx(m: int) -> int | None:
+        if 1 <= m <= 12:
+            return m - 1
+        if m == 21:
+            return 6   # 夏季賞与 → 7月に加算
+        if m == 22:
+            return 11  # 冬季賞与 → 12月に加算
+        return None
+
     if val is not None:
-        # YYYYMM 数値（例: 202503 → 3月=index2）
+        # YYYYMM 数値（例: 202503 → 3月=index2、202521 → 7月、202522 → 12月）
         if isinstance(val, (int, float)):
             n = int(val)
             if 100000 <= n <= 999999:
                 month = n % 100
-                if 1 <= month <= 12:
-                    return month - 1
+                idx = _month_to_idx(month)
+                if idx is not None:
+                    return idx
         s = str(val)
         # '2025年3月' 等
         m = re.search(r'(\d{4})[年/\-](\d{1,2})', s)
         if m:
-            month = int(m.group(2))
-            if 1 <= month <= 12:
-                return month - 1
+            idx = _month_to_idx(int(m.group(2)))
+            if idx is not None:
+                return idx
         # '3月' 単独
         m = re.search(r'(\d{1,2})月', s)
         if m:
-            month = int(m.group(1))
-            if 1 <= month <= 12:
-                return month - 1
+            idx = _month_to_idx(int(m.group(1)))
+            if idx is not None:
+                return idx
         # 純粋なYYYYMM文字列
         m = re.fullmatch(r'\d{6}', s.strip())
         if m:
-            month = int(s.strip()) % 100
-            if 1 <= month <= 12:
-                return month - 1
+            idx = _month_to_idx(int(s.strip()) % 100)
+            if idx is not None:
+                return idx
     # フォールバック: 支給日（例: 2025/07/10）
     if paid_date_val is not None:
         s = str(paid_date_val)
@@ -1277,6 +1293,10 @@ def read_wage_ledgers(
             )
             if ai_employees:
                 ai_employees = _dedupe_employees_by_normalized_name(ai_employees)
+                # employment_type が空の従業員に「正社員」を既定値として補完
+                for emp in ai_employees:
+                    if not (emp.employment_type or '').strip():
+                        emp.employment_type = '正社員'
                 logger.info(f'賃金台帳合算結果(AI): {len(ai_employees)}名 ({len(file_paths)}ファイル)')
                 return ai_employees
             logger.warning('AI抽出が0件を返したため、決定論パーサーにフォールバック')
@@ -1329,6 +1349,16 @@ def read_wage_ledgers(
             employees.append(e)
 
     employees = _dedupe_employees_by_normalized_name(employees)
+
+    # employment_type が空の従業員に「正社員」を既定値として補完。
+    # 賃金台帳が雇用形態列を持たない / 取得できなかった場合の救済。
+    # （wage_validator.check_employment_type_missing で警告は出るが、給与計算で
+    # 「正社員」「パート」のどちらにもカウントされないと人数 0 になるため、
+    # ここで正社員にフォールバックする方が業務的には妥当）
+    for emp in employees:
+        if not (emp.employment_type or '').strip():
+            emp.employment_type = '正社員'
+
     logger.info(f'賃金台帳合算結果(決定論): {len(employees)}名 ({len(file_paths)}ファイル)')
     return employees
 
