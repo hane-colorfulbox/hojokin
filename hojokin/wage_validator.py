@@ -21,6 +21,19 @@ from statistics import median
 
 logger = logging.getLogger(__name__)
 
+
+def _emp_get(emp, key, default=None):
+    """dict / WageEmployee（dataclass）両対応のアクセサ。
+
+    pipeline からは WageEmployee オブジェクトのリストが渡されるが、
+    テスト・サブエージェント検証では dict のリストが渡されるため、両方を吸収する。
+    """
+    if emp is None:
+        return default
+    if isinstance(emp, dict):
+        return emp.get(key, default)
+    return getattr(emp, key, default)
+
 # 月別値が中央値の何倍を超えたら「年間合計混入」を疑うか。
 # 健全な従業員は給与変動があっても max/median <= 2 程度。
 # **賞与月は月給の 3〜5 倍**になるのが正常なので、閾値は 5 倍より上に取る。
@@ -33,6 +46,16 @@ EMPLOYEE_COUNT_TOLERANCE = 0.30
 
 # 月別データが「極端に少ない」と判定する non-null 月数の上限
 MIN_MONTHLY_COVERAGE = 2
+
+# 抽出人数が PL 推定人数の何割を下回ったら「明らかに不足」と判定するか。
+# 0.5 = 半数未満で警告（抽出処理が大量に取りこぼしているサイン）。
+# 半数までは「中途入退社・パートタイム比率の高さ」等で許容範囲とする。
+EXTRACTION_SIZE_VS_PL_TOLERANCE_RATIO = 0.5
+
+# PL 人件費から推定する「最低 1 人当たり年収」（円）。これより小さい1人あたり給与は
+# 現実的に存在しないため、この値で割って最低限の従業員数を推定する。
+# 200万円 = パート想定の年収下限
+EXTRACTION_SIZE_VS_PL_MIN_PER_PERSON = 2_000_000
 
 
 def _find_hearing_value(hearing_data: dict | None, *required_keywords: str) -> int | None:
@@ -68,7 +91,7 @@ def check_employee_count_mismatch(
 
     ledger_count = sum(
         1 for e in ledger_employees
-        if '役員' not in (e.get('employment_type') or '')
+        if '役員' not in (_emp_get(e, 'employment_type') or '')
     )
     if ledger_count == 0:
         return ''
@@ -103,12 +126,12 @@ def check_monthly_coverage(ledger_employees: list[dict] | None) -> str:
 
     insufficient = []
     for e in ledger_employees:
-        wages = e.get('monthly_wages') or []
+        wages = _emp_get(e, 'monthly_wages') or []
         if len(wages) != 12:
             continue
         non_null = sum(1 for w in wages if w is not None and isinstance(w, (int, float)) and w > 0)
         if non_null <= MIN_MONTHLY_COVERAGE:
-            name = e.get('name') or '不明'
+            name = _emp_get(e, 'name') or '不明'
             insufficient.append(f'{name}({non_null}ヶ月)')
 
     if len(insufficient) < 2:
@@ -133,7 +156,7 @@ def check_value_distribution(ledger_employees: list[dict] | None) -> str:
 
     suspicious = []
     for e in ledger_employees:
-        wages = e.get('monthly_wages') or []
+        wages = _emp_get(e, 'monthly_wages') or []
         non_null = [
             w for w in wages
             if w is not None and isinstance(w, (int, float)) and w > 0
@@ -144,7 +167,7 @@ def check_value_distribution(ledger_employees: list[dict] | None) -> str:
         med = median(non_null)
         mx = max(non_null)
         if med > 0 and mx / med > VALUE_OUTLIER_RATIO_THRESHOLD:
-            name = e.get('name') or '不明'
+            name = _emp_get(e, 'name') or '不明'
             suspicious.append(f'{name}(max/median={mx/med:.1f}倍)')
 
     if not suspicious:
@@ -176,9 +199,9 @@ def check_bonus_omission(
     # 賃金台帳合計（役員除外、月別値の総和）
     ledger_total = 0
     for e in ledger_employees:
-        if '役員' in (e.get('employment_type') or ''):
+        if '役員' in (_emp_get(e, 'employment_type') or ''):
             continue
-        wages = e.get('monthly_wages') or []
+        wages = _emp_get(e, 'monthly_wages') or []
         ledger_total += sum(
             w for w in wages if isinstance(w, (int, float)) and w > 0
         )
@@ -260,7 +283,7 @@ def check_similar_name_duplicates(ledger_employees: list[dict] | None) -> str:
         return False
 
     pairs = []
-    parsed = [(_surname_given(e.get('name') or ''), e.get('name') or '') for e in ledger_employees]
+    parsed = [(_surname_given(_emp_get(e, 'name') or ''), _emp_get(e, 'name') or '') for e in ledger_employees]
     n = len(parsed)
     for i in range(n):
         (sa, ga), na = parsed[i]
@@ -307,43 +330,51 @@ def check_extraction_size_vs_pl(
         return ''
     ledger_count = sum(
         1 for e in ledger_employees
-        if '役員' not in (e.get('employment_type') or '')
+        if '役員' not in (_emp_get(e, 'employment_type') or '')
     )
-    # PL人件費 / 200万 = 最低限の従業員数の目安
-    min_expected = max(1, int(salary / 2_000_000))
-    if ledger_count >= min_expected:
-        return ''
-    # それでも乖離が小さい場合は警告しない（半数程度は許容）
-    if ledger_count >= min_expected // 2:
+    # PL人件費 / EXTRACTION_SIZE_VS_PL_MIN_PER_PERSON = 最低限の従業員数の目安
+    min_expected = max(1, int(salary / EXTRACTION_SIZE_VS_PL_MIN_PER_PERSON))
+    # 半数まで許容: 「中途入退社が複数 / パート比率の高さ」等で正規分布から外れる
+    # 範囲を見越して、min_expected の半分（浮動小数）を下回って初めて警告する。
+    # 例: min_expected=5 なら threshold=2.5 → 抽出 ledger_count=2 で警告（< 2.5）、3 で許容（>= 2.5）
+    threshold = min_expected * EXTRACTION_SIZE_VS_PL_TOLERANCE_RATIO
+    if ledger_count >= threshold:
         return ''
     return (
         f' ⚠ 抽出従業員数({ledger_count}名)が PL人件費規模({salary:,}円)に対して'
-        f'明らかに少ないです（最低{min_expected}名は期待される）。'
+        f'明らかに少ないです（最低{min_expected}名期待・許容下限{threshold:.1f}名）。'
         f'抽出処理が大量に取りこぼしている可能性があります（OCR失敗・大型PDF処理失敗等）'
     )
 
 
 def check_employment_type_missing(ledger_employees: list[dict] | None) -> str:
-    """雇用区分（employment_type）が空欄の従業員を検出。
+    """雇用区分（employment_type）が空欄または「(推定)」付きの従業員を検出。
 
-    プロンプトで「明示されていない場合は『正社員』を既定値」と指示しているが、
-    指示違反した出力を検出する。
+    補完前: 空文字列。空文字列のままなら抽出失敗を示唆。
+    補完後: 「正社員(推定)」のような provenance 付き値。これも警告対象として
+    人間チェックを促す（wage_reader.py で「(推定)」を付ける運用と整合）。
     """
     if not ledger_employees:
         return ''
-    missing = [
-        e.get('name') or '(無名)'
-        for e in ledger_employees
-        if not (e.get('employment_type') or '').strip()
-    ]
-    if not missing:
+    inferred = []
+    empty = []
+    for e in ledger_employees:
+        et = (_emp_get(e, 'employment_type') or '').strip()
+        name = _emp_get(e, 'name') or '(無名)'
+        if not et:
+            empty.append(name)
+        elif '(推定)' in et or '(推測)' in et:
+            inferred.append(name)
+    flagged = empty + inferred
+    if not flagged:
         return ''
-    if len(missing) >= max(2, len(ledger_employees) // 3):
-        sample = '、'.join(missing[:3])
-        suffix = '...' if len(missing) > 3 else ''
+    if len(flagged) >= max(2, len(ledger_employees) // 3):
+        sample = '、'.join(flagged[:3])
+        suffix = '...' if len(flagged) > 3 else ''
+        kind = '空欄' if not inferred else '空欄/推定'
         return (
-            f' ⚠ 雇用区分が空欄の従業員が{len(missing)}名います: {sample}{suffix}。'
-            f'抽出時に雇用形態列を読み取れていない可能性があります'
+            f' ⚠ 雇用区分が{kind}の従業員が{len(flagged)}名います: {sample}{suffix}。'
+            f'抽出時に雇用形態列を読み取れていない可能性があり、人事担当の確認が必要です'
         )
     return ''
 

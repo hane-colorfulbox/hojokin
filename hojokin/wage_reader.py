@@ -197,46 +197,63 @@ def _parse_month(val, paid_date_val=None) -> int | None:
     給与ソフトの特殊コード対応:
       YYYYMM の月部分が 21 → 7月（夏季賞与） Index 6
       YYYYMM の月部分が 22 → 12月（冬季賞与） Index 11
-      21,22 は一部医療機関向け給与ソフト出力で観測された賞与識別子。23,24 等は仕様不明のためスキップ
+      21,22 は一部医療機関向け給与ソフト出力で観測された賞与識別子。
+
+    重要: 21/22 マッピングは給与ソフト依存のため、paid_date_val（支給日）が
+    与えられている場合はそちらを優先する。これにより「21=春賞与/22=夏賞与」のように
+    異なる慣習を持つソフトでも実支給月で正しく月マッピングできる。
     """
-    def _month_to_idx(m: int) -> int | None:
+    def _normal_month_to_idx(m: int) -> int | None:
+        """通常の月（1〜12）のみ受け付ける。21/22 は除外"""
         if 1 <= m <= 12:
             return m - 1
+        return None
+
+    def _bonus_code_to_idx(m: int) -> int | None:
+        """賞与識別コード（21/22）のフォールバック。paid_date が無いときのみ使う"""
         if m == 21:
-            return 6   # 夏季賞与 → 7月に加算
+            return 6   # 夏季賞与 → 7月に加算（給与ソフト慣習。実 paid_date があれば paid_date 優先）
         if m == 22:
             return 11  # 冬季賞与 → 12月に加算
         return None
 
+    # ── ステップ1: 通常の月（1〜12）の判定 ──
+    bonus_code: int | None = None  # 21/22 を後回しにするため記録
     if val is not None:
-        # YYYYMM 数値（例: 202503 → 3月=index2、202521 → 7月、202522 → 12月）
+        # YYYYMM 数値
         if isinstance(val, (int, float)):
             n = int(val)
             if 100000 <= n <= 999999:
                 month = n % 100
-                idx = _month_to_idx(month)
+                idx = _normal_month_to_idx(month)
                 if idx is not None:
                     return idx
+                if month in (21, 22):
+                    bonus_code = month
         s = str(val)
         # '2025年3月' 等
         m = re.search(r'(\d{4})[年/\-](\d{1,2})', s)
         if m:
-            idx = _month_to_idx(int(m.group(2)))
+            idx = _normal_month_to_idx(int(m.group(2)))
             if idx is not None:
                 return idx
         # '3月' 単独
         m = re.search(r'(\d{1,2})月', s)
         if m:
-            idx = _month_to_idx(int(m.group(1)))
+            idx = _normal_month_to_idx(int(m.group(1)))
             if idx is not None:
                 return idx
         # 純粋なYYYYMM文字列
         m = re.fullmatch(r'\d{6}', s.strip())
         if m:
-            idx = _month_to_idx(int(s.strip()) % 100)
+            month = int(s.strip()) % 100
+            idx = _normal_month_to_idx(month)
             if idx is not None:
                 return idx
-    # フォールバック: 支給日（例: 2025/07/10）
+            if month in (21, 22) and bonus_code is None:
+                bonus_code = month
+    # ── ステップ2: 支給日（paid_date）から月を取る（21/22 ボーナスコードより優先） ──
+    # paid_date があれば、それが「実際に支給された月」なので最も信頼できる
     if paid_date_val is not None:
         s = str(paid_date_val)
         m = re.search(r'\d{4}[/\-年](\d{1,2})', s)
@@ -244,6 +261,13 @@ def _parse_month(val, paid_date_val=None) -> int | None:
             month = int(m.group(1))
             if 1 <= month <= 12:
                 return month - 1
+
+    # ── ステップ3: 21/22 賞与コードのフォールバック ──
+    # paid_date が無い場合のみ、給与ソフト慣習の固定マッピングを使う
+    if bonus_code is not None:
+        idx = _bonus_code_to_idx(bonus_code)
+        if idx is not None:
+            return idx
     return None
 
 
@@ -1293,10 +1317,12 @@ def read_wage_ledgers(
             )
             if ai_employees:
                 ai_employees = _dedupe_employees_by_normalized_name(ai_employees)
-                # employment_type が空の従業員に「正社員」を既定値として補完
+                # employment_type 補完: provenance を残す形式「正社員(推定)」で埋める。
+                # check_employment_type_missing は「(推定)」を含む値もカウントするため、
+                # 補完しても警告は出る（人間チェック可能）。
                 for emp in ai_employees:
                     if not (emp.employment_type or '').strip():
-                        emp.employment_type = '正社員'
+                        emp.employment_type = '正社員(推定)'
                 logger.info(f'賃金台帳合算結果(AI): {len(ai_employees)}名 ({len(file_paths)}ファイル)')
                 return ai_employees
             logger.warning('AI抽出が0件を返したため、決定論パーサーにフォールバック')
@@ -1350,14 +1376,13 @@ def read_wage_ledgers(
 
     employees = _dedupe_employees_by_normalized_name(employees)
 
-    # employment_type が空の従業員に「正社員」を既定値として補完。
-    # 賃金台帳が雇用形態列を持たない / 取得できなかった場合の救済。
-    # （wage_validator.check_employment_type_missing で警告は出るが、給与計算で
-    # 「正社員」「パート」のどちらにもカウントされないと人数 0 になるため、
-    # ここで正社員にフォールバックする方が業務的には妥当）
+    # employment_type の補完: provenance を残す形式「正社員(推定)」で埋める。
+    # 給与計算で「正社員」「パート」のどちらにもカウントされないと人数 0 になるため、
+    # 補完は必須だが、推定値であることを明示することで wage_validator や UI が
+    # 「人間チェック対象」として扱える。
     for emp in employees:
         if not (emp.employment_type or '').strip():
-            emp.employment_type = '正社員'
+            emp.employment_type = '正社員(推定)'
 
     logger.info(f'賃金台帳合算結果(決定論): {len(employees)}名 ({len(file_paths)}ファイル)')
     return employees
