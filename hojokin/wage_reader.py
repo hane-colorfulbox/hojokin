@@ -312,15 +312,17 @@ def _parse_section_rowwise(ws, header_row: int, end_row: int,
         if not name:
             continue
 
-        # 月を特定: month_col > 先頭列YYYYMM > 支給日
+        # 月を特定: 各 _parse_month 呼出に paid_date_val を渡す。
+        # _parse_month は内部で「通常月(1-12) > paid_date > 21/22 賞与コード」の優先順序で
+        # 月を決定するため、paid_date を毎回渡しておけば 21/22 のような ambiguous な
+        # ボーナスコードに対しても、実支給月（paid_date）が優先される。
+        paid_val = ws.cell(r, col_paid).value if col_paid else None
         month_idx = None
         if col_month:
-            month_idx = _parse_month(ws.cell(r, col_month).value)
+            month_idx = _parse_month(ws.cell(r, col_month).value, paid_val)
         if month_idx is None:
             # 先頭列がYYYYMM(例: 202503)
-            month_idx = _parse_month(ws.cell(r, 1).value)
-        if month_idx is None and col_paid:
-            month_idx = _parse_month(None, ws.cell(r, col_paid).value)
+            month_idx = _parse_month(ws.cell(r, 1).value, paid_val)
         if month_idx is None:
             continue
 

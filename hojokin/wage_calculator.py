@@ -69,8 +69,14 @@ class PerCapitaWageResult:
 
 
 def _calc_fte(emp: PayrollEmployee, annual_hours: float) -> float:
-    """パート・アルバイトを正社員換算"""
-    if emp.employment_type in ('正社員', '契約社員'):
+    """パート・アルバイトを正社員換算。
+
+    employment_type の判定は contains マッチ。'正社員', '正社員(推定)',
+    '契約社員', '契約社員(臨時)' 等の provenance 付き表記を 1.0 として扱う。
+    'パート', 'アルバイト', '日雇い' 等は労働時間ベースで換算。
+    """
+    et = emp.employment_type or ''
+    if '正社員' in et or '契約社員' in et:
         return 1.0
     if not emp.monthly_hours:
         return 1.0
@@ -173,7 +179,7 @@ def create_wage_calculation(
     fte_part = 0
     if employees_detail:
         for e in employees_detail:
-            if e['type'] != '正社員' and e.get('monthly_hours', 0) > 0:
+            if '正社員' not in (e.get('type') or '') and e.get('monthly_hours', 0) > 0:
                 fte_part += e['monthly_hours'] / standard_monthly
     fte_adjusted = seishain_count + fte_part
 
@@ -338,7 +344,8 @@ def create_wage_calculation(
         for e in employees_detail:
             r += 1
             avg3 = (e.get('m1', 0) + e.get('m2', 0) + e.get('m3', 0)) / 3
-            fte = e.get('monthly_hours', 0) / standard_monthly if e['type'] != '正社員' else 1.0
+            is_seishain = '正社員' in (e.get('type') or '')
+            fte = 1.0 if is_seishain else e.get('monthly_hours', 0) / standard_monthly
 
             vals = [e['no'], e['name'], e['type'],
                     e.get('m1', 0), e.get('m2', 0), e.get('m3', 0),
@@ -347,7 +354,7 @@ def create_wage_calculation(
 
             for i, v in enumerate(vals):
                 fmt = NUMBER_FMT if i in (3, 4, 5, 6) else ('0.00' if i == 9 else None)
-                fill = FILL_GRAY if e['type'] != '正社員' else None
+                fill = None if is_seishain else FILL_GRAY
                 _cell(ws2, r, 2 + i, v, fmt=fmt, fill=fill)
 
         for i, w in enumerate([4, 5, 14, 12, 12, 12, 12, 12, 8, 13, 8, 12]):
