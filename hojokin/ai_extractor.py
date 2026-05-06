@@ -397,6 +397,43 @@ PROMPT_PL_COST_REPORT_FOCUS = """**出力は ```json コードブロック1個�
 # 各プロンプトを1枚絵レベルに単純化することでブレを抑える。
 # 結果はコード側で機械的に合算（二重計上リスクなし）。
 
+PROMPT_PL_PAGE_INVENTORY = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict。**
+
+これから提示する決算書類画像（複数ページ）について、各ページを分類してインベントリを作成してください。
+判別ポイントは「**何が記載されているか**」と「**どの事業年度の書類か**」です。
+
+各ページは以下のいずれか、または複数のラベルに該当します:
+  - "pl_basic": 損益計算書本表（売上高・売上原価・営業利益等のサマリ）
+  - "pl_section": 販管費及び一般管理費の内訳明細
+  - "cost_section": 製造原価報告書 / 完成工事原価報告書 / 工事原価報告書 / 売上原価内訳書
+  - "balance_sheet": 貸借対照表
+  - "cash_flow": キャッシュフロー計算書
+  - "stockholders_equity": 株主資本等変動計算書
+  - "notes": 個別注記表 / 注記事項
+  - "other": その他（表紙・目次・別添資料など）
+
+事業年度は「年度ラベル」として記載してください（例: "R6"="2024年度", "R7"="2025年度"）。
+直近期（最新の事業年度）は is_latest=true としてください。
+
+```json
+{
+  "pages": [
+    {"page": 1, "labels": ["pl_basic"], "fiscal_year_label": "R6", "is_latest": true},
+    {"page": 2, "labels": ["pl_section"], "fiscal_year_label": "R6", "is_latest": true},
+    {"page": 3, "labels": ["cost_section"], "fiscal_year_label": "R6", "is_latest": true},
+    {"page": 4, "labels": ["balance_sheet"], "fiscal_year_label": "R6", "is_latest": true},
+    {"page": 5, "labels": ["pl_basic"], "fiscal_year_label": "R5", "is_latest": false}
+  ],
+  "latest_fiscal_year_label": "R6",
+  "latest_fiscal_year_period": "2024-04 to 2025-03"
+}
+```
+
+ページ番号は 1 から始まる連番。labels は配列（複数該当可）。
+fiscal_year_label が判別できないページは null。
+すべてのページを必ず含めてください。"""
+
+
 PROMPT_PL_BASIC = """**出力は ```json コードブロック1個のみ。前置き禁止。単一 dict。配列禁止。**
 
 この決算書類の **損益計算書本表（一番表紙のPL）** から、財務サマリ項目だけを抽出してください。
@@ -1349,7 +1386,7 @@ class ClaudeExtractor(BaseExtractor):
         return data
 
     def _extract_pl_structured(self, images: list[bytes]) -> FinancialData:
-        """構造分解 PL 抽出: 3つの専門呼出 → コード側で合算 + 信頼度付与（Phase 1+2）。
+        """構造分解 PL 抽出: 3つの専門呼出 → コード側で合算 + 信頼度付与（Phase 1+2+3）。
 
         - basic: 売上・利益基本（PL本表のみフォーカス）
         - pl_section: 販管費の人件費系（販管費明細のみフォーカス）
@@ -1361,16 +1398,44 @@ class ClaudeExtractor(BaseExtractor):
         Phase 2: 各フィールドに FieldConfidence (level / source_component / reason) を付与。
         異常検知に引っかかったフィールドは level='low' として扱い、
         申請書転記側で「空欄+警告」として処理する。
+
+        Phase 3: PDF が3ページ超なら、まず軽量プロンプトで全ページを分類（インベントリ化）し、
+        各専門呼出には関連ページだけ送信。複数年度PDFで前年度のページが混入する問題を解消。
         """
         from .models import FieldConfidence
+        from .config import USE_PL_PAGE_INVENTORY
         if not images:
             return FinancialData()
 
+        # ── Phase 3: ページインベントリ化（4ページ以上で発動） ──
+        # 3ページ以下は分類のメリットが薄いのでスキップ（コスト最適化）
+        inventory: dict | None = None
+        if USE_PL_PAGE_INVENTORY and len(images) >= 4:
+            inventory = self._inventory_pdf_pages(images)
+
+        basic_imgs = images
+        pl_imgs = images
+        cost_imgs = images
+        if inventory:
+            basic_imgs = self._select_pages_by_labels(images, inventory, ['pl_basic'], latest_only=True)
+            pl_imgs = self._select_pages_by_labels(images, inventory, ['pl_section'], latest_only=True)
+            cost_imgs = self._select_pages_by_labels(images, inventory, ['cost_section'], latest_only=True)
+            # 該当ページがない場合は全ページにフォールバック（インベントリ判定ミスを救う）
+            if not basic_imgs: basic_imgs = images
+            if not pl_imgs: pl_imgs = images
+            if not cost_imgs: cost_imgs = images
+            logger.warning(
+                f'[extract_pl_structured] ページ絞込: '
+                f'basic={len(basic_imgs)}/{len(images)}枚, '
+                f'pl={len(pl_imgs)}/{len(images)}枚, '
+                f'cost={len(cost_imgs)}/{len(images)}枚'
+            )
+
         # 並列で 3 呼出（API リクエストはネットワーク I/O bound なので concurrent.futures で並列化可能だが、
         # 現状は 同期で順次実行。コスト試算で 3呼出 ≈ ¥3-9/案件）
-        basic = self._extract_pl_basic_section(images)
-        pl_part = self._extract_pl_pl_section(images)
-        cost_part = self._extract_pl_cost_section(images)
+        basic = self._extract_pl_basic_section(basic_imgs)
+        pl_part = self._extract_pl_pl_section(pl_imgs)
+        cost_part = self._extract_pl_cost_section(cost_imgs)
 
         # 抽出失敗判定（空dict = API例外 or JSON parse失敗）
         basic_failed = not basic
@@ -1491,6 +1556,68 @@ class ClaudeExtractor(BaseExtractor):
             f'misc_wages={result.misc_wages:,} bonus={result.bonus:,}'
         )
         return result
+
+    def _inventory_pdf_pages(self, images: list[bytes]) -> dict | None:
+        """PDF全ページを軽量プロンプトで分類（Phase 3）。
+
+        Returns: {'pages': [{page, labels, fiscal_year_label, is_latest}, ...],
+                  'latest_fiscal_year_label': str, 'latest_fiscal_year_period': str}
+                 または None（失敗時）
+        失敗時は呼出側で全ページ送信にフォールバック。
+        """
+        try:
+            text = self._call_api(images, PROMPT_PL_PAGE_INVENTORY, max_tokens=4096)
+            d = self._ensure_dict(self._parse_json(text), 'pl_page_inventory')
+            pages = d.get('pages')
+            if not isinstance(pages, list) or not pages:
+                logger.warning('[pl_page_inventory] pages が空 → インベントリスキップ')
+                return None
+            latest_year = d.get('latest_fiscal_year_label', '?')
+            page_count = len(pages)
+            label_summary: dict[str, int] = {}
+            for p in pages:
+                for lab in (p.get('labels') or []):
+                    label_summary[lab] = label_summary.get(lab, 0) + 1
+            logger.warning(
+                f'[pl_page_inventory] {page_count}ページ分類完了: 直近年度={latest_year}, '
+                f'内訳={dict(sorted(label_summary.items(), key=lambda x: -x[1]))}'
+            )
+            return d
+        except Exception as e:
+            logger.warning(f'[pl_page_inventory] 失敗: {e} → 全ページ送信にフォールバック')
+            return None
+
+    def _select_pages_by_labels(
+        self,
+        images: list[bytes],
+        inventory: dict,
+        labels: list[str],
+        latest_only: bool = True,
+    ) -> list[bytes]:
+        """インベントリ結果から指定ラベルのページだけを抽出。
+
+        Args:
+            images: 全PDFページ画像
+            inventory: _inventory_pdf_pages の結果
+            labels: 抽出したいラベル（例: ['pl_basic', 'pl_section']）
+            latest_only: True なら is_latest=True のページだけ
+        """
+        pages_meta = inventory.get('pages') or []
+        selected_indices: set[int] = set()
+        for meta in pages_meta:
+            if not isinstance(meta, dict):
+                continue
+            page_num = meta.get('page')
+            if not isinstance(page_num, int) or page_num < 1 or page_num > len(images):
+                continue
+            page_labels = meta.get('labels') or []
+            if not any(lab in page_labels for lab in labels):
+                continue
+            if latest_only and not meta.get('is_latest', True):
+                continue
+            selected_indices.add(page_num - 1)  # 1-indexed → 0-indexed
+        # 順序維持
+        return [images[i] for i in sorted(selected_indices) if 0 <= i < len(images)]
 
     def _extract_pl_basic_section(self, images: list[bytes]) -> dict:
         """構造分解PL: 損益計算書本表（売上・利益サマリ）のみ抽出"""

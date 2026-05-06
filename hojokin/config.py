@@ -21,6 +21,12 @@ USE_AI_WAGE_EXTRACTION = os.getenv('USE_AI_WAGE_EXTRACTION', 'true').strip().low
 # Sonnet の応答揺らぎを構造的に防ぎ、製造原価の見落とし問題を抜本解決。
 USE_STRUCTURED_PL_EXTRACTION = os.getenv('USE_STRUCTURED_PL_EXTRACTION', 'true').strip().lower() not in ('false', '0', 'off', 'no')
 
+# 構造分解PL抽出時に「PDFページインベントリ化」を使うか。デフォルト ON。
+# 4ページ以上のPDFで全ページを軽量プロンプトで分類（pl_basic/pl_section/cost_section/etc）してから、
+# 各専門呼出には関連ページだけを送信。複数年度PDFで前年度ページが混入する問題を解消、
+# トークン使用量も削減。3ページ以下のPDFはスキップ（コスト最適化）。
+USE_PL_PAGE_INVENTORY = os.getenv('USE_PL_PAGE_INVENTORY', 'true').strip().lower() not in ('false', '0', 'off', 'no')
+
 # ── 標準パス ──
 BASE_DIR = Path(os.getenv('HOJOKIN_BASE_DIR', '.'))
 
