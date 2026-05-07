@@ -59,8 +59,25 @@ _USE_DOCUMENT_AI_OCR_RAW = os.getenv('USE_DOCUMENT_AI_OCR', 'false').strip().low
 # 失敗時は通常の Sonnet 画像経路にフォールバック (既存挙動維持)。
 USE_OCR_HAIKU_EXTRACTION = os.getenv('USE_OCR_HAIKU_EXTRACTION', 'false').strip().lower() in ('true', '1', 'on', 'yes')
 
-# Haiku モードは Document AI 必須なので、片方ONなら Document AI も自動有効化
-USE_DOCUMENT_AI_OCR = _USE_DOCUMENT_AI_OCR_RAW or USE_OCR_HAIKU_EXTRACTION
+# 賃金台帳を「Document AI で OCR → Sonnet 4.6 で抽出」ルートに切り替えるか。
+# デフォルト OFF。Haiku 経路（USE_OCR_HAIKU_EXTRACTION）の品質ボトルネック解消版。
+# 構造理解は Sonnet、文字認識は Document AI に任せる「品質最優先」経路。
+# - Document AI でスキャン画像PDFもテキスト化
+# - Sonnet 4.6 ($3/MTok 入力) で構造化抽出 → Haiku より構造理解力が高い
+# - コストは Path B(Haiku)より高いが Path A(Sonnet画像直送)より安い
+#   画像 ~78,000 tokens → OCRテキスト 数千 tokens で Sonnet 入力コスト圧縮
+# - USE_OCR_HAIKU_EXTRACTION と同時 ON の場合は Sonnet を優先（明示的な品質モードを尊重、後段で警告ログ）
+# 失敗時は Sonnet 画像経路にフォールバック (既存挙動維持)。
+USE_DOCUMENT_AI_SONNET_EXTRACTION = os.getenv(
+    'USE_DOCUMENT_AI_SONNET_EXTRACTION', 'false'
+).strip().lower() in ('true', '1', 'on', 'yes')
+
+# Haiku/Sonnet OCRモードはどちらも Document AI 必須なので、いずれかONなら Document AI も自動有効化
+USE_DOCUMENT_AI_OCR = (
+    _USE_DOCUMENT_AI_OCR_RAW
+    or USE_OCR_HAIKU_EXTRACTION
+    or USE_DOCUMENT_AI_SONNET_EXTRACTION
+)
 
 # Document AI 接続情報（USE_DOCUMENT_AI_OCR=true のときのみ参照される）
 DOCUMENT_AI_PROJECT_ID = os.getenv('DOCUMENT_AI_PROJECT_ID', '')

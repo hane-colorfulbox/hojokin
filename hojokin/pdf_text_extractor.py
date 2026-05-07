@@ -117,7 +117,7 @@ def _try_document_ai(pdf_bytes: bytes) -> Optional[str]:
 
 
 def extract_pdf_as_text(pdf_bytes: bytes) -> str:
-    """PDFのバイト列を表構造保ったテキストに変換。
+    """PDFのバイト列を表構造保ったテキストに変換（後方互換ラッパ）。
 
     Returns:
         テキスト。空文字は返さない（その場合は ValueError を投げる）。
@@ -126,6 +126,22 @@ def extract_pdf_as_text(pdf_bytes: bytes) -> str:
         ValueError: 全経路（Document AI / pdfplumber / PyMuPDF）が失敗した場合。
             呼び出し側はこれをキャッチして画像経路にフォールバックすべき。
     """
+    text, _source = extract_pdf_as_text_with_source(pdf_bytes)
+    return text
+
+
+def extract_pdf_as_text_with_source(pdf_bytes: bytes) -> tuple[str, str]:
+    """PDFのバイト列をテキスト化し、どの経路で成功したかも返す。
+
+    Returns:
+        (text, source) のタプル。source は以下のいずれか:
+          'document_ai'  : Document AI で OCR 成功
+          'pdfplumber'   : pdfplumber で抽出成功（テキストPDF）
+          'pymupdf'      : PyMuPDF フォールバックで抽出成功
+
+    Raises:
+        ValueError: 全経路で失敗した場合。
+    """
     if not pdf_bytes:
         raise ValueError('PDFバイト列が空')
 
@@ -133,14 +149,14 @@ def extract_pdf_as_text(pdf_bytes: bytes) -> str:
     text = _try_document_ai(pdf_bytes)
     if text:
         logger.info(f'[pdf_text] Document AI 成功: {len(text)}chars')
-        return text
+        return text, 'document_ai'
 
     # 2: pdfplumber（テキストPDF向け）
     try:
         text = _extract_with_pdfplumber(pdf_bytes)
         if _is_meaningful_text(text):
             logger.info(f'[pdf_text] pdfplumber 成功: {len(text)}chars')
-            return text
+            return text, 'pdfplumber'
         logger.warning('[pdf_text] pdfplumber で本文ゼロ → PyMuPDFにフォールバック')
     except Exception as e:
         logger.warning(f'[pdf_text] pdfplumber 失敗: {e} → PyMuPDFにフォールバック')
@@ -150,7 +166,7 @@ def extract_pdf_as_text(pdf_bytes: bytes) -> str:
         text = _extract_with_pymupdf(pdf_bytes)
         if _is_meaningful_text(text):
             logger.info(f'[pdf_text] PyMuPDF 成功: {len(text)}chars')
-            return text
+            return text, 'pymupdf'
         raise ValueError('全経路で本文テキスト無し → スキャン画像PDF (要OCR)')
     except Exception as e:
         raise ValueError(f'PDFテキスト化に完全失敗: {e}') from e

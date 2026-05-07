@@ -1467,14 +1467,23 @@ class ClaudeExtractor(BaseExtractor):
         """
         # ── Phase 2/3: PDFテキスト前処理 (pdfplumber) / OCR (Document AI) ──
         # どちらかのフラグONかつ初回のみ。pdf_text_extractor 側で経路判定する。
+        # pdf_text_source: 実際にテキスト化に成功した経路名。
+        #   None     = テキスト化なし（画像経路）
+        #   'document_ai' = Document AI で OCR 成功
+        #   'pdfplumber' / 'pymupdf' = ローカルテキスト抽出成功
+        # ログラベルは実 source ベースで決定するため、フラグONだが pdfplumber に落ちた場合も
+        # 「DocAI 経由」と誤表示しない。
         from .config import USE_PDF_TEXT_PREPROCESSING, USE_DOCUMENT_AI_OCR
+        pdf_text_source: str | None = None
         if (USE_PDF_TEXT_PREPROCESSING or USE_DOCUMENT_AI_OCR) and pdf_files and _retry_depth == 0:
             try:
-                from .pdf_text_extractor import extract_pdf_as_text
+                from .pdf_text_extractor import extract_pdf_as_text_with_source
                 blocks = []
+                source_counts: dict[str, int] = {}
                 for fname, pdf_bytes in pdf_files:
-                    text = extract_pdf_as_text(pdf_bytes)
+                    text, src = extract_pdf_as_text_with_source(pdf_bytes)
                     blocks.append(f'### {fname}（PDFテキスト化済み）\n{text}')
+                    source_counts[src] = source_counts.get(src, 0) + 1
                 pdf_as_text = '\n\n'.join(blocks)
                 if tsv_data and tsv_data.strip():
                     tsv_data = (
@@ -1484,16 +1493,22 @@ class ClaudeExtractor(BaseExtractor):
                     )
                 else:
                     tsv_data = '=== 賃金台帳PDF（テキスト化済み・原本順） ===\n' + pdf_as_text
+                # 集約 source: 全PDFが同経路ならその名前、混在なら 'mixed'
+                if len(source_counts) == 1:
+                    pdf_text_source = next(iter(source_counts))
+                else:
+                    pdf_text_source = 'mixed'
                 logger.warning(
                     f'[extract_wage_ledger] PDF→テキスト化成功: '
-                    f'{len(pdf_files)}件 → 統合TSV={len(tsv_data)}chars, 画像送信スキップ'
+                    f'{len(pdf_files)}件 source={source_counts} '
+                    f'→ 統合TSV={len(tsv_data)}chars, 画像送信スキップ'
                 )
                 pdf_files = None  # 以降の経路は PDF なし扱い
             except Exception as e:
                 logger.warning(
                     f'[extract_wage_ledger] PDF→テキスト化失敗、画像経路にフォールバック: {e}'
                 )
-                # pdf_files はそのまま、既存経路へ
+                # pdf_files はそのまま、既存経路へ（pdf_text_source=None のまま）
 
         # ── 事前分割判定（初回のみ） ──
         if _retry_depth == 0 and pdf_files:
@@ -1573,16 +1588,68 @@ class ClaudeExtractor(BaseExtractor):
             content.append({'type': 'text', 'text': prompt})
             prompt_for_log = prompt
 
-        # Haiku モード: OCR テキストを Haiku 4.5 で抽出（コスト 1/3）
-        from .config import USE_OCR_HAIKU_EXTRACTION, HAIKU_MODEL
-        effective_model = HAIKU_MODEL if USE_OCR_HAIKU_EXTRACTION else self.model
+        # 抽出モデル選択（フラグ意図ベース）:
+        #   Path C: USE_DOCUMENT_AI_SONNET_EXTRACTION=true → Sonnet（品質優先・本命）
+        #   Path B: USE_OCR_HAIKU_EXTRACTION=true → Haiku 4.5（最安・構造理解は中）
+        #   両方ON時は Sonnet を優先（明示的な品質モードフラグの方が意思として強い）+ 警告ログ
+        #   どちらもOFFなら self.model（通常 Sonnet）
+        # ログ表記は実経路ベース: pdf_text_used=True なら DocAI 経由、False なら画像直送
+        from .config import (
+            USE_OCR_HAIKU_EXTRACTION,
+            USE_DOCUMENT_AI_SONNET_EXTRACTION,
+            HAIKU_MODEL,
+        )
+        if USE_DOCUMENT_AI_SONNET_EXTRACTION:
+            effective_model = self.model
+            if USE_OCR_HAIKU_EXTRACTION:
+                logger.warning(
+                    '[extract_wage_ledger] USE_DOCUMENT_AI_SONNET_EXTRACTION と '
+                    'USE_OCR_HAIKU_EXTRACTION が両方 true です。'
+                    'Sonnet（品質モード）を優先します（最安モードに戻したい場合は前者を false に）'
+                )
+        elif USE_OCR_HAIKU_EXTRACTION:
+            effective_model = HAIKU_MODEL
+        else:
+            effective_model = self.model
+
+        # 実経路ラベル: フラグ意図プレフィックス + 実 source + モデルの 3 軸で構成。
+        # プレフィックスはユーザーの「どのモードを意図したか」を示し、source は「実際にどう動いたか」を示す。
+        is_haiku = (effective_model == HAIKU_MODEL)
+        model_label = 'Haiku' if is_haiku else 'Sonnet'
+        # intent_prefix の判定順は「実際に選ばれたモデル」と整合させる:
+        # 両 true 時は Sonnet 優先 = 'C' プレフィックスにする（前段の effective_model 選択と揃える）
+        if USE_DOCUMENT_AI_SONNET_EXTRACTION:
+            intent_prefix = 'C'  # Sonnet 品質モード（本命、両 true でも優先）
+        elif USE_OCR_HAIKU_EXTRACTION:
+            intent_prefix = 'B'  # Haiku 最安モード
+        elif USE_DOCUMENT_AI_OCR:
+            # raw USE_DOCUMENT_AI_OCR=true のみ（抽出モードフラグ無し）= 暗黙的な OCR 利用
+            intent_prefix = 'C-implicit'
+        elif USE_PDF_TEXT_PREPROCESSING:
+            intent_prefix = 'TextPre'  # ローカルテキスト前処理のみ意図（DocAI なし）
+        else:
+            intent_prefix = 'A'  # 画像直送（既定）
+
+        if pdf_text_source == 'document_ai':
+            extraction_path = f'{intent_prefix}(DocAI+{model_label})'
+        elif pdf_text_source in ('pdfplumber', 'pymupdf'):
+            # フラグONだが Document AI 失敗 → ローカル抽出で成功したパターン。
+            extraction_path = f'{intent_prefix}-localText({pdf_text_source}+{model_label})'
+        elif pdf_text_source == 'mixed':
+            extraction_path = f'{intent_prefix}-mixed(text+{model_label})'
+        else:
+            # pdf_text_source is None: テキスト化が走らなかった or 失敗→画像経路
+            if intent_prefix == 'A':
+                extraction_path = f'A(image+{model_label})'
+            else:
+                extraction_path = f'{intent_prefix}-fallback(image+{model_label})'
 
         pdf_count = len(pdf_files) if pdf_files else 0
         stats = (
             f'pdfs={pdf_count}件 pdf合計={pdf_total_bytes/1_000_000:.2f}MB '
             f'prompt={len(prompt_for_log)}chars max_tokens={max_tokens} '
             f'retry={_retry_depth} cache={"on" if USE_PROMPT_CACHING else "off"} '
-            f'model={effective_model}'
+            f'model={effective_model} path={extraction_path}'
         )
         logger.warning(f'[API送信] caller=extract_wage_ledger {stats}')
         response = self._messages_create_with_retry(
@@ -1634,6 +1701,23 @@ class ClaudeExtractor(BaseExtractor):
             )
             return self._retry_extract_with_split_pdf(
                 tsv_data, fiscal_period_hint, pdf_files, partial_data=data
+            )
+
+        # PDF 不在で max_tokens 検出時は分割救済が走らない（_retry_extract_with_split_pdf が PDF 必須）。
+        # 部分データのまま返ることになるので、運用が気付けるよう強警告を出す。
+        # 経路に応じてメッセージを変えて誤解を防ぐ:
+        #   - OCR/テキスト経路 (pdf_text_source あり): PDF が text 化されて pdf_files=None になったケース
+        #   - TSV-only (pdf_text_source なし): 最初から PDF 入力が無かったケース
+        if truncated and pdf_files is None and _retry_depth == 0:
+            if pdf_text_source:
+                reason = f'OCR/テキスト経路 ({pdf_text_source})'
+            else:
+                reason = 'TSV-only 経路（PDF 入力なし）'
+            logger.warning(
+                f'[extract_wage_ledger] ⚠ max_tokens打ち切り検出 (出力{output_tokens}tok使用) '
+                f'+ {reason} のため分割救済不可。'
+                f'抽出 {len(data)}名は部分データの可能性。max_tokens 上限の引き上げ '
+                f'または手動分割を検討してください'
             )
 
         return data
