@@ -356,6 +356,13 @@ def run_application_transfer(
             wage_warning = ' ⚠ 賃金台帳の給与支給総額が0でした'
         elif wage_status == 'error':
             wage_warning = ' ⚠ 賃金台帳処理中にエラーが発生しました'
+        elif wage_status == 'fiscal_year_mismatch':
+            wage_warning = (
+                ' ⛔ 強警告: 賃金台帳の記録期間と直近事業年度がズレており、'
+                '「直近決算期の全月在籍者」から給与支給総額を自動算出できません。'
+                '申請書 R215（従業員数）・R216（給与支給総額）・R217〜R219（賃上げ計画）は '
+                '空欄のままです。手動で正しい値を入力してください'
+            )
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
         consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
         # 賃金台帳抽出結果の自動品質検証（人数妥当性・月別カバレッジ・値分布・賞与未参照）
@@ -660,6 +667,31 @@ def _calc_wage_plan_from_ledger(
         if result.total_salary <= 0:
             logger.warning('給与支給総額が0以下 → 計画値転記をスキップ')
             return None, employees_raw, 'zero_total'
+
+        # ── 直近事業年度との整合性チェック (hard stop) ─────────────────
+        # 賃金台帳に複数名の記録があるのに、12スロット全埋まり (full_year=True) と
+        # 判定される従業員が極端に少ない場合は、賃金台帳の記録期間と直近事業年度が
+        # ズレている疑いが濃い (例: 賃金台帳が決算期より新しい月だけ記録、または
+        # 決算期内に在籍した人が事実上いないなど)。
+        #
+        # 公募要領上、給与支給総額は「直近事業年度に全月分の給与支給を受けた従業員」
+        # を分子・分母とも算出対象とする。賃金台帳の任意12ヶ月で full_year を判定する
+        # 現行ロジックは決算期との整合を保証できないため、対象人数が会社規模と乖離した
+        # ケースでは自動転記をスキップし、ユーザに手動入力を促す方が安全。
+        # (将来対応: WageEmployee に YYYY-MM 情報を保持して決算期フィルタを
+        #  かけてから full_year 判定する根本修正が必要)
+        non_officer_count = sum(1 for p in payroll_list if not p.is_officer)
+        included_count = len(result.included)
+        FISCAL_MISMATCH_RATIO = 0.5  # 全月在籍者が非役員数の50%未満なら乖離扱い
+        if non_officer_count >= 2 and included_count < non_officer_count * FISCAL_MISMATCH_RATIO:
+            excluded_n = non_officer_count - included_count
+            logger.warning(
+                f'賃金台帳の全月在籍者({included_count}名)が会社規模({non_officer_count}名)と乖離。'
+                f'{excluded_n}名が中途入退社扱いで除外されました。'
+                f'賃金台帳の記録期間と直近事業年度がズレている疑いがあるため、'
+                f'R215/R216 の自動転記をスキップします（手動入力が必要）'
+            )
+            return None, employees_raw, 'fiscal_year_mismatch'
 
         # 給与支給総額ベースで年3%成長の計画値を算出
         base = result.total_salary
