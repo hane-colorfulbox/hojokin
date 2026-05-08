@@ -121,16 +121,47 @@ class FileDetector:
         return self.files.get(category, [])
 
     def get_pl_latest(self) -> Path | None:
-        """損益計算書の直近期を返す（第2期 > 第1期）"""
+        """損益計算書の直近期を返す。
+
+        判定優先順:
+          1. ファイル名に「第N期」を含む → N が最大のものを採用（事業年数の進んだ会社対応）
+          2. 同期が複数あれば、PDFsam等の部分抜粋を除外し、フル版（サイズ最大）を採用
+          3. 第N期表記が無ければ更新日時最新を採用
+             （旧実装の「ファイルサイズ最大」フォールバックは、たまたま前期決算書が最大の
+              ケースで前期/前々期の数値を抽出する誤動作を起こすため廃止。
+              実例: 第5期376KB > 第4期840KB のとき第4期が選ばれ、その「前期欄」=第3期の
+              数値が抽出されてしまった案件あり。）
+        """
         pls = self.files.get('pl', [])
         if not pls:
             return None
-        # ファイル名で「第2期」「2期」等が含まれるものを優先
-        for p in pls:
-            if '第2期' in p.name or '2期' in p.name:
-                return p
-        # なければファイルサイズが最大のもの（内容が多い=直近期の可能性）
-        return max(pls, key=lambda p: p.stat().st_size)
+
+        # 「第5期」「第10期」等から数値を取り出す
+        period_re = re.compile(r'第(\d+)期')
+
+        def period_num(p: Path) -> int:
+            m = period_re.search(p.name)
+            return int(m.group(1)) if m else -1
+
+        nums = [(p, period_num(p)) for p in pls]
+        max_num = max(n for _, n in nums)
+
+        if max_num >= 0:
+            latest = [p for p, n in nums if n == max_num]
+            if len(latest) == 1:
+                return latest[0]
+            # 同一期のPDFが複数 → 部分抜粋（PDFsam分割版・抜粋版）を除外してフル版優先
+            EXCLUDE_MARKERS = ('_PDFsam_', 'PDFsam', '部分抜粋', '抜粋')
+            full_versions = [
+                p for p in latest
+                if not any(m in p.name for m in EXCLUDE_MARKERS)
+            ]
+            if full_versions:
+                return max(full_versions, key=lambda p: p.stat().st_size)
+            return max(latest, key=lambda p: p.stat().st_size)
+
+        # 第N期表記が無い → 更新日時最新（古いPDFが偶然サイズ最大でも誤選択しない）
+        return max(pls, key=lambda p: p.stat().st_mtime)
 
     def summary(self) -> str:
         """検出結果のサマリ"""
