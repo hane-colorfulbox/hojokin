@@ -104,7 +104,7 @@ class FileDetector:
         """日本語パス対応の再帰ファイル探索"""
         try:
             for p in directory.iterdir():
-                if p.is_dir() and not p.name.startswith('.'):
+                if p.is_dir() and not p.name.startswith(('.', '_')):
                     yield from self._iter_files(p)
                 elif p.is_file():
                     yield p
@@ -361,7 +361,9 @@ def run_application_transfer(
                 ' ⛔ 強警告: 賃金台帳の記録期間と直近事業年度がズレており、'
                 '「直近決算期の全月在籍者」から給与支給総額を自動算出できません。'
                 '申請書 R215（従業員数）・R216（給与支給総額）・R217〜R219（賃上げ計画）は '
-                '空欄のままです。手動で正しい値を入力してください'
+                '空欄のままです。【確認事項】まず賃金台帳の提出期間が直近決算期12ヶ月を'
+                '含んでいるかご確認ください。含んでいなければ顧客に正しい期間の賃金台帳を'
+                '再提出してもらえないか相談のうえ、手動で値を入力してください'
             )
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
         consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
