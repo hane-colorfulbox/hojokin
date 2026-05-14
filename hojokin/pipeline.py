@@ -65,7 +65,9 @@ class FileDetector:
         'cost_report': {'.pdf'},
         'estimate':    {'.xlsx', '.xlsm', '.pdf'},
         'wage_report': {'.xlsx', '.xlsm'},
-        'wage_ledger': {'.xlsx', '.xlsm', '.pdf', '.csv'},
+        # 2026-05 方針変更: 賃金台帳の回収は Excel/CSV に集約。PDF は受け付けない
+        # （PDFで届いた場合はローカルで Excel/CSV に変換してから投入する運用）
+        'wage_ledger': {'.xlsx', '.xlsm', '.csv'},
         'wage_data':   {'.pdf'},
     }
 
@@ -357,13 +359,37 @@ def run_application_transfer(
                 '原価部の人件費（労務費・賞与等）が抽出値に含まれているかご確認ください。'
             )
 
-        # AI 生成の事業内容が文字数制限（255文字）を超えていないかチェック
+        # AI 生成の事業内容の文字数チェック（240〜255文字が望ましい）
         biz_desc_warning = ''
         biz_desc = (extraction.ai_judgment.business_description or '').strip()
-        if biz_desc and len(biz_desc) > 255:
-            biz_desc_warning = (
-                f' ⚠ 事業内容が文字数制限超過（{len(biz_desc)}文字 / 上限255文字）。'
-                f'申請書セルで切り詰められるおそれがあるため、原稿を手動短縮してください。'
+        if biz_desc:
+            n = len(biz_desc)
+            if n > 255:
+                biz_desc_warning = (
+                    f' ⚠ 事業内容が文字数制限超過（{n}文字 / 上限255文字）。'
+                    f'申請書セルで切り詰められるおそれがあるため、原稿を手動短縮してください。'
+                )
+            elif n < 240:
+                biz_desc_warning = (
+                    f' ⚠ 事業内容が短すぎます（{n}文字 / 推奨240〜255文字）。'
+                    f'4要素（現状・課題・解決策・期待効果）が十分書き切れているか、'
+                    f'ヒアリング情報を追記して厚みを出してください。'
+                )
+
+        # 賃金台帳に PDF がアップロードされた場合の警告
+        # 2026-05 方針: 賃金台帳は Excel/CSV のみ受け付ける。
+        # PDF は detector でスキップされるが、ユーザーには明示警告して再投入を促す
+        wage_pdf_warning = ''
+        wage_pdf_files = [
+            name for cat, name, _ in detector.skipped
+            if cat == 'wage_ledger' and name.lower().endswith('.pdf')
+        ]
+        if wage_pdf_files:
+            wage_pdf_warning = (
+                f' ⚠ 賃金台帳PDFは受け付け対象外です（{len(wage_pdf_files)}件: '
+                f'{", ".join(wage_pdf_files[:3])}'
+                f'{"…" if len(wage_pdf_files) > 3 else ""}）。'
+                f'ローカルでExcel/CSV形式に変換してから再投入してください。'
             )
 
         # テンプレート転記（Phase 1 + Phase 2成功分のみ。残高切れ項目は confidence='low' で空欄）
@@ -403,6 +429,10 @@ def run_application_transfer(
             )
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
         consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
+        # 会計式整合（売上 − 原価 = 粗利）— ()書きマイナス誤読の自動検出
+        pl_accounting_warning = _check_pl_accounting_consistency(extraction.financial)
+        # 業種コードのフォーマット検証（旧3桁体系・自己流コード検出）
+        industry_code_warning = _check_industry_code_format(extraction.ai_judgment)
         # 賃金台帳抽出結果の自動品質検証（人数妥当性・月別カバレッジ・値分布・賞与未参照）
         from .wage_validator import run_all_validations
         validation_warnings = ''.join(
@@ -423,6 +453,9 @@ def run_application_transfer(
             + fiscal_month_warning
             + cost_report_warning
             + biz_desc_warning
+            + wage_pdf_warning
+            + pl_accounting_warning
+            + industry_code_warning
         )
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件{wage_warning})')
 
@@ -921,6 +954,63 @@ def _build_confidence_warnings(financial) -> list[dict]:
             'reason': getattr(c, 'reason', '') or '抽出失敗',
         })
     return warnings
+
+
+def _check_industry_code_format(ai_judgment) -> str:
+    """AI 生成の業種コードが日本標準産業分類（令和5年6月改定）の細分類4桁形式かチェック。
+
+    旧分類（3桁体系）や AI の自己流コードを検出して警告する。
+    プロンプトを強化してもなお古いコードが返るケースを救う。
+    AI が int を返してきたケースも考慮（str 化 + NFKC 正規化）。
+    """
+    if ai_judgment is None:
+        return ''
+    raw = getattr(ai_judgment, 'industry_code', '')
+    if raw is None or raw == '':
+        return ''
+    # int で返ってきた場合や全角数字対策のため str 化 + NFKC 正規化
+    code = unicodedata.normalize('NFKC', str(raw)).strip()
+    if not code:
+        return ''
+    # 細分類は ASCII 半角の4桁数字（NFKC 後は全角数字 → 半角に揃う）
+    if not (len(code) == 4 and code.isascii() and code.isdigit()):
+        return (
+            f' ⚠ 業種コード「{raw}」が日本標準産業分類（令和5年6月改定）の'
+            f'細分類4桁形式と異なります。e-Statで再確認してください。'
+        )
+    return ''
+
+
+def _check_pl_accounting_consistency(financial) -> str:
+    """損益計算書の会計式整合（売上高 − 売上原価 = 売上総利益）をチェック。
+
+    AI が決算書の `(1,234)` `△1,234` `▲1,234` をマイナスとして読み損ねたケースを
+    機械的に検出する。整合 or 比較不能なら空文字列、不整合なら警告文字列を返す。
+
+    判定方針:
+      - 売上高・売上原価・売上総利益のいずれも 0/None なら判定不能（''）
+      - 売上の 0.5% 以内の差は端数誤差として許容
+      - それ以上の差は AI の符号読み違いを疑って警告
+    """
+    if financial is None:
+        return ''
+    revenue = financial.revenue or 0
+    cost = financial.cost_of_sales or 0
+    gross = financial.gross_profit or 0
+    if revenue <= 0 and cost == 0 and gross == 0:
+        return ''
+    expected_gross = revenue - cost
+    diff = abs(expected_gross - gross)
+    diff_ratio = diff / revenue if revenue > 0 else (1.0 if diff > 0 else 0.0)
+    if diff_ratio < 0.005:
+        return ''
+    return (
+        f' ⚠ 決算書の会計式不整合: '
+        f'売上高({revenue:,}) − 売上原価({cost:,}) = {expected_gross:,} のはずですが、'
+        f'抽出された売上総利益は {gross:,}（差 {diff:,}）。'
+        f'AIが括弧書きや△/▲記号をマイナスとして読み損ねている可能性があります。'
+        f'決算書PDFを目視確認してください。'
+    )
 
 
 def _check_wage_pl_consistency(

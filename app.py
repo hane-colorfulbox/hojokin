@@ -434,7 +434,10 @@ def _run_bonus_judgment(
         employees = cached_ledger_employees
     else:
         # 賃金台帳ファイルを探す（Excel/PDF/CSV すべて対応）
-        WAGE_EXTS = ('.xlsx', '.xlsm', '.xls', '.pdf', '.csv')
+        # 2026-05 方針変更: 賃金台帳の回収は xlsx/xlsm/CSV に集約。
+        # PDF・旧 .xls 形式は受け付けない（pipeline 側 ALLOWED_EXTS, wage_reader が
+        # openpyxl 前提のため .xls は読めない）
+        WAGE_EXTS = ('.xlsx', '.xlsm', '.csv')
         wage_files = [
             f for f in work_dir.iterdir()
             if f.suffix.lower() in WAGE_EXTS and not f.name.startswith('~$')
@@ -551,14 +554,14 @@ with st.sidebar:
     )
     task_type = TASK_OPTIONS[task_label]
 
-    # 決算月（任意）— ユーザー指定があれば賃金台帳の対象期間を確定 + AI推定誤りを照合
-    _FISCAL_MONTH_OPTIONS = ['（未指定・AI推定にまかせる）'] + [f'{i}月' for i in range(1, 13)]
+    # 決算月（必須）— ユーザー指定で賃金台帳の対象期間を確定 + AI推定誤りを照合
+    # 2026-05 方針: AI 推定に任せず、ユーザーが明示的に指定する運用に変更
+    _FISCAL_MONTH_OPTIONS = ['（選択してください）'] + [f'{i}月' for i in range(1, 13)]
     fiscal_month_label = st.selectbox(
-        '決算月（任意・推奨）',
+        '決算月（必須）',
         _FISCAL_MONTH_OPTIONS,
-        help='決算期末の月を指定すると、賃金台帳の対象12ヶ月が確定し、'
-             '決算書のAI誤読も照合できます。'
-             '未指定なら従来通り決算書PDFからAIが推定します。',
+        help='決算期末の月を必ず指定してください。'
+             '賃金台帳の対象12ヶ月が確定し、決算書のAI誤読も照合できます。',
     )
     fiscal_month_override: int | None = None
     if fiscal_month_label != _FISCAL_MONTH_OPTIONS[0]:
@@ -572,6 +575,15 @@ with st.sidebar:
              'AIの読み落としを防ぎ、損益計算書＋製造原価を統合して人件費を算出します。'
              '（資料に製造原価報告書PDFがあれば自動検出されるため、'
              '通常は自動検出に任せて構いません）',
+    )
+
+    # Drive 格納オプション（データソースが Drive のときのみ有効化される）
+    upload_to_drive = st.checkbox(
+        '結果を選択した Drive フォルダに格納',
+        value=False,
+        help='処理完了後、生成された Excel をローカルに残さず Drive フォルダへ自動アップロードします。'
+             'データソースが「Google Drive」かつ顧客フォルダ選択時のみ有効。'
+             '同名ファイルがあれば上書きされます。',
     )
 
     # 加点判定の場合は都道府県が必要
@@ -638,6 +650,20 @@ _REQUIRED_CATS_BY_TASK = {
     'all':         {'hearing', 'registry', 'pl'},
 }
 
+# カテゴリ別の許可拡張子（pipeline.FileDetector.ALLOWED_EXTS と整合）。
+# UI 側でも事前にこのフィルタを適用しないと、PDF だけアップした賃金台帳が
+# 「必須あり」判定で通って実行後に skipped → 給与/加点が無データで失敗する。
+_UI_ALLOWED_EXTS = {
+    'hearing':     {'.xlsx', '.xlsm'},
+    'registry':    {'.pdf'},
+    'pl':          {'.pdf'},
+    'cost_report': {'.pdf'},
+    'tax':         {'.pdf'},
+    'estimate':    {'.xlsx', '.xlsm', '.pdf'},
+    'wage_report': {'.xlsx', '.xlsm'},
+    'wage_ledger': {'.xlsx', '.xlsm', '.csv'},  # 2026-05 方針: PDF/.xls 除外
+}
+
 
 def _analyze_files(file_names, task):
     """ファイル名リストからタスク別の判別結果を計算"""
@@ -648,9 +674,17 @@ def _analyze_files(file_names, task):
     for name in file_names:
         # NFD（macOS の濁点分離形式）でも比較が通るよう NFC 化してから判定
         name_nfc = unicodedata.normalize('NFC', name)
+        ext = Path(name_nfc).suffix.lower()
         matched = False
         for cat, _, keywords in _FILE_CATEGORIES:
             if any(kw in name_nfc for kw in keywords):
+                # 拡張子が許可外なら検出に加えず unmatched 行きにする
+                # （後段で「必須あり」判定が誤って通るのを防ぐ）
+                allowed = _UI_ALLOWED_EXTS.get(cat)
+                if allowed is not None and ext not in allowed:
+                    unmatched.append(name)
+                    matched = True
+                    break
                 detected[cat].append(name)
                 matched = True
                 break
@@ -691,8 +725,9 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
     WAGE_PDF_NOTICE_LIMIT = 6 * 1024 * 1024  # 賃金台帳PDFがこのサイズ超で処理時間目安を表示
     WAGE_TOTAL_LIMIT = 25 * 1024 * 1024
     WAGE_COUNT_LIMIT = 8
-    # FileDetector.ALLOWED_EXTS['wage_ledger'] と整合させる（処理対象拡張子のみカウント）
-    WAGE_EXTS = {'.xlsx', '.xlsm', '.pdf', '.csv'}
+    # 2026-05 方針変更: 賃金台帳は Excel/CSV のみ。PDF は集計対象外
+    # FileDetector.ALLOWED_EXTS['wage_ledger'] と整合させる
+    WAGE_EXTS = {'.xlsx', '.xlsm', '.csv'}
 
     wage_keywords = ('賃金台帳',)
     wage_files = []
@@ -930,7 +965,11 @@ def _render_file_check_result(result, total_count):
 
 
 def _check_required_by_names(file_names, task):
-    """タスクに応じた必須ファイルが揃っているかチェック"""
+    """タスクに応じた必須ファイルが揃っているかチェック
+
+    拡張子フィルタ（_UI_ALLOWED_EXTS）も適用するため、賃金台帳PDFだけ
+    アップした状態では can_run を有効にしない（実行後の skipped 失敗を防ぐ）。
+    """
     if not file_names:
         return False
     # NFD（macOS の濁点分離形式）でも比較が通るよう NFC 化してから判定
@@ -939,7 +978,16 @@ def _check_required_by_names(file_names, task):
     for cat, _, keywords in _FILE_CATEGORIES:
         if cat not in required_cats:
             continue
-        if not any(any(kw in name for kw in keywords) for name in names_nfc):
+        allowed = _UI_ALLOWED_EXTS.get(cat)
+
+        def _name_ok(name: str) -> bool:
+            if not any(kw in name for kw in keywords):
+                return False
+            if allowed is None:
+                return True
+            return Path(name).suffix.lower() in allowed
+
+        if not any(_name_ok(name) for name in names_nfc):
             return False
     return True
 
@@ -1084,7 +1132,7 @@ else:
          '履歴事項全部証明書_○○様.pdf',           {'application', 'all'},          {'application', 'all'}),
         ('pl',          '損益計算書 / 決算報告書', 'PDF',       ['損益計算書', '決算報告書', '決算書'],
          '42期 決算報告書.pdf',                    {'application', 'wage', 'all'},  {'application', 'all'}),
-        ('wage_ledger', '賃金台帳',               'Excel/PDF/CSV', ['賃金台帳'],
+        ('wage_ledger', '賃金台帳',               'Excel/CSV',     ['賃金台帳'],
          '賃金台帳_2025年度.xlsx',                 {'wage', 'bonus'},              {'wage', 'bonus'}),
         ('cost_report', '製造原価報告書',          'PDF',       ['製造原価報告書', '原価報告書'],
          '製造原価報告書.pdf',                     {'application', 'wage', 'all'},  set()),
@@ -1195,9 +1243,14 @@ else:
 can_run = bool(company_name) and has_data and required_ok
 if task_type == 'bonus':
     can_run = can_run and bool(prefecture)
+# 決算月の指定を必須化（2026-05 方針）
+# 賃金台帳の対象12ヶ月を確定するためにユーザー指定が必要
+can_run = can_run and (fiscal_month_override is not None)
 
 if not company_name:
     st.warning('⬅️ サイドバーで会社名を入力してください')
+elif fiscal_month_override is None:
+    st.warning('⬅️ サイドバーで決算月を選択してください（賃金台帳の対象期間を確定するため必須）')
 elif task_type == 'bonus' and not prefecture:
     st.warning('⬅️ サイドバーで事業場の都道府県を選択してください')
 elif data_source == 'Google Drive' and not has_drive_files:
@@ -1281,8 +1334,46 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 has_cost_report_hint=has_cost_report_hint,
             )
 
+        # Drive 格納（オプション）— Drive ソース選択 + チェックON + 格納先フォルダ確定時のみ
+        drive_upload_links: dict[str, str] = {}
+        drive_upload_errors: list[str] = []
+        if (
+            upload_to_drive
+            and data_source == 'Google Drive'
+            and drive_folder_id
+        ):
+            try:
+                with st.spinner('Driveへアップロード中...'):
+                    client = _get_drive_client()
+                    # work_dir 内の出力ファイル（*.xlsx）を全てアップロード
+                    for task_name, result in results.items():
+                        out = result.get('output_path')
+                        if out and out.exists():
+                            res = client.upload_file(out, drive_folder_id)
+                            drive_upload_links[out.name] = res.get('webViewLink', '')
+                        for fname, fpath in result.get('extra_files', {}).items():
+                            if fpath.exists():
+                                res = client.upload_file(fpath, drive_folder_id)
+                                drive_upload_links[fname] = res.get('webViewLink', '')
+                        for key, fpath in result.get('output_files', {}).items():
+                            if isinstance(fpath, Path) and fpath.exists():
+                                res = client.upload_file(fpath, drive_folder_id)
+                                drive_upload_links[fpath.name] = res.get('webViewLink', '')
+                st.success(
+                    f'✅ Driveへ {len(drive_upload_links)} ファイルを格納しました'
+                )
+            except Exception as e:
+                drive_upload_errors.append(str(e))
+                logger.warning(f'Driveアップロード失敗: {e}', exc_info=True)
+                st.warning(
+                    f'⚠ Driveアップロードに失敗しました: {e}\n'
+                    'ローカルダウンロードボタンから結果を取得できます。'
+                )
+
         # 結果をsession_stateに保存（画面再描画後も残る）
         session_results = {}
+        # Drive アップロード結果を全タスク共通で session_state に保存
+        st.session_state['drive_upload_links'] = drive_upload_links
         for task_name, result in results.items():
             entry = {
                 'status': result['status'],
@@ -1371,6 +1462,9 @@ if 'last_results' in st.session_state:
             else:
                 st.success(f'{task_display}: 完了 — {result["message"]}')
 
+            # Drive 格納時のリンクを表示（ダウンロードボタンと併設）
+            drive_links = st.session_state.get('drive_upload_links') or {}
+
             if result['file_data']:
                 st.download_button(
                     label=f'⬇️ {result["file_name"]} をダウンロード',
@@ -1380,6 +1474,10 @@ if 'last_results' in st.session_state:
                     use_container_width=True,
                     key=f'download_{task_name}',
                 )
+                if result['file_name'] in drive_links and drive_links[result['file_name']]:
+                    st.markdown(
+                        f'📂 Drive で開く: [{result["file_name"]}]({drive_links[result["file_name"]]})'
+                    )
 
             # 追加ファイル（賃金台帳一覧等）
             for fname, fdata in result.get('extra_files', {}).items():
@@ -1391,6 +1489,8 @@ if 'last_results' in st.session_state:
                     use_container_width=True,
                     key=f'download_extra_{fname}',
                 )
+                if fname in drive_links and drive_links[fname]:
+                    st.markdown(f'📂 Drive で開く: [{fname}]({drive_links[fname]})')
 
             # 加点判定の結果表示
             if task_name == 'bonus' and result.get('bonus_result'):

@@ -12,11 +12,11 @@ from pathlib import Path
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+SCOPES = ['https://www.googleapis.com/auth/drive']  # アップロード機能のため read/write 必要
 
 
 class GoogleFormatNotSupportedError(ValueError):
@@ -218,3 +218,76 @@ class DriveClient:
             if customer_name in folder['name']:
                 return folder
         return None
+
+    def upload_file(
+        self,
+        local_path: Path,
+        parent_folder_id: str,
+        mime_type: str | None = None,
+        overwrite: bool = True,
+    ) -> dict:
+        """ローカルファイルを Drive にアップロード。
+
+        同名ファイルが既にあれば overwrite=True なら上書き、False なら新規追加。
+        サービスアカウント運用前提（共有ドライブまたは「編集者」権限が必要）。
+
+        Args:
+            local_path: アップロード元のローカルパス
+            parent_folder_id: アップロード先 Drive フォルダ ID
+            mime_type: 明示指定時のみ使う。None なら拡張子から自動推定
+            overwrite: True なら同名ファイルを update、False なら create
+
+        Returns:
+            アップロード結果（id, name, webViewLink を含む dict）
+        """
+        local_path = Path(local_path)
+        if not local_path.exists():
+            raise FileNotFoundError(f'アップロード元ファイルが存在しません: {local_path}')
+
+        if mime_type is None:
+            ext = local_path.suffix.lower()
+            mime_type = {
+                '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                '.xls':  'application/vnd.ms-excel',
+                '.csv':  'text/csv',
+                '.pdf':  'application/pdf',
+            }.get(ext, 'application/octet-stream')
+
+        existing_id: str | None = None
+        if overwrite:
+            # 同名ファイル検索（ゴミ箱外、同フォルダ内）
+            safe_name = local_path.name.replace("'", "\\'")
+            query = (
+                f"name='{safe_name}' "
+                f"and '{parent_folder_id}' in parents "
+                f"and trashed=false"
+            )
+            res = self.service.files().list(
+                q=query, fields='files(id, name)', pageSize=1,
+                supportsAllDrives=True, includeItemsFromAllDrives=True,
+            ).execute()
+            files = res.get('files', [])
+            if files:
+                existing_id = files[0]['id']
+
+        media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=False)
+
+        if existing_id:
+            updated = self.service.files().update(
+                fileId=existing_id,
+                media_body=media,
+                fields='id, name, webViewLink',
+                supportsAllDrives=True,
+            ).execute()
+            logger.info(f'Drive更新: {updated.get("name")} (id={updated.get("id")})')
+            return updated
+
+        metadata = {'name': local_path.name, 'parents': [parent_folder_id]}
+        created = self.service.files().create(
+            body=metadata,
+            media_body=media,
+            fields='id, name, webViewLink',
+            supportsAllDrives=True,
+        ).execute()
+        logger.info(f'Drive作成: {created.get("name")} (id={created.get("id")})')
+        return created
