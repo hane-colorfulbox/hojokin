@@ -75,6 +75,8 @@ class WageEmployee:
     monthly_hours: list[float | None] = field(
         default_factory=lambda: [None] * 12
     )
+    # データソース（抽出根拠の元ファイル名）。複数ファイル統合時は '統合(Nファイル)'
+    source_file: str = ''
 
     @property
     def is_full_year(self) -> bool:
@@ -1247,6 +1249,17 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
     valid_r = [r for r in new_rates if r is not None and r > 0]
     avg_r = sum(valid_r) / len(valid_r) if valid_r else 0.0
 
+    # source_file の統合: 両方あれば連結（重複排除）、片方なら採用
+    sa = (a.source_file or '').strip()
+    sb = (b.source_file or '').strip()
+    if sa and sb:
+        if sa == sb:
+            merged_source = sa
+        else:
+            merged_source = f'{sa} + {sb}'
+    else:
+        merged_source = sa or sb
+
     return WageEmployee(
         no=a.no,
         name=a.name,
@@ -1256,6 +1269,7 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
         monthly_wages=new_wages,
         monthly_hourly_rates=new_rates,
         monthly_hours=new_hours,
+        source_file=merged_source,
     )
 
 
@@ -1325,6 +1339,10 @@ def read_wage_ledgers(
                 for emp in ai_employees:
                     if not (emp.employment_type or '').strip():
                         emp.employment_type = '正社員(推定)'
+                # データソース（抽出根拠ファイル名）の補完。
+                # AI 経路は複数 PDF をまとめて投入するため、ファイル単位の分離は困難。
+                # ファイル名一覧として記録（全員同じ値になる）
+                _assign_source_files(ai_employees, file_paths)
                 logger.info(f'賃金台帳合算結果(AI): {len(ai_employees)}名 ({len(file_paths)}ファイル)')
                 return ai_employees
             logger.warning('AI抽出が0件を返したため、決定論パーサーにフォールバック')
@@ -1374,6 +1392,9 @@ def read_wage_ledgers(
         logger.info(f'賃金台帳読み取り(個人台帳型): {path.name} → {len(extra)}名')
         for e in extra:
             e.no = len(employees) + 1
+            # 個人台帳型は 1ファイル=1〜数名なので、source_file を直接記録
+            if not e.source_file:
+                e.source_file = path.name
             employees.append(e)
 
     employees = _dedupe_employees_by_normalized_name(employees)
@@ -1386,13 +1407,55 @@ def read_wage_ledgers(
         if not (emp.employment_type or '').strip():
             emp.employment_type = '正社員(推定)'
 
+    # データソース（抽出根拠ファイル名）の補完
+    # 統合読み込み（_read_flexible / _read_csv）由来の従業員は path 単位で分離できないので
+    # 「統合」表記。個人台帳型は _read_individual_ledger 内で既に設定済み。
+    _assign_source_files(employees, file_paths)
+
     logger.info(f'賃金台帳合算結果(決定論): {len(employees)}名 ({len(file_paths)}ファイル)')
     return employees
+
+
+def _assign_source_files(
+    employees: list[WageEmployee],
+    file_paths: list[Path],
+) -> None:
+    """source_file 未設定の従業員に既定値を割り当てる。
+
+    - 1ファイルのみ: そのファイル名
+    - 複数ファイル: '統合(Nファイル)' とファイル名先頭3つを併記
+    """
+    if not employees or not file_paths:
+        return
+    if len(file_paths) == 1:
+        default = file_paths[0].name
+    else:
+        # 多すぎる場合は先頭3つだけ列挙（セル幅対策）
+        names = [p.name for p in file_paths[:3]]
+        suffix = f' 他{len(file_paths) - 3}件' if len(file_paths) > 3 else ''
+        default = f'統合({len(file_paths)}ファイル): ' + ', '.join(names) + suffix
+    for emp in employees:
+        if not emp.source_file:
+            emp.source_file = default
 
 
 # ============================================================
 # 賃金台帳一覧Excel出力（チェック用）
 # ============================================================
+
+def _is_excluded_from_wage_total(emp: WageEmployee) -> bool:
+    """給与支給総額（R216）の集計から除外される従業員か判定。
+
+    除外条件（公募要領準拠）:
+      - 役員（employment_type に「役員」を含む）
+      - 基準年度に全月分の給与支給を受けていない（中途入退社等）
+    """
+    if '役員' in (emp.employment_type or ''):
+        return True
+    if not emp.is_full_year:
+        return True
+    return False
+
 
 def export_wage_ledger_summary(
     employees: list[WageEmployee],
@@ -1405,6 +1468,9 @@ def export_wage_ledger_summary(
     出力内容:
       左ブロック  : 月別課税対象額（12か月）+ 年間合計賃金
       右ブロック  : 月別労働時間（12か月）+ 年間合計時間 + 月平均労働時間
+      右端       : データソース（抽出根拠の元ファイル名）
+
+    集計対象外（役員 or 非全月在籍）の行は薄いグレーで塗り、目視で除外行を判別可能にする。
     """
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
     from openpyxl.utils import get_column_letter
@@ -1416,6 +1482,9 @@ def export_wage_ledger_summary(
     # スタイル定義
     header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
     group_fill = PatternFill(start_color='8FAADC', end_color='8FAADC', fill_type='solid')
+    excluded_fill = PatternFill(  # 集計対象外行（役員 / 非全月在籍）のグレー塗り
+        start_color='E7E6E6', end_color='E7E6E6', fill_type='solid',
+    )
     header_font_white = Font(bold=True, size=10, color='FFFFFF')
     number_fmt = '#,##0'
     hours_fmt = '#,##0.0'
@@ -1431,18 +1500,21 @@ def export_wage_ledger_summary(
     if company_name:
         title = f'{company_name} — {title}'
     ws.cell(row=1, column=1, value=title).font = Font(bold=True, size=12)
-    ws.cell(row=2, column=1, value='※この一覧は賃金台帳から機械的に読み取ったデータです（AI生成ではありません）')
+    ws.cell(row=2, column=1, value='※この一覧は賃金台帳から機械的に読み取ったデータです（AI生成ではありません）。'
+                                    'グレー行は給与支給総額の集計対象外（役員 or 非全月在籍）です')
     ws.cell(row=2, column=1).font = Font(size=9, color='666666')
 
     # 列レイアウト
     # 1: No, 2: 従業員名, 3: 雇用形態,
     # 4-15: 1月〜12月 賃金, 16: 年間合計賃金,
-    # 17-28: 1月〜12月 時間, 29: 年間合計時間, 30: 月平均労働時間
+    # 17-28: 1月〜12月 時間, 29: 年間合計時間, 30: 月平均労働時間,
+    # 31: データソース
     wage_start = 4
     wage_total_col = wage_start + 12  # 16
     hours_start = wage_total_col + 1  # 17
     hours_total_col = hours_start + 12  # 29
     avg_hours_col = hours_total_col + 1  # 30
+    source_col = avg_hours_col + 1  # 31
 
     # グループヘッダー（4行目）
     group_row = 4
@@ -1465,6 +1537,7 @@ def export_wage_ledger_summary(
         ['No', '従業員名', '雇用形態']
         + MONTH_NAMES + ['年間合計']
         + MONTH_NAMES + ['年間合計', '月平均']
+        + ['データソース']
     )
     for c, h in enumerate(headers, 1):
         cell = ws.cell(row=header_row, column=c, value=h)
@@ -1476,6 +1549,8 @@ def export_wage_ledger_summary(
     # データ行
     for i, emp in enumerate(employees):
         r = header_row + 1 + i
+        is_excluded = _is_excluded_from_wage_total(emp)
+
         ws.cell(row=r, column=1, value=emp.no).border = thin_border
         ws.cell(row=r, column=2, value=emp.name).border = thin_border
         ws.cell(row=r, column=3, value=emp.employment_type).border = thin_border
@@ -1526,6 +1601,17 @@ def export_wage_ledger_summary(
         avg_hours_cell.number_format = hours_fmt
         avg_hours_cell.border = thin_border
 
+        # データソース（抽出根拠の元ファイル名）
+        source_cell = ws.cell(row=r, column=source_col, value=emp.source_file)
+        source_cell.border = thin_border
+        source_cell.font = Font(size=9, color='666666')
+        source_cell.alignment = Alignment(horizontal='left', vertical='center')
+
+        # 集計対象外行（役員 or 非全月在籍）はグレーに塗る
+        if is_excluded:
+            for c in range(1, source_col + 1):
+                ws.cell(row=r, column=c).fill = excluded_fill
+
     # 列幅調整
     ws.column_dimensions['A'].width = 5
     ws.column_dimensions['B'].width = 14
@@ -1535,6 +1621,7 @@ def export_wage_ledger_summary(
     ws.column_dimensions[get_column_letter(wage_total_col)].width = 13
     ws.column_dimensions[get_column_letter(hours_total_col)].width = 13
     ws.column_dimensions[get_column_letter(avg_hours_col)].width = 11
+    ws.column_dimensions[get_column_letter(source_col)].width = 40
 
     wb.save(str(output_path))
     wb.close()

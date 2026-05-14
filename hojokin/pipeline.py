@@ -186,6 +186,8 @@ def run_application_transfer(
     template_type: str,
     output_path: Path,
     extractor: BaseExtractor | None = None,
+    fiscal_month_override: int | None = None,
+    has_cost_report_hint: bool = False,
 ) -> ProcessingStatus:
     """
     タスク1: 申請書転記の実行
@@ -196,6 +198,9 @@ def run_application_transfer(
         template_type: '通常枠_2026' or 'インボイス枠_2026'
         output_path: 出力ファイルパス
         extractor: AI抽出器（省略時は自動選択）
+        fiscal_month_override: ユーザー指定の決算月（1〜12）。指定時はAI推定より優先
+        has_cost_report_hint: ユーザーが「製造原価報告書あり」とチェック済みなら True。
+            自動検出されなかった場合の警告強化に使う
     """
     status = ProcessingStatus(
         company_name=resource_folder.name,
@@ -267,6 +272,9 @@ def run_application_transfer(
                 estimate_pdf_path = estimate_path
 
         # ===== Phase 2: API使用（残高切れなら部分スキップ。Phase 1 結果は維持）=====
+        # 製造原価報告書の自動検出フラグは Phase 2 内で例外発生しても参照されるため
+        # try ブロック前に初期化しておく（UnboundLocalError 回避）
+        cost_report_detected: bool = False
         try:
             # 履歴事項PDF → CompanyInfo
             registry_path = detector.get('registry')
@@ -283,6 +291,7 @@ def run_application_transfer(
                 if cost_report_path:
                     images += pdf_to_images(cost_report_path)
                     logger.info(f'製造原価報告書も読取: {cost_report_path.name}')
+                    cost_report_detected = True
                 extraction.financial = extractor.extract_pl(images)
                 logger.info(f'損益計算書: 売上{extraction.financial.revenue:,}')
 
@@ -317,6 +326,7 @@ def run_application_transfer(
         try:
             wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
                 detector, extraction.financial, extractor=extractor,
+                fiscal_month_override=fiscal_month_override,
             )
         except APICreditExhaustedError as e:
             api_skipped_reason = api_skipped_reason or str(e)
@@ -325,10 +335,36 @@ def run_application_transfer(
             try:
                 wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
                     detector, extraction.financial, extractor=None,
+                    fiscal_month_override=fiscal_month_override,
                 )
             except Exception as e2:
                 logger.warning(f'決定論パーサーも失敗: {e2}')
                 wage_plan, ledger_employees, wage_status = None, [], 'error'
+
+        # ユーザー指定の決算月 vs AI 推定の照合（警告のみ。処理は続行）
+        _, fiscal_month_warning = _resolve_fiscal_period(
+            extraction.financial, fiscal_month_override,
+        )
+
+        # ユーザーが「製造原価報告書あり」とチェックしたのに自動検出されなかった場合の警告
+        # （ファイル名キーワード未一致や、損益計算書PDFに統合されているケースなど）
+        cost_report_warning = ''
+        if has_cost_report_hint and not cost_report_detected:
+            cost_report_warning = (
+                ' ⚠ 「製造原価報告書あり」とチェックされていますが、製造原価報告書のPDFを'
+                '検出できませんでした。ファイル名に「製造原価報告書」を含めるか、'
+                '損益計算書PDFに統合されている場合は原本を目視で確認し、'
+                '原価部の人件費（労務費・賞与等）が抽出値に含まれているかご確認ください。'
+            )
+
+        # AI 生成の事業内容が文字数制限（255文字）を超えていないかチェック
+        biz_desc_warning = ''
+        biz_desc = (extraction.ai_judgment.business_description or '').strip()
+        if biz_desc and len(biz_desc) > 255:
+            biz_desc_warning = (
+                f' ⚠ 事業内容が文字数制限超過（{len(biz_desc)}文字 / 上限255文字）。'
+                f'申請書セルで切り詰められるおそれがあるため、原稿を手動短縮してください。'
+            )
 
         # テンプレート転記（Phase 1 + Phase 2成功分のみ。残高切れ項目は confidence='low' で空欄）
         empty_cells = fill_template(
@@ -384,6 +420,9 @@ def run_application_transfer(
             api_skip_msg
             + f'完了。空欄{len(empty_cells)}件{wage_warning}{consistency_warning}'
             + validation_warnings
+            + fiscal_month_warning
+            + cost_report_warning
+            + biz_desc_warning
         )
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件{wage_warning})')
 
@@ -411,12 +450,16 @@ def run_wage_calculation(
     extractor: BaseExtractor | None = None,
     cached_financial: 'FinancialData | None' = None,
     cached_ledger_employees: list | None = None,
+    fiscal_month_override: int | None = None,
 ) -> ProcessingStatus:
     """
     タスク2: 給与支給総額計算の実行
 
     cached_financial / cached_ledger_employees が渡された場合は API 呼出を省略する
     （申請書作成タスクの結果を再利用してコスト2重化を防ぐ）。
+
+    fiscal_month_override (1〜12) が指定された場合、ユーザー指定の決算月で
+    賃金台帳の対象期間（直近12ヶ月）を確定する。AI 推定とズレていれば警告。
     """
     status = ProcessingStatus(
         company_name=company_name,
@@ -478,7 +521,7 @@ def run_wage_calculation(
             else:
                 ledger_paths = detector.get_all('wage_ledger')
                 if ledger_paths:
-                    fiscal_hint = _format_fiscal_period(financial)
+                    fiscal_hint, _ = _resolve_fiscal_period(financial, fiscal_month_override)
                     ledger_emps = read_wage_ledgers(
                         ledger_paths,
                         extractor=extractor,
@@ -486,7 +529,7 @@ def run_wage_calculation(
                     )
             if ledger_emps:
                 # fiscal_hint を渡して時系列順で直近3ヶ月を抽出（非1月始まり対応）
-                _fiscal_hint_for_detail = _format_fiscal_period(financial)
+                _fiscal_hint_for_detail, _ = _resolve_fiscal_period(financial, fiscal_month_override)
                 employees_detail = _build_employees_detail_from_ledger(
                     ledger_emps, fiscal_period_hint=_fiscal_hint_for_detail,
                 )
@@ -516,7 +559,13 @@ def run_wage_calculation(
                 wages_list.append(wages)
             # TODO: wages_listからemployees_detailを構築
 
-        fiscal_label = f'{financial.fiscal_year_start} ～ {financial.fiscal_year_end}'
+        # 表示用の期間ラベル。ユーザーが決算月を指定 + AI 推定と不一致なら
+        # override 反映後の期間を表示（賃金計算と帳票表示の整合を取る）
+        _resolved_period, _ = _resolve_fiscal_period(financial, fiscal_month_override)
+        if fiscal_month_override is not None and _resolved_period and '〜' in _resolved_period:
+            fiscal_label = _resolved_period
+        else:
+            fiscal_label = f'{financial.fiscal_year_start} ～ {financial.fiscal_year_end}'
 
         create_wage_calculation(
             output_path=output_path,
@@ -530,9 +579,12 @@ def run_wage_calculation(
             employees_detail=employees_detail,
         )
 
+        # ユーザー指定の決算月 vs AI 推定の照合（警告のみ）
+        _, fiscal_month_warning = _resolve_fiscal_period(financial, fiscal_month_override)
+
         status.status = '完了'
         status.output_files = [output_path.name]
-        status.message = '給与支給総額計算 完了'
+        status.message = '給与支給総額計算 完了' + fiscal_month_warning
         logger.info(f'給与計算完了: {output_path.name}')
 
     except Exception as e:
@@ -573,16 +625,109 @@ def _format_fiscal_period(financial: 'FinancialData') -> str | None:
     return s_ym or e_ym
 
 
+def _guess_recent_fiscal_end_year(fiscal_month: int) -> int:
+    """指定された決算月から、今日基準で「直近の確定済み決算期末年」を推定する。
+
+    判定は安全側に倒す: 決算月そのもの の月内は **まだ確定していない**とみなし前年扱い。
+    （実際の月末日は 28/30/31 の差があり、決算実務でも申告までは「直近期＝先期」と
+    扱うのが普通）
+
+    例:
+      今日=2026-05-14, fiscal_month=3 → 2026（2026-03 はすでに過ぎている）
+      今日=2026-05-14, fiscal_month=5 → 2025（2026-05 はまだ進行中）
+      今日=2026-05-14, fiscal_month=6 → 2025（2026-06 はまだ来てない）
+    """
+    from datetime import date
+    today = date.today()
+    # 今日の月が決算月より大きい場合のみ「直近期末は今年」と判定。
+    # 同月の場合は決算月内＝進行中なので、前年扱いに倒す。
+    if today.month > fiscal_month:
+        return today.year
+    return today.year - 1
+
+
+def _resolve_fiscal_period(
+    financial: 'FinancialData',
+    fiscal_month_override: int | None = None,
+) -> tuple[str | None, str]:
+    """fiscal_period_hint を解決する。
+
+    fiscal_month_override（1〜12）が指定されている場合：
+      - その月を期末月としてヒント文字列を再構築（ユーザー指定優先）
+      - 期末年は financial.fiscal_year_end が取れていればその年、なければ今日から推定
+      - AI 推定の期末月と override がズレていれば警告メッセージを返す
+
+    fiscal_month_override が None の場合：
+      - 従来通り AI 抽出の fiscal_year_start/end から組み立てる
+
+    Returns:
+        (fiscal_period_hint, warning_message)
+          - fiscal_period_hint: '2024-05〜2025-04' 形式 or None
+          - warning_message: 不一致警告。一致時 or 未指定時は ''
+    """
+    warning = ''
+    if not fiscal_month_override:
+        return _format_fiscal_period(financial), warning
+
+    # 期末年の決定:
+    #   - AI 推定の月が override と一致 → AI の year を採用（AI が信頼できる）
+    #   - AI 推定の月が override と不一致 → AI の year も誤読の可能性が高いので
+    #     今日基準で推定し直す（例: AI=2026-01 のはずが実は 2025-12 だった場合、
+    #     AI year 2026 をそのまま流用すると未来の 2026-12 を生成してしまう）
+    #   - AI 推定なし → 今日基準で推定
+    end_str = (financial.fiscal_year_end or '').strip()
+    ai_month: int | None = None
+    ai_year: int | None = None
+    if end_str and len(end_str) >= 7 and '-' in end_str:
+        try:
+            ai_year = int(end_str.split('-')[0])
+            ai_month = int(end_str.split('-')[1])
+        except (ValueError, IndexError):
+            ai_year = None
+            ai_month = None
+
+    if ai_month is not None and ai_month == fiscal_month_override and ai_year is not None:
+        # 月が一致するなら AI year を信用
+        end_year = ai_year
+    else:
+        # 月が不一致 or AI 推定なし → 今日基準で推定
+        end_year = _guess_recent_fiscal_end_year(fiscal_month_override)
+
+    # AI 推定月と override の照合
+    if ai_month is not None and ai_month != fiscal_month_override:
+        warning = (
+            f' ⚠ 決算月の不一致: ユーザー指定={fiscal_month_override}月 / '
+            f'AI推定={ai_month}月。決算書PDFを目視確認してください'
+            f'（ユーザー指定値を優先しました）。'
+        )
+
+    # 期首 = 期末の翌月 - 12ヶ月前
+    end_ym = f'{end_year:04d}-{fiscal_month_override:02d}'
+    if fiscal_month_override == 12:
+        start_year = end_year
+        start_month = 1
+    else:
+        start_year = end_year - 1
+        start_month = fiscal_month_override + 1
+    start_ym = f'{start_year:04d}-{start_month:02d}'
+
+    return f'{start_ym}〜{end_ym}', warning
+
+
 def _calc_wage_plan_from_ledger(
     detector: FileDetector,
     financial: 'FinancialData',
     extractor=None,
+    fiscal_month_override: int | None = None,
 ) -> tuple[dict[str, float] | None, list, str]:
     """
     賃金台帳から給与支給総額を算出し、年3%成長の計画値を返す。
 
     extractor が渡されると AI 抽出を優先する（USE_AI_WAGE_EXTRACTION=true 時）。
     AI失敗時は決定論パーサーにフォールバック。
+
+    fiscal_month_override (1〜12) が指定された場合、ユーザー指定の決算月を
+    優先して fiscal_period_hint を構築する。AI 推定とズレていれば警告ログ。
 
     Returns:
         (plan_dict_or_None, employees_raw_list, status_message)
@@ -600,7 +745,9 @@ def _calc_wage_plan_from_ledger(
         logger.info('賃金台帳が見つかりません → 計画値転記をスキップ')
         return None, [], 'no_ledger'
 
-    fiscal_hint = _format_fiscal_period(financial)
+    fiscal_hint, fiscal_warning = _resolve_fiscal_period(financial, fiscal_month_override)
+    if fiscal_warning:
+        logger.warning(f'決算月の不一致警告: {fiscal_warning.strip()}')
 
     try:
         employees_raw = read_wage_ledgers(
@@ -996,6 +1143,7 @@ def run_full_pipeline(
     template_path: Path,
     template_type: str,
     company_name: str,
+    fiscal_month_override: int | None = None,
 ) -> list[ProcessingStatus]:
     """タスク1 + タスク2 を一括実行"""
     extractor = create_extractor(CLAUDE_API_KEY)
@@ -1004,13 +1152,17 @@ def run_full_pipeline(
     # タスク1: 申請書
     output_app = resource_folder / f'{company_name}_{template_type.replace("_", "_")}_AI版.xlsx'
     s1 = run_application_transfer(
-        resource_folder, template_path, template_type, output_app, extractor
+        resource_folder, template_path, template_type, output_app, extractor,
+        fiscal_month_override=fiscal_month_override,
     )
     results.append(s1)
 
     # タスク2: 給与計算
     output_wage = resource_folder / f'{company_name}_給与支給総額計算.xlsx'
-    s2 = run_wage_calculation(resource_folder, company_name, output_wage, extractor)
+    s2 = run_wage_calculation(
+        resource_folder, company_name, output_wage, extractor,
+        fiscal_month_override=fiscal_month_override,
+    )
     results.append(s2)
 
     return results

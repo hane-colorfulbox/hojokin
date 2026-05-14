@@ -310,6 +310,8 @@ def run_processing(
     template_dir: Path,
     progress_callback=None,
     prefecture: str = '',
+    fiscal_month_override: int | None = None,
+    has_cost_report_hint: bool = False,
 ):
     """メイン処理を実行"""
     results = {}
@@ -351,6 +353,8 @@ def run_processing(
                 template_type=template_type,
                 output_path=output_path,
                 extractor=extractor,
+                fiscal_month_override=fiscal_month_override,
+                has_cost_report_hint=has_cost_report_hint,
             )
             # 追加出力ファイル（賃金台帳一覧等）を収集
             extra_files = {}
@@ -392,6 +396,7 @@ def run_processing(
             extractor=extractor,
             cached_financial=cached_financial,
             cached_ledger_employees=cached_ledger_employees,
+            fiscal_month_override=fiscal_month_override,
         )
         results['wage'] = {
             'status': status.status,
@@ -545,6 +550,29 @@ with st.sidebar:
         help='申請書作成：ヒアリングシート+各種PDFから申請書を自動作成。給与計算：損益計算書+賃金データから給与支給総額を計算。加点判定：賃金台帳から加点措置の対象かを判定。',
     )
     task_type = TASK_OPTIONS[task_label]
+
+    # 決算月（任意）— ユーザー指定があれば賃金台帳の対象期間を確定 + AI推定誤りを照合
+    _FISCAL_MONTH_OPTIONS = ['（未指定・AI推定にまかせる）'] + [f'{i}月' for i in range(1, 13)]
+    fiscal_month_label = st.selectbox(
+        '決算月（任意・推奨）',
+        _FISCAL_MONTH_OPTIONS,
+        help='決算期末の月を指定すると、賃金台帳の対象12ヶ月が確定し、'
+             '決算書のAI誤読も照合できます。'
+             '未指定なら従来通り決算書PDFからAIが推定します。',
+    )
+    fiscal_month_override: int | None = None
+    if fiscal_month_label != _FISCAL_MONTH_OPTIONS[0]:
+        fiscal_month_override = int(fiscal_month_label.replace('月', ''))
+
+    # 製造原価ありフラグ — 製造業向け。チェック時、AI に「製造原価報告書が存在する」ヒントを注入
+    has_cost_report_hint = st.checkbox(
+        '製造原価報告書あり（製造業向け）',
+        value=False,
+        help='製造業のお客様で「製造原価報告書」を提出いただいている場合はチェック。'
+             'AIの読み落としを防ぎ、損益計算書＋製造原価を統合して人件費を算出します。'
+             '（資料に製造原価報告書PDFがあれば自動検出されるため、'
+             '通常は自動検出に任せて構いません）',
+    )
 
     # 加点判定の場合は都道府県が必要
     if task_type == 'bonus':
@@ -1249,6 +1277,8 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 work_dir=work_dir,
                 template_dir=template_dir,
                 prefecture=prefecture,
+                fiscal_month_override=fiscal_month_override,
+                has_cost_report_hint=has_cost_report_hint,
             )
 
         # 結果をsession_stateに保存（画面再描画後も残る）
