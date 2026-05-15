@@ -1306,6 +1306,136 @@ def _dedupe_employees_by_normalized_name(
     return result
 
 
+def _reconcile_midyear_positions_with_deterministic(
+    ai_employees: list[WageEmployee],
+    file_paths: list[Path],
+    fiscal_period_hint: str | None,
+) -> list[WageEmployee]:
+    """AI 抽出された中途者の monthly_wages 位置を決定論パーサーで補正。
+
+    背景:
+        AI 抽出（Claude）は短期在籍者（在籍 1〜数ヶ月）の monthly_wages を
+        誤った位置（暦月とズレた index）に格納する事例が観測されている。
+        値そのものは正しいが index がズレるので、出力備考の月ラベルが
+        実体と食い違う（例: 賃金台帳の暦4月の値が AI 出力では index 5＝6月扱い）。
+        さらに同一ファイルでも実行ごとに変動するため不安定。
+
+    対処:
+        - 「データ位置だけ違って値の集合は一致」しているケースに限定して補正
+          → 月給合算など値が変わる処理を AI が施した行は触らない（安全側）
+        - AI 側 or 決定論側どちらかが「12ヶ月未満」であれば候補（中途者扱い）
+          → AI が誤って full_year=True を返した場合の取りこぼし対策
+        - 名前は既存の _normalize_name_key で照合（OCR異体字・空白対応）
+        - 同名 collision は曖昧として両方とも突合対象から除外（誤上書き防止）
+        - 値の上書きは「中身が有効な月が1つ以上ある」場合のみ
+          → 空リストで AI の有効データを潰さない
+
+    決定論パーサーは API を呼ばないので追加コストは CPU のみ。
+    PDF のみの賃金台帳（Excel/CSV なし）では決定論パーサーが失敗するため
+    その場合は AI 結果をそのまま返す。
+
+    Returns:
+        補正後の ai_employees（破壊的に書き換え、戻り値は同一リスト）。
+    """
+    # 突合候補: AI 側で is_full_year=False の人だけでなく、AI が誤って
+    # 全埋めしてきた可能性も考えるため、判定は後段で決定論側との比較で行う。
+    # ここでは空集合の枝刈りだけ
+    if not ai_employees:
+        return ai_employees
+
+    # 決定論パーサーで全件読む（CPU のみ、API ゼロ）
+    try:
+        det_employees = read_wage_ledgers(
+            file_paths, extractor=None, fiscal_period_hint=fiscal_period_hint,
+        )
+    except Exception as e:
+        logger.warning(
+            f'位置突合用の決定論パーサー読込に失敗: {e} → AI 結果のままで継続'
+        )
+        return ai_employees
+
+    if not det_employees:
+        # PDF のみ等で決定論パーサーが読めないケース
+        logger.info('決定論パーサーで0件 → AI 結果をそのまま採用（突合スキップ）')
+        return ai_employees
+
+    # 既存の名前正規化を使う（OCR異体字・空白除去を共有）
+    # 同名 collision を検出して、その名前は両側とも除外（安全側）
+    det_by_name: dict[str, WageEmployee] = {}
+    ambiguous_names: set[str] = set()
+    for de in det_employees:
+        key = _normalize_name_key(de.name)
+        if not key:
+            continue
+        if key in det_by_name:
+            ambiguous_names.add(key)
+            continue
+        det_by_name[key] = de
+    for k in ambiguous_names:
+        det_by_name.pop(k, None)  # 曖昧キーは突合対象外
+        logger.warning(
+            f'同名 collision を検出: 正規化キー "{k}" が決定論側に複数あり、'
+            '位置突合をスキップ（誤上書き回避）'
+        )
+
+    def _data_indices(monthly: list) -> set[int]:
+        return {i for i, w in enumerate(monthly or []) if w is not None}
+
+    def _data_multiset(monthly: list) -> tuple:
+        """値の multiset。位置非依存で比較するための tuple（順序付け済み）。"""
+        vals = [w for w in (monthly or []) if w is not None]
+        return tuple(sorted(vals))
+
+    fixed_count = 0
+    for ai_emp in ai_employees:
+        det = det_by_name.get(_normalize_name_key(ai_emp.name))
+        if det is None:
+            continue
+        ai_months = _data_indices(ai_emp.monthly_wages)
+        det_months = _data_indices(det.monthly_wages)
+        # 突合候補は「どちらかが12ヶ月未満」かつ「インデックス集合が違う」
+        if len(ai_months) == 12 and len(det_months) == 12:
+            continue
+        if ai_months == det_months:
+            continue
+        # 値の集合（multiset）が一致するか確認
+        # → 一致なら「位置だけ違う、値は同じ」ことが確定。安全に上書き
+        # → 不一致なら値そのものが違う可能性が高いので、警告だけ出して上書きしない
+        ai_vals = _data_multiset(ai_emp.monthly_wages)
+        det_vals = _data_multiset(det.monthly_wages)
+        if ai_vals != det_vals:
+            logger.warning(
+                f'位置不一致だが値集合も不一致: {ai_emp.name} '
+                f'AI 値集合={ai_vals} 決定論 値集合={det_vals} '
+                f'→ 上書きせず AI 結果のまま（要目視確認）'
+            )
+            continue
+        # 位置だけ違い、値は完全一致 → 決定論側で位置を上書き
+        logger.warning(
+            f'位置のみ不一致を検出: {ai_emp.name} '
+            f'AI={sorted(ai_months)} 決定論={sorted(det_months)} '
+            f'値集合は一致 → 決定論側で位置上書き'
+        )
+        ai_emp.monthly_wages = list(det.monthly_wages)
+        # monthly_hours / monthly_hourly_rates は「有効な要素が1つ以上ある」場合のみ上書き
+        # （[None]*12 のような空リストで AI の有効データを潰さない）
+        if det.monthly_hours and any(h is not None for h in det.monthly_hours):
+            ai_emp.monthly_hours = list(det.monthly_hours)
+        if det.monthly_hourly_rates and any(
+            h is not None for h in det.monthly_hourly_rates
+        ):
+            ai_emp.monthly_hourly_rates = list(det.monthly_hourly_rates)
+        fixed_count += 1
+
+    if fixed_count:
+        logger.warning(
+            f'AI抽出 vs 決定論パーサーの突合: {fixed_count}名の monthly_wages '
+            f'位置を決定論側で上書き（中途者の備考月ラベルを正しく出すため）'
+        )
+
+    return ai_employees
+
+
 def read_wage_ledgers(
     file_paths: list[Path],
     extractor=None,
@@ -1343,6 +1473,12 @@ def read_wage_ledgers(
                 # AI 経路は複数 PDF をまとめて投入するため、ファイル単位の分離は困難。
                 # ファイル名一覧として記録（全員同じ値になる）
                 _assign_source_files(ai_employees, file_paths)
+                # AI 抽出の中途者は monthly_wages の位置が暦月とズレる事例が観測
+                # されている（実行ごとに +1〜+3ヶ月変動）。決定論パーサーは
+                # Excel/CSV を直接読むので位置は確実。中途者だけ位置を突合補正する。
+                ai_employees = _reconcile_midyear_positions_with_deterministic(
+                    ai_employees, file_paths, fiscal_period_hint,
+                )
                 logger.info(f'賃金台帳合算結果(AI): {len(ai_employees)}名 ({len(file_paths)}ファイル)')
                 return ai_employees
             logger.warning('AI抽出が0件を返したため、決定論パーサーにフォールバック')
