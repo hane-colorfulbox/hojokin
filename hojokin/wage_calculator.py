@@ -635,6 +635,7 @@ def create_wage_calculation(
             ws2.column_dimensions[get_column_letter(i + 1)].width = w
 
     # ===== Sheet 3: 賃上げ計画 =====
+    # 機械計算セルは全部 Excel 関数化（ユーザーが C5 を編集すると D5-F5 が自動再計算）
     ws3 = wb.create_sheet('賃上げ計画')
     _cell(ws3, 2, 2, '賃上げ計画シミュレーション', TITLE_FONT, border=None)
 
@@ -643,21 +644,28 @@ def create_wage_calculation(
         _cell(ws3, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
         ws3.cell(r, 2 + i).alignment = Alignment(horizontal='center', wrap_text=True)
 
-    growth = 0.03
-    projections = [total_wage_pl]
-    for _ in range(3):
-        projections.append(round(projections[-1] * (1 + growth)))
-
     r += 1
+    basis_row = r  # 給与支給総額 行（C列 = 直近実績、D-F 列 = 計画値）
     _cell(ws3, r, 2, '給与支給総額', BOLD_FONT)
-    for i, p in enumerate(projections):
-        _cell(ws3, r, 3 + i, p, fmt=NUMBER_FMT)
+    # C5: 直近実績（給与支給総額計算シートの (A) と連動）
+    # シート間参照式でリンク → (A) を編集すると賃上げ計画も自動再計算
+    _cell(ws3, r, 3, f"='給与支給総額計算'!C{a_row}", fmt=NUMBER_FMT)
+    # D5, E5, F5: 前年 × 1.03（年率3%）。ROUND で円単位に丸め
+    prev_col = 'C'
+    for i in range(1, 4):
+        col_letter = get_column_letter(3 + i)  # D, E, F
+        _cell(ws3, r, 3 + i, f'=ROUND({prev_col}{r}*1.03, 0)', fmt=NUMBER_FMT)
+        prev_col = col_letter
 
     r += 1
     _cell(ws3, r, 2, '増加率（対基準年）')
     _cell(ws3, r, 3, '-')
+    # D6, E6, F6: (D5 - C5) / C5 → 累積増加率
     for i in range(1, 4):
-        _cell(ws3, r, 3 + i, (projections[i] - projections[0]) / projections[0] if projections[0] else 0, fmt=PCT_FMT)
+        col_letter = get_column_letter(3 + i)
+        _cell(ws3, r, 3 + i,
+              f'=({col_letter}{basis_row}-$C${basis_row})/$C${basis_row}',
+              fmt=PCT_FMT)
 
     ws3.column_dimensions['B'].width = 28
     for col in ['C', 'D', 'E', 'F']:
