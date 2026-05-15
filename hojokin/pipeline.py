@@ -874,6 +874,22 @@ def run_wage_calculation(
         else:
             fiscal_label = f'{financial.fiscal_year_start} ～ {financial.fiscal_year_end}'
 
+        # データソース（ファイル名）— 人間チェックの突合用に各セクションに表示する
+        _pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
+        _ledger_paths = detector.get_all('wage_ledger')
+        _wage_report = detector.get('wage_report')
+        _registry = detector.get('registry')
+        source_files = {
+            'pl': _pl_path.name if _pl_path else '',
+            'wage_ledger': (
+                _ledger_paths[0].name if len(_ledger_paths) == 1
+                else f'{_ledger_paths[0].name} 他 {len(_ledger_paths) - 1} 件'
+                if _ledger_paths else ''
+            ),
+            'wage_report': _wage_report.name if _wage_report else '',
+            'registry': _registry.name if _registry else '',
+        }
+
         create_wage_calculation(
             output_path=output_path,
             company_name=company_name,
@@ -884,6 +900,7 @@ def run_wage_calculation(
             yakuin_count=yakuin_count,
             yakuin_hoshu_3m=yakuin_hoshu_3m,
             employees_detail=employees_detail,
+            source_files=source_files,
         )
 
         # ユーザー指定の決算月 vs AI 推定の照合（警告のみ）

@@ -170,6 +170,7 @@ def create_wage_calculation(
     yakuin_count: int,
     yakuin_hoshu_3m: int,
     employees_detail: list[dict] | None = None,
+    source_files: dict[str, str] | None = None,
 ) -> Path:
     """
     給与支給総額計算Excelを作成。
@@ -177,7 +178,16 @@ def create_wage_calculation(
     employees_detail: [{'no': 1, 'name': '氏名', 'type': '正社員',
                         'm1': 基本給, 'm2': 基本給, 'm3': 基本給,
                         'hr': 時給, 'monthly_hours': 月間時間, 'judge': '対象外'}, ...]
+    source_files: 各データソースのファイル名（人間チェックの突合用）。
+                  キー: 'pl' / 'wage_ledger' / 'wage_report' / 'registry'
+                  値: ファイル名（パス除外）。AI抽出値の出所追跡用に各セクション
+                  ヘッダー下に表示する。None または欠落キーは「未取得」表示。
     """
+    sources = source_files or {}
+    pl_source = sources.get('pl', '') or '（不明）'
+    ledger_source = sources.get('wage_ledger', '') or '（不明）'
+    wage_report_source = sources.get('wage_report', '')
+    registry_source = sources.get('registry', '') or '（不明）'
     wb = openpyxl.Workbook()
 
     # 計算用定数
@@ -210,6 +220,7 @@ def create_wage_calculation(
     # 事業年度ラベルは PL 由来（AI抽出）or 賃金台帳期間からの導出。誤読リスクのあるセル
     _cell(ws1, 4, 2, f'事業年度: {fiscal_year_label}', NORMAL_FONT,
           fill=FILL_AI_EXTRACTED, border=None)
+    _cell(ws1, 4, 4, f'出所: {pl_source}', SMALL_FONT, border=None)
 
     # 凡例（AI抽出セルの視認説明）— 計算結果より前に置いてユーザーに認識させる
     r = 5
@@ -222,6 +233,7 @@ def create_wage_calculation(
     # P/Lデータ
     r = 7
     _cell(ws1, r, 2, '【損益計算書データ（販管費）】', HEADER_FONT, border=None)
+    _cell(ws1, r, 3, f'出所: {pl_source}', SMALL_FONT, border=None)
     r += 1
     for i, h in enumerate(['科目', '金額（円）', '備考']):
         _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
@@ -252,16 +264,20 @@ def create_wage_calculation(
     # 役員報酬
     r += 2
     _cell(ws1, r, 2, '【役員報酬の控除】', HEADER_FONT, border=None)
-    r += 1
-    _cell(ws1, r, 2, '役員報酬（3ヶ月合計）')
-    # 役員報酬3ヶ月合計のソース判定: 賃金状況報告シート読込時はそれが優先、
-    # 未取込で PL.officer_compensation > 0 のときは PL から推定（AI 抽出）
-    # 現状の引数では source 情報が伝搬していないが、PL推定の場合 yakuin_hoshu_3m
-    # = officer_compensation / 4 のため、その整合性から推測する
+    # ソース表示: 賃金状況報告シート優先、未取得時は PL から推定
     yakuin_source_is_ai = (
         financial.officer_compensation > 0
         and yakuin_hoshu_3m == int(financial.officer_compensation / 4)
     )
+    if yakuin_source_is_ai:
+        yakuin_source_label = f'出所: {pl_source}（決算書PDF）'
+    elif wage_report_source:
+        yakuin_source_label = f'出所: {wage_report_source}'
+    else:
+        yakuin_source_label = '出所: （不明）'
+    _cell(ws1, r, 3, yakuin_source_label, SMALL_FONT, border=None)
+    r += 1
+    _cell(ws1, r, 2, '役員報酬（3ヶ月合計）')
     yakuin_cell_fill = FILL_AI_EXTRACTED if yakuin_source_is_ai else None
     yakuin_note = (
         '※AI抽出：決算書PDFの役員報酬を÷4で推定'
@@ -289,6 +305,10 @@ def create_wage_calculation(
     # 従業員数
     r += 2
     _cell(ws1, r, 2, '【従業員数と1人当たり給与支給総額】', HEADER_FONT, border=None)
+    # 雇用区分の人数集計: 賃金状況報告シートがあればそちら、なければ賃金台帳から逆算
+    headcount_source = wage_report_source or ledger_source
+    _cell(ws1, r, 3, f'出所: {headcount_source}（役員数は{registry_source}）',
+          SMALL_FONT, border=None)
     r += 1
     for i, h in enumerate(['項目', '人数/金額', '備考']):
         _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
@@ -353,6 +373,7 @@ def create_wage_calculation(
     # テンプレート転記用（全項目 AI 抽出：決算書PDF由来）
     r += 2
     _cell(ws1, r, 2, '【2026テンプレート転記用】', HEADER_FONT, border=None)
+    _cell(ws1, r, 3, f'出所: {pl_source}', SMALL_FONT, border=None)
     r += 1
     _cell(ws1, r, 2,
           '※下記すべてAI抽出値（決算書PDF由来）。テンプレ転記前に決算書原本と照合してください。',
@@ -381,6 +402,7 @@ def create_wage_calculation(
     if employees_detail:
         ws2 = wb.create_sheet('従業員別明細')
         _cell(ws2, 2, 2, '従業員別給与明細（直近3ヶ月）', TITLE_FONT, border=None)
+        _cell(ws2, 2, 4, f'出所: {ledger_source}', SMALL_FONT, border=None)
         _cell(ws2, 3, 2,
               '※氏名・雇用形態・月給・時給はAIが賃金台帳から読み取った値です。'
               '誤読の可能性があるため賃金台帳原本と照合してください。',
