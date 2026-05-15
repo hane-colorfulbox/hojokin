@@ -116,6 +116,69 @@ def _try_document_ai(pdf_bytes: bytes) -> Optional[str]:
         return None
 
 
+def get_pdf_pages_text(pdf_path) -> list[str]:
+    """PDF をページ別テキストのリストとして返す（ページ番号特定用）。
+
+    1始まりインデックスではなく 0始まりのリストを返す。i 番目の要素は (i+1) ページ目。
+    決算書からの抽出値をテキストで逆引きしてページ番号を機械的に特定する用途に使う。
+    AI抽出値の検証（PDF テキストに値が含まれているか）にも兼用できる。
+
+    画像PDF（テキスト層なし）の場合は空文字のリストが返るのでフォールバック側で
+    「ページ特定不可」と扱うこと。
+
+    Returns:
+        各ページのテキスト（取れない場合は空文字）。PDF 自体が読めない場合は空リスト。
+    """
+    from pathlib import Path
+    pdf_path = Path(pdf_path)
+    # pdfplumber 優先（表構造を保ったまま読めるので数値検索が確実）
+    try:
+        import pdfplumber
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            return [(page.extract_text() or '') for page in pdf.pages]
+    except Exception:
+        pass
+    # PyMuPDF フォールバック
+    try:
+        import fitz
+        doc = fitz.open(str(pdf_path))
+        try:
+            return [(page.get_text() or '') for page in doc]
+        finally:
+            doc.close()
+    except Exception:
+        return []
+
+
+def find_value_pages(pages_text: list[str], value: int | float) -> list[int]:
+    """整数値が含まれるページ番号（1始まり）のリストを返す。
+
+    カンマ区切り（'80,153,961'）と無区切り（'80153961'）の両方を検索する。
+    マイナス値は絶対値で検索（PDFで「△30,694,465」「(30,694,465)」のような
+    表記揺れがあるため、符号付き完全一致だと取れない）。
+
+    Returns:
+        値が見つかったページ番号のリスト（1始まり、昇順）。1件も無ければ空リスト。
+    """
+    if not value:
+        return []
+    abs_value = int(abs(value))
+    if abs_value == 0:
+        return []
+    formatted = f'{abs_value:,}'  # 'カンマ区切り'
+    raw = str(abs_value)
+    pages = []
+    for i, text in enumerate(pages_text, 1):
+        if not text:
+            continue
+        # カンマ区切り版（'80,153,961'）または無区切り版（'80153961'）を含むか
+        # 念のためカンマ・空白を除去した正規化テキストでも検索
+        normalized_text = text.replace(' ', '').replace(',', '').replace('，', '')
+        if formatted in text or raw in normalized_text:
+            pages.append(i)
+    return pages
+
+
 def extract_pdf_as_text(pdf_bytes: bytes) -> str:
     """PDFのバイト列を表構造保ったテキストに変換（後方互換ラッパ）。
 

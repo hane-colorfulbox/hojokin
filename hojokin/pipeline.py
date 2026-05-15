@@ -879,6 +879,37 @@ def run_wage_calculation(
         _ledger_paths = detector.get_all('wage_ledger')
         _wage_report = detector.get('wage_report')
         _registry = detector.get('registry')
+
+        # PL の各値が決算書PDFのどのページに記載されているかを機械的に逆引き
+        # （AI抽出結果の検証 + 人間チェック時のページ番号案内に兼用）
+        # PDFテキスト層が無い画像PDFの場合は空辞書になる
+        pl_value_pages: dict[str, list[int]] = {}
+        if _pl_path and financial is not None:
+            try:
+                from .pdf_text_extractor import get_pdf_pages_text, find_value_pages
+                _pages = get_pdf_pages_text(_pl_path)
+                if _pages and any(p.strip() for p in _pages):
+                    for key in ('salary', 'misc_wages', 'bonus', 'legal_welfare',
+                                'welfare', 'officer_compensation', 'revenue',
+                                'gross_profit', 'operating_profit', 'ordinary_profit',
+                                'depreciation'):
+                        val = getattr(financial, key, 0)
+                        # 0 円の科目は決算書に記載がないことが多いので検証スキップ
+                        # （AI誤読ではなく「該当する経費が無い」が正しいケースが大半）
+                        if not val:
+                            continue
+                        pl_value_pages[key] = find_value_pages(_pages, val)
+                    logger.info(
+                        f'PL 値→ページ逆引き完了: '
+                        f'{ {k: v for k, v in pl_value_pages.items() if v} }'
+                    )
+                else:
+                    logger.info(
+                        '決算書PDFのテキスト層が取得できなかったため、ページ番号特定はスキップ'
+                    )
+            except Exception as e:
+                logger.warning(f'PL ページ番号逆引きに失敗: {e}')
+
         source_files = {
             'pl': _pl_path.name if _pl_path else '',
             'wage_ledger': (
@@ -888,6 +919,7 @@ def run_wage_calculation(
             ),
             'wage_report': _wage_report.name if _wage_report else '',
             'registry': _registry.name if _registry else '',
+            'pl_value_pages': pl_value_pages,
         }
 
         create_wage_calculation(

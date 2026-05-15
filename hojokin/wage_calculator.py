@@ -188,6 +188,23 @@ def create_wage_calculation(
     ledger_source = sources.get('wage_ledger', '') or '（不明）'
     wage_report_source = sources.get('wage_report', '')
     registry_source = sources.get('registry', '') or '（不明）'
+    # 値→ページ番号の逆引き結果（pipeline 側で機械的に特定済み）
+    pl_value_pages: dict[str, list[int]] = sources.get('pl_value_pages', {}) or {}
+
+    def _page_tag(key: str) -> str:
+        """財務値が決算書PDFの何ページに見つかったかをタグ文字列化。
+
+        例: [1] → ' (PDF p.1で確認済)'
+            [3,5] → ' (PDF p.3,5で確認済)'
+            [] → ' (⚠PDFに値なし／AI誤読の可能性)'
+            キー未登録 → ''（ページ番号特定機能が動かなかった想定。何も表示しない）
+        """
+        if key not in pl_value_pages:
+            return ''
+        pages = pl_value_pages[key]
+        if not pages:
+            return ' (⚠PDFに値なし／AI誤読の可能性)'
+        return f' (PDF p.{",".join(map(str, pages))}で確認済)'
     wb = openpyxl.Workbook()
 
     # 計算用定数
@@ -241,12 +258,13 @@ def create_wage_calculation(
     # 備考に「決算書のどの表に載っている値か」を明示。決算書の構造は中小企業会計指針で
     # 標準化されており、これらの勘定科目は必ず「販売費及び一般管理費」（販管費）の内訳
     # 表に記載される。AI による推定ではなく会計知識からの固定マッピングなので 100% 正確。
+    # 加えてページ番号は PDF テキストから機械的に逆引きしているので、これも 100% 正確。
     items = [
-        ('給料手当', financial.salary, '販管費より｜正社員給与（AI抽出：決算書PDF）'),
-        ('雑給', financial.misc_wages, '販管費より｜パート・アルバイト給与（AI抽出：決算書PDF）'),
-        ('賞与', financial.bonus, '販管費より（AI抽出：決算書PDF）'),
-        ('法定福利費', financial.legal_welfare, '販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）'),
-        ('福利厚生費', financial.welfare, '販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）'),
+        ('給料手当', financial.salary, f'販管費より｜正社員給与（AI抽出：決算書PDF）{_page_tag("salary")}'),
+        ('雑給', financial.misc_wages, f'販管費より｜パート・アルバイト給与（AI抽出：決算書PDF）{_page_tag("misc_wages")}'),
+        ('賞与', financial.bonus, f'販管費より（AI抽出：決算書PDF）{_page_tag("bonus")}'),
+        ('法定福利費', financial.legal_welfare, f'販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）{_page_tag("legal_welfare")}'),
+        ('福利厚生費', financial.welfare, f'販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）{_page_tag("welfare")}'),
     ]
     for name, amount, note in items:
         r += 1
@@ -288,7 +306,10 @@ def create_wage_calculation(
     )
     # 役員報酬の備考に「販管費の役員報酬欄から」を明示
     if yakuin_source_is_ai:
-        yakuin_note = '販管費「役員報酬」より｜※AI抽出：決算書PDFの年額÷4で推定'
+        yakuin_note = (
+            f'販管費「役員報酬」より｜※AI抽出：決算書PDFの年額'
+            f'÷4で推定{_page_tag("officer_compensation")}'
+        )
     _cell(ws1, r, 3, yakuin_hoshu_3m, fmt=NUMBER_FMT, fill=yakuin_cell_fill)
     _cell(ws1, r, 4, yakuin_note, SMALL_FONT, fill=yakuin_cell_fill)
     r += 1
@@ -387,21 +408,23 @@ def create_wage_calculation(
     ws1.cell(r, 2).fill = FILL_AI_EXTRACTED
     # 決算書のどの表に載っている値かをセル右側の備考に明示する
     # （会計指針で標準化されているため固定マッピングで 100% 正確）
+    # 加えて PDF テキストから逆引きしたページ番号も付記する
     template_items = [
-        ('給料手当（販管費E5）', financial.salary, '決算書「販売費及び一般管理費」より'),
-        ('雑給（販管費E6）', financial.misc_wages, '決算書「販売費及び一般管理費」より'),
-        ('賞与手当（販管費E7）', financial.bonus, '決算書「販売費及び一般管理費」より'),
-        ('売上高（B10）', financial.revenue, '決算書「損益計算書」より'),
-        ('粗利益（B11）', financial.gross_profit, '決算書「損益計算書」（売上総利益）より'),
-        ('営業利益（B12）', financial.operating_profit, '決算書「損益計算書」より'),
-        ('経常利益（B13）', financial.ordinary_profit, '決算書「損益計算書」より'),
-        ('減価償却費（B14）', financial.depreciation, '決算書「販売費及び一般管理費」or「製造原価報告書」より'),
+        ('給料手当（販管費E5）', financial.salary, '販売費及び一般管理費', 'salary'),
+        ('雑給（販管費E6）', financial.misc_wages, '販売費及び一般管理費', 'misc_wages'),
+        ('賞与手当（販管費E7）', financial.bonus, '販売費及び一般管理費', 'bonus'),
+        ('売上高（B10）', financial.revenue, '損益計算書', 'revenue'),
+        ('粗利益（B11）', financial.gross_profit, '損益計算書（売上総利益）', 'gross_profit'),
+        ('営業利益（B12）', financial.operating_profit, '損益計算書', 'operating_profit'),
+        ('経常利益（B13）', financial.ordinary_profit, '損益計算書', 'ordinary_profit'),
+        ('減価償却費（B14）', financial.depreciation,
+         '販売費及び一般管理費 or 製造原価報告書', 'depreciation'),
     ]
-    for name, val, where in template_items:
+    for name, val, where, page_key in template_items:
         r += 1
         _cell(ws1, r, 2, name)
         _cell(ws1, r, 3, val, fmt=NUMBER_FMT, fill=FILL_AI_EXTRACTED)
-        _cell(ws1, r, 4, where, SMALL_FONT)
+        _cell(ws1, r, 4, f'決算書「{where}」より{_page_tag(page_key)}', SMALL_FONT)
 
     ws1.column_dimensions['A'].width = 2
     ws1.column_dimensions['B'].width = 38
