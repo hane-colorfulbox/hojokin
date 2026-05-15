@@ -214,19 +214,35 @@ def create_wage_calculation(
     total_emp = seishain_count + part_count
     standard_monthly = STANDARD_ANNUAL_HOURS / 12
 
-    # パートFTE計算（中途入退社者は在籍月按分で過大評価を防ぐ）
-    fte_part = 0
+    # FTE 計算（R215「FTE換算従業員数」用）
+    # 公募要領（IT2026 通常枠 p.9-10）原文:
+    #   「基準年度および算出対象年度に全月分の給与等の支給を受けた従業員のみ算定対象。
+    #    パート・非常勤含む。中途入退社者は除外。」
+    # → 中途者は **除外**（按分ではない）。docs/補助金_実務知識ベース.md:51-52, 203 参照
+    # - 12ヶ月在籍正社員: 1.0
+    # - 12ヶ月在籍パート: 月間労働時間/標準月間労働時間
+    # - 中途入退社者（full_year=False）: 完全除外
+    fte_seishain = 0.0
+    fte_part = 0.0
+    excluded_midyear = 0  # 中途者として除外した人数（凡例表示用）
     if employees_detail:
         for e in employees_detail:
+            if not e.get('full_year', True):
+                excluded_midyear += 1
+                continue
             if is_full_time_employment(e.get('type')):
-                continue
-            monthly_h = e.get('monthly_hours', 0)
-            if monthly_h <= 0:
-                continue
-            tenure = e.get('tenure_months', 12)
-            tenure_factor = min(tenure, 12) / 12 if tenure > 0 else 0
-            fte_part += (monthly_h / standard_monthly) * tenure_factor
-    fte_adjusted = seishain_count + fte_part
+                fte_seishain += 1.0
+            else:
+                monthly_h = e.get('monthly_hours', 0)
+                if monthly_h <= 0:
+                    continue
+                fte_part += monthly_h / standard_monthly
+        fte_adjusted = fte_seishain + fte_part
+    else:
+        # employees_detail が無い場合（賃金台帳・賃金状況報告シートともに取得失敗）の
+        # フォールバック: 雇用区分の単純集計（中途者特定不可、警告表示）
+        fte_seishain = float(seishain_count)
+        fte_adjusted = seishain_count + fte_part
 
     # ===== Sheet 1: 給与支給総額計算 =====
     ws1 = wb.active
@@ -379,18 +395,47 @@ def create_wage_calculation(
     # FTE
     if employees_detail:
         r += 2
-        _cell(ws1, r, 2, '【パートFTE換算（参考）】', HEADER_FONT, border=None)
+        _cell(ws1, r, 2, '【FTE換算（12ヶ月在籍者のみ／中途入退社は除外）】',
+              HEADER_FONT, border=None)
+        _cell(ws1, r, 3,
+              f'出所: IT2026 通常枠公募要領 p.9-10（中途入退社者は算定対象外）',
+              SMALL_FONT, border=None)
         r += 1
         _cell(ws1, r, 2, '標準年間労働時間')
         _cell(ws1, r, 3, f'{STANDARD_ANNUAL_HOURS}時間')
         _cell(ws1, r, 4, '40h/週 x 52週', SMALL_FONT)
         r += 1
-        _cell(ws1, r, 2, 'パートFTE換算合計')
-        _cell(ws1, r, 3, round(fte_part, 2), fmt='0.00')
+        seishain_fte_row = r
+        _cell(ws1, r, 2, '正社員FTE合計（12ヶ月在籍のみ）')
+        _cell(ws1, r, 3, round(fte_seishain, 2), fmt='0.00')
+        _cell(ws1, r, 4,
+              f'12ヶ月在籍正社員のみカウント（中途者は公募要領により除外）',
+              SMALL_FONT)
         r += 1
+        part_fte_row = r
+        _cell(ws1, r, 2, 'パートFTE換算合計（12ヶ月在籍のみ）')
+        _cell(ws1, r, 3, round(fte_part, 2), fmt='0.00')
+        _cell(ws1, r, 4,
+              f'12ヶ月在籍パートのみ。月間労働時間/標準月間時間 で正社員換算',
+              SMALL_FONT)
+        if excluded_midyear:
+            r += 1
+            _cell(ws1, r, 2, '中途入退社で除外した人数')
+            _cell(ws1, r, 3, excluded_midyear)
+            _cell(ws1, r, 4,
+                  '※R215 算定対象外（公募要領「全月分の給与等の支給を受けた従業員」）',
+                  SMALL_FONT)
+            ws1.cell(r, 2).fill = FILL_GRAY
+            ws1.cell(r, 3).fill = FILL_GRAY
+            ws1.cell(r, 4).fill = FILL_GRAY
+        r += 1
+        # FTE換算後（D）を Excel 関数化（正社員FTE + パートFTE）
         _cell(ws1, r, 2, 'FTE換算後従業員数（D）', BOLD_FONT, fill=FILL_GREEN)
-        _cell(ws1, r, 3, round(fte_adjusted, 2), BOLD_FONT, '0.00', FILL_GREEN)
-        _cell(ws1, r, 4, f'正社員{seishain_count} + パートFTE{round(fte_part, 2)}', SMALL_FONT, fill=FILL_GREEN)
+        _cell(ws1, r, 3, f'=C{seishain_fte_row}+C{part_fte_row}',
+              BOLD_FONT, '0.00', FILL_GREEN)
+        _cell(ws1, r, 4,
+              f'機械計算: C{seishain_fte_row}+C{part_fte_row}（正社員FTE + パートFTE）',
+              SMALL_FONT, fill=FILL_GREEN)
 
     # 1人当たり計算
     r += 2

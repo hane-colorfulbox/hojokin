@@ -9,7 +9,7 @@ import unicodedata
 from pathlib import Path
 
 from .config import get_mapping, CLAUDE_API_KEY
-from .models import ExtractionResult, ProcessingStatus
+from .models import ExtractionResult, ProcessingStatus, CompanyInfo
 from .ai_extractor import create_extractor, BaseExtractor, StubExtractor
 from .hearing_reader import read_hearing_sheet
 from .template_filler import fill_template
@@ -748,6 +748,7 @@ def run_wage_calculation(
     cached_financial: 'FinancialData | None' = None,
     cached_ledger_employees: list | None = None,
     fiscal_month_override: int | None = None,
+    cached_company: 'CompanyInfo | None' = None,
 ) -> ProcessingStatus:
     """
     タスク2: 給与支給総額計算の実行
@@ -801,8 +802,42 @@ def run_wage_calculation(
         employees_detail = None
         seishain_count = 0
         part_count = 0
-        yakuin_count = 1
         yakuin_hoshu_3m = 0
+
+        # 役員数の取得（履歴事項証明書から動的に決定。固定値ハードコードを廃止）
+        # 申請書作成タスクから cached_company が渡ってきていればそれを優先。
+        # 無ければ resource_folder 内の履歴事項証明書を AI 抽出する（API 1回）。
+        # 全く取れない場合のフォールバックは1人（代表取締役を最低限想定）。
+        #
+        # 注意: AI プロンプト（ai_extractor.py:287）で「代表者は officers に含めない」
+        # と明示しており、CompanyInfo.officers は代表取締役を除いたリストになる。
+        # よって役員総数 = 1（代表者）+ len(officers)。template_filler.py:121 と同じ規約。
+        from .ai_extractor import APICreditExhaustedError
+        yakuin_count = 1
+        company = cached_company
+        if company is None:
+            registry_path = detector.get('registry')
+            if registry_path:
+                try:
+                    images = pdf_to_images(registry_path)
+                    company = extractor.extract_registry(images)
+                    logger.info(
+                        f'履歴事項: {company.name}（officers={len(company.officers)}名）'
+                    )
+                except APICreditExhaustedError:
+                    # 残高切れは他の API 呼び出しも全部失敗するので即停止
+                    raise
+                except Exception as e:
+                    logger.warning(f'履歴事項証明書の AI 抽出に失敗: {e}')
+                    company = None
+        if company is not None:
+            # 代表者(+1) + 取締役・監査役等(officers リスト)
+            yakuin_count = 1 + len(company.officers)
+            logger.info(
+                f'役員数: {yakuin_count}名（代表者1 + その他役員{len(company.officers)}名）'
+            )
+        else:
+            logger.info('役員数: 1名（履歴事項証明書なし or 取得失敗のためフォールバック）')
 
         wage_report_path = detector.get('wage_report')
         if wage_report_path:
