@@ -1635,6 +1635,99 @@ def export_wage_ledger_summary(
             for c in range(1, source_col + 1):
                 ws.cell(row=r, column=c).fill = excluded_fill
 
+    # ── 合計行（全員 / 集計対象のみの2段）────────────────────────────
+    # 後段の給与支給総額計算や申請書 R216 との突合用。SUM 式で記述しておくと
+    # 行追加・編集後も自動再計算されるので、人間チェックの再利用性が上がる。
+    if employees:
+        from openpyxl.styles import Font as _Font  # 上で import 済みだが明示
+        subtotal_fill_all = PatternFill(
+            start_color='B4C7E7', end_color='B4C7E7', fill_type='solid',
+        )
+        subtotal_fill_target = PatternFill(
+            start_color='C6E0B4', end_color='C6E0B4', fill_type='solid',
+        )
+        first_data_row = header_row + 1
+        last_data_row = header_row + len(employees)
+        total_all_row = last_data_row + 1
+        total_target_row = last_data_row + 2
+
+        ws.cell(row=total_all_row, column=2, value='合計（全員）').font = Font(bold=True, size=10)
+        ws.cell(row=total_target_row, column=2,
+                value='合計（集計対象のみ）').font = Font(bold=True, size=10)
+
+        # 集計対象行のインデックス（行番号は first_data_row 基準）
+        target_row_nums = [
+            first_data_row + i for i, emp in enumerate(employees)
+            if not _is_excluded_from_wage_total(emp)
+        ]
+
+        def _set_total_cell(row: int, col: int, formula: str, fmt: str, fill):
+            c = ws.cell(row=row, column=col, value=formula)
+            c.font = Font(bold=True)
+            c.number_format = fmt
+            c.fill = fill
+            c.border = thin_border
+
+        # 賃金: 1月〜12月 + 年間合計
+        for col in list(range(wage_start, wage_start + 12)) + [wage_total_col]:
+            col_letter = get_column_letter(col)
+            # 全員
+            _set_total_cell(
+                total_all_row, col,
+                f'=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})',
+                number_fmt, subtotal_fill_all,
+            )
+            # 集計対象のみ（個別セルの加算式）
+            if target_row_nums:
+                parts = '+'.join(f'{col_letter}{r}' for r in target_row_nums)
+                target_formula = f'={parts}'
+            else:
+                target_formula = 0
+            _set_total_cell(
+                total_target_row, col, target_formula,
+                number_fmt, subtotal_fill_target,
+            )
+
+        # 労働時間: 1月〜12月 + 年間合計
+        for col in list(range(hours_start, hours_start + 12)) + [hours_total_col]:
+            col_letter = get_column_letter(col)
+            _set_total_cell(
+                total_all_row, col,
+                f'=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})',
+                hours_fmt, subtotal_fill_all,
+            )
+            if target_row_nums:
+                parts = '+'.join(f'{col_letter}{r}' for r in target_row_nums)
+                target_formula = f'={parts}'
+            else:
+                target_formula = 0
+            _set_total_cell(
+                total_target_row, col, target_formula,
+                hours_fmt, subtotal_fill_target,
+            )
+
+        # 備考: 「集計対象のみ」の年間合計は R216 の母数（給与支給総額・役員除外）
+        wage_total_letter = get_column_letter(wage_total_col)
+        note_cell = ws.cell(
+            row=total_target_row, column=source_col,
+            value=f'※「合計（集計対象のみ）」の年間合計（{wage_total_letter}列）'
+                  f'＝ R216 給与支給総額の母数',
+        )
+        note_cell.font = Font(size=9, color='666666')
+        note_cell.fill = subtotal_fill_target
+        note_cell.border = thin_border
+        note_cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+
+        # 全員行の備考: グレー行（役員・中途）も含む合計である旨を明示
+        note_all_cell = ws.cell(
+            row=total_all_row, column=source_col,
+            value='※役員・中途入退社を含む全行合計（R216 母数には未調整）',
+        )
+        note_all_cell.font = Font(size=9, color='666666')
+        note_all_cell.fill = subtotal_fill_all
+        note_all_cell.border = thin_border
+        note_all_cell.alignment = Alignment(horizontal='left', vertical='center', wrap_text=True)
+
     # 列幅調整
     ws.column_dimensions['A'].width = 5
     ws.column_dimensions['B'].width = 14

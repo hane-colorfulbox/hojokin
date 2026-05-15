@@ -407,6 +407,54 @@ def create_wage_calculation(
                     fill = None
                 _cell(ws2, r, 2 + i, v, fmt=fmt, fill=fill)
 
+        # ── 合計行（全員 / 12ヶ月在籍のみの2段）────────────────────────
+        # 後段の検算・他ファイルとの突合用。SUM 式で書いておくと行追加・編集後も
+        # 自動再計算される。
+        if any(e.get('m1') or e.get('m2') or e.get('m3') for e in employees_detail):
+            first_data_row = 5  # ヘッダー r=4 の直下が最初のデータ行
+            last_data_row = r
+            r += 1
+            FILL_SUBTOTAL_ALL = PatternFill(start_color='B4C7E7', end_color='B4C7E7', fill_type='solid')
+            FILL_SUBTOTAL_TARGET = PatternFill(start_color='C6E0B4', end_color='C6E0B4', fill_type='solid')
+
+            _cell(ws2, r, 2, '', BOLD_FONT, fill=FILL_SUBTOTAL_ALL)
+            _cell(ws2, r, 3, '合計（全員）', BOLD_FONT, fill=FILL_SUBTOTAL_ALL)
+            _cell(ws2, r, 4, '', fill=FILL_SUBTOTAL_ALL)
+            # 1月/2月/3月/3ヶ月平均 の列合計
+            for col_idx in (5, 6, 7, 8):
+                col_letter = get_column_letter(col_idx)
+                _cell(
+                    ws2, r, col_idx,
+                    f'=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})',
+                    BOLD_FONT, fmt=NUMBER_FMT, fill=FILL_SUBTOTAL_ALL,
+                )
+            # 残り列はブランク（合計対象外）
+            for col_idx in (9, 10, 11, 12, 13):
+                _cell(ws2, r, col_idx, '', fill=FILL_SUBTOTAL_ALL)
+
+            # 12ヶ月在籍のみ（R216の母数になる集計対象）
+            target_rows = [
+                first_data_row + i for i, e in enumerate(employees_detail)
+                if e.get('full_year', True)
+            ]
+            r += 1
+            _cell(ws2, r, 2, '', BOLD_FONT, fill=FILL_SUBTOTAL_TARGET)
+            _cell(ws2, r, 3, '合計（12ヶ月在籍のみ）', BOLD_FONT, fill=FILL_SUBTOTAL_TARGET)
+            _cell(ws2, r, 4, '', fill=FILL_SUBTOTAL_TARGET)
+            for col_idx in (5, 6, 7, 8):
+                col_letter = get_column_letter(col_idx)
+                if target_rows:
+                    parts = '+'.join(f'{col_letter}{tr}' for tr in target_rows)
+                    formula = f'={parts}'
+                else:
+                    formula = 0
+                _cell(
+                    ws2, r, col_idx, formula,
+                    BOLD_FONT, fmt=NUMBER_FMT, fill=FILL_SUBTOTAL_TARGET,
+                )
+            for col_idx in (9, 10, 11, 12, 13):
+                _cell(ws2, r, col_idx, '', fill=FILL_SUBTOTAL_TARGET)
+
         # 凡例
         r += 2
         _cell(ws2, r, 2,
