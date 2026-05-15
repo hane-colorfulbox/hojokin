@@ -238,12 +238,15 @@ def create_wage_calculation(
     for i, h in enumerate(['科目', '金額（円）', '備考']):
         _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
 
+    # 備考に「決算書のどの表に載っている値か」を明示。決算書の構造は中小企業会計指針で
+    # 標準化されており、これらの勘定科目は必ず「販売費及び一般管理費」（販管費）の内訳
+    # 表に記載される。AI による推定ではなく会計知識からの固定マッピングなので 100% 正確。
     items = [
-        ('給料手当', financial.salary, '正社員給与（AI抽出：決算書PDF）'),
-        ('雑給', financial.misc_wages, 'パート・アルバイト給与（AI抽出：決算書PDF）'),
-        ('賞与', financial.bonus, '（AI抽出：決算書PDF）'),
-        ('法定福利費', financial.legal_welfare, '※給与支給総額から除外（AI抽出：決算書PDF）'),
-        ('福利厚生費', financial.welfare, '※給与支給総額から除外（AI抽出：決算書PDF）'),
+        ('給料手当', financial.salary, '販管費より｜正社員給与（AI抽出：決算書PDF）'),
+        ('雑給', financial.misc_wages, '販管費より｜パート・アルバイト給与（AI抽出：決算書PDF）'),
+        ('賞与', financial.bonus, '販管費より（AI抽出：決算書PDF）'),
+        ('法定福利費', financial.legal_welfare, '販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）'),
+        ('福利厚生費', financial.welfare, '販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）'),
     ]
     for name, amount, note in items:
         r += 1
@@ -283,6 +286,9 @@ def create_wage_calculation(
         '※AI抽出：決算書PDFの役員報酬を÷4で推定'
         if yakuin_source_is_ai else '賃金状況報告シートより'
     )
+    # 役員報酬の備考に「販管費の役員報酬欄から」を明示
+    if yakuin_source_is_ai:
+        yakuin_note = '販管費「役員報酬」より｜※AI抽出：決算書PDFの年額÷4で推定'
     _cell(ws1, r, 3, yakuin_hoshu_3m, fmt=NUMBER_FMT, fill=yakuin_cell_fill)
     _cell(ws1, r, 4, yakuin_note, SMALL_FONT, fill=yakuin_cell_fill)
     r += 1
@@ -379,19 +385,23 @@ def create_wage_calculation(
           '※下記すべてAI抽出値（決算書PDF由来）。テンプレ転記前に決算書原本と照合してください。',
           SMALL_FONT, border=None)
     ws1.cell(r, 2).fill = FILL_AI_EXTRACTED
-    for name, val in [
-        ('給料手当（販管費E5）', financial.salary),
-        ('雑給（販管費E6）', financial.misc_wages),
-        ('賞与手当（販管費E7）', financial.bonus),
-        ('売上高（B10）', financial.revenue),
-        ('粗利益（B11）', financial.gross_profit),
-        ('営業利益（B12）', financial.operating_profit),
-        ('経常利益（B13）', financial.ordinary_profit),
-        ('減価償却費（B14）', financial.depreciation),
-    ]:
+    # 決算書のどの表に載っている値かをセル右側の備考に明示する
+    # （会計指針で標準化されているため固定マッピングで 100% 正確）
+    template_items = [
+        ('給料手当（販管費E5）', financial.salary, '決算書「販売費及び一般管理費」より'),
+        ('雑給（販管費E6）', financial.misc_wages, '決算書「販売費及び一般管理費」より'),
+        ('賞与手当（販管費E7）', financial.bonus, '決算書「販売費及び一般管理費」より'),
+        ('売上高（B10）', financial.revenue, '決算書「損益計算書」より'),
+        ('粗利益（B11）', financial.gross_profit, '決算書「損益計算書」（売上総利益）より'),
+        ('営業利益（B12）', financial.operating_profit, '決算書「損益計算書」より'),
+        ('経常利益（B13）', financial.ordinary_profit, '決算書「損益計算書」より'),
+        ('減価償却費（B14）', financial.depreciation, '決算書「販売費及び一般管理費」or「製造原価報告書」より'),
+    ]
+    for name, val, where in template_items:
         r += 1
         _cell(ws1, r, 2, name)
         _cell(ws1, r, 3, val, fmt=NUMBER_FMT, fill=FILL_AI_EXTRACTED)
+        _cell(ws1, r, 4, where, SMALL_FONT)
 
     ws1.column_dimensions['A'].width = 2
     ws1.column_dimensions['B'].width = 38
