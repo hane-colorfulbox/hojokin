@@ -325,6 +325,10 @@ def run_application_transfer(
 
         # 賃金台帳 → 1人当たり給与支給総額の計画値 + 一覧Excel出力
         # 賃金台帳処理: AI 経路（PDF）が残高切れになっても Phase 1 結果は維持
+        wage_extraction_method = (
+            'AI抽出（Claude Sonnet 4.6）' if extractor is not None
+            else '決定論パーサー（USE_AI_WAGE_EXTRACTION=false）'
+        )
         try:
             wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
                 detector, extraction.financial, extractor=extractor,
@@ -339,9 +343,11 @@ def run_application_transfer(
                     detector, extraction.financial, extractor=None,
                     fiscal_month_override=fiscal_month_override,
                 )
+                wage_extraction_method = '決定論パーサー（AI残高切れフォールバック）'
             except Exception as e2:
                 logger.warning(f'決定論パーサーも失敗: {e2}')
                 wage_plan, ledger_employees, wage_status = None, [], 'error'
+                wage_extraction_method = '抽出失敗（AI残高切れ＋決定論パーサーも失敗）'
 
         # ユーザー指定の決算月 vs AI 推定の照合（警告のみ。処理は続行）
         _, fiscal_month_warning = _resolve_fiscal_period(
@@ -463,7 +469,10 @@ def run_application_transfer(
         if ledger_employees:
             company = output_path.stem.split('_')[0]
             ledger_output = output_path.parent / f'{company}_賃金台帳一覧.xlsx'
-            export_wage_ledger_summary(ledger_employees, ledger_output, company)
+            export_wage_ledger_summary(
+                ledger_employees, ledger_output, company,
+                extraction_method=wage_extraction_method,
+            )
             status.output_files.append(ledger_output.name)
 
     except Exception as e:

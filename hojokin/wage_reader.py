@@ -1461,16 +1461,27 @@ def export_wage_ledger_summary(
     employees: list[WageEmployee],
     output_path: Path,
     company_name: str = '',
+    extraction_method: str = '',
 ) -> Path:
     """
     賃金台帳から読み取ったデータを一覧Excelに出力（チェック用）
 
     出力内容:
-      左ブロック  : 月別課税対象額（12か月）+ 年間合計賃金
-      右ブロック  : 月別労働時間（12か月）+ 年間合計時間 + 月平均労働時間
-      右端       : データソース（抽出根拠の元ファイル名）
+      シート1「賃金台帳一覧」:
+        左ブロック  : 月別課税対象額（12か月）+ 年間合計賃金
+        右ブロック  : 月別労働時間（12か月）+ 年間合計時間 + 月平均労働時間
+        右端       : データソース（抽出根拠の元ファイル名）
+      シート2「算定根拠」:
+        - 採用列・含む経費・除外経費・役員除外ルール
+        - 抽出経路（AI / 決定論）
+        - 公募要領 第6回 p.10 原文引用
+        - データソースとなった賃金台帳ファイル一覧（重複排除）
 
     集計対象外（役員 or 非全月在籍）の行は薄いグレーで塗り、目視で除外行を判別可能にする。
+
+    引数:
+      extraction_method: 抽出経路の説明（'AI抽出（Claude Sonnet 4.6）' / '決定論パーサー' 等）。
+                        空文字なら算定根拠シートでは「未指定」表示。
     """
     from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
     from openpyxl.utils import get_column_letter
@@ -1500,9 +1511,21 @@ def export_wage_ledger_summary(
     if company_name:
         title = f'{company_name} — {title}'
     ws.cell(row=1, column=1, value=title).font = Font(bold=True, size=12)
-    ws.cell(row=2, column=1, value='※この一覧は賃金台帳から機械的に読み取ったデータです（AI生成ではありません）。'
-                                    'グレー行は給与支給総額の集計対象外（役員 or 非全月在籍）です')
+    ws.cell(
+        row=2, column=1,
+        value=(
+            '※採用列: 賃金台帳の「課税支給合計」（給与所得として課税対象となる経費。'
+            '非課税通勤手当・社保等控除前）。'
+            '出典: 中小企業省力化投資補助金 一般型 公募要領 第6回 p.10。'
+            '抽出経路と公募要領原文の引用は「算定根拠」シートを参照。'
+        ),
+    )
     ws.cell(row=2, column=1).font = Font(size=9, color='666666')
+    ws.cell(
+        row=3, column=1,
+        value='※グレー行は給与支給総額（R216）の集計対象外 — 役員 or 非全月在籍（中途入退社）',
+    )
+    ws.cell(row=3, column=1).font = Font(size=9, color='666666')
 
     # 列レイアウト
     # 1: No, 2: 従業員名, 3: 雇用形態,
@@ -1623,10 +1646,144 @@ def export_wage_ledger_summary(
     ws.column_dimensions[get_column_letter(avg_hours_col)].width = 11
     ws.column_dimensions[get_column_letter(source_col)].width = 40
 
+    # 算定根拠シート（採用列・除外ルール・公募要領原文・データソース一覧）
+    _write_calculation_basis_sheet(
+        wb,
+        employees=employees,
+        extraction_method=extraction_method,
+        thin_border=thin_border,
+    )
+
     wb.save(str(output_path))
     wb.close()
     logger.info(f'賃金台帳一覧出力: {output_path} ({len(employees)}名)')
     return output_path
+
+
+def _write_calculation_basis_sheet(
+    wb,
+    employees: list[WageEmployee],
+    extraction_method: str,
+    thin_border,
+) -> None:
+    """『算定根拠』シートを追加。R216 算定の根拠条文・採用列・データソースを記録。"""
+    from openpyxl.styles import Font, Alignment, PatternFill
+
+    ws = wb.create_sheet(title='算定根拠')
+
+    title_font = Font(bold=True, size=12)
+    section_font = Font(bold=True, size=10, color='FFFFFF')
+    section_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+    label_font = Font(bold=True, size=10)
+    quote_font = Font(size=10, italic=True, color='333333')
+    note_font = Font(size=9, color='666666')
+
+    ws.cell(row=1, column=1, value='給与支給総額（R216）の算定根拠').font = title_font
+    ws.cell(row=2, column=1, value='中小企業省力化投資補助金 一般型 第6回 公募要領 準拠').font = note_font
+
+    rows: list[tuple[str, str]] = [
+        ('対象補助金', '中小企業省力化投資補助金 一般型（第6回）'),
+        ('採用列', '賃金台帳の「課税支給合計」（給与所得として課税対象となる経費）'),
+        (
+            '含む経費',
+            '給料・賃金・賞与・各種手当（残業手当／休日出勤手当／'
+            '職務手当／地域手当／家族(扶養)手当／住宅手当）等',
+        ),
+        (
+            '含まない経費',
+            '福利厚生費・法定福利費・退職金・'
+            '非課税通勤手当（限度額内分、国税庁 No.2585 により給与所得に含まれない）',
+        ),
+        ('役員の扱い', '集計対象外（応募申請の手引き 第6回 p.24「役員報酬・役員の人数は含めません」）'),
+        (
+            '中途入退社者の扱い',
+            '集計対象外（基準年度に全月分の給与等の支給を受けていない従業員）',
+        ),
+        ('賞与の合算', '月別の課税給与に合算（賞与シートが別ファイルの場合は対応月に加算）'),
+        ('抽出経路', extraction_method or '未指定'),
+        (
+            '決定論パーサーの列優先順',
+            '① 課税支給合計 → ② 支給合計 → ③ 差引支給合計（手取り）',
+        ),
+    ]
+
+    start_row = 4
+    ws.cell(row=start_row, column=1, value='項目').font = section_font
+    ws.cell(row=start_row, column=1).fill = section_fill
+    ws.cell(row=start_row, column=2, value='値・説明').font = section_font
+    ws.cell(row=start_row, column=2).fill = section_fill
+    ws.cell(row=start_row, column=1).border = thin_border
+    ws.cell(row=start_row, column=2).border = thin_border
+
+    for i, (label, value) in enumerate(rows, 1):
+        r = start_row + i
+        c1 = ws.cell(row=r, column=1, value=label)
+        c1.font = label_font
+        c1.alignment = Alignment(vertical='top', wrap_text=True)
+        c1.border = thin_border
+        c2 = ws.cell(row=r, column=2, value=value)
+        c2.alignment = Alignment(vertical='top', wrap_text=True)
+        c2.border = thin_border
+
+    # 公募要領 第6回 p.10 原文
+    quote_row = start_row + len(rows) + 3
+    ws.cell(row=quote_row, column=1, value='公募要領 第6回 p.10 原文').font = label_font
+    ws.merge_cells(start_row=quote_row + 1, start_column=1,
+                   end_row=quote_row + 1, end_column=2)
+    quote_cell = ws.cell(
+        row=quote_row + 1, column=1,
+        value=(
+            '算定対象となる給与等は、給料、賃金、賞与、各種手当'
+            '(残業手当、休日出勤手当、職務手当、地域手当、家族(扶養)手当、住宅手当)等、'
+            '給与所得として課税対象となる経費を指します。'
+            '福利厚生費、法定福利費や退職金は除きます。'
+        ),
+    )
+    quote_cell.font = quote_font
+    quote_cell.alignment = Alignment(vertical='top', wrap_text=True)
+    ws.row_dimensions[quote_row + 1].height = 60
+
+    # 公式 URL
+    url_row = quote_row + 3
+    ws.cell(row=url_row, column=1, value='公募要領 第6回 PDF').font = label_font
+    ws.cell(
+        row=url_row, column=2,
+        value='https://shoryokuka.smrj.go.jp/assets/pdf/application_guidelines_ippan_06.pdf',
+    )
+    ws.cell(row=url_row + 1, column=1, value='応募申請の手引き 第6回 PDF').font = label_font
+    ws.cell(
+        row=url_row + 1, column=2,
+        value='https://shoryokuka.smrj.go.jp/assets/pdf/oubo_manual_ippan_06.pdf',
+    )
+    ws.cell(row=url_row + 2, column=1, value='通勤手当 非課税限度額').font = label_font
+    ws.cell(
+        row=url_row + 2, column=2,
+        value='https://www.nta.go.jp/taxes/shiraberu/taxanswer/gensen/2585.htm（国税庁 No.2585）',
+    )
+
+    # データソース一覧（emp.source_file から重複排除）
+    source_files: list[str] = []
+    seen: set[str] = set()
+    for emp in employees:
+        src = (emp.source_file or '').strip()
+        if src and src not in seen:
+            seen.add(src)
+            source_files.append(src)
+
+    src_row = url_row + 4
+    ws.cell(
+        row=src_row, column=1,
+        value=f'参照した賃金台帳ファイル（{len(source_files)}件）',
+    ).font = label_font
+    if not source_files:
+        ws.cell(row=src_row + 1, column=2, value='（ファイル情報なし）').font = note_font
+    else:
+        for i, src in enumerate(source_files):
+            ws.cell(row=src_row + 1 + i, column=2, value=src).font = note_font
+
+    # 列幅
+    ws.column_dimensions['A'].width = 24
+    ws.column_dimensions['B'].width = 90
 
 
 # ============================================================
