@@ -24,6 +24,221 @@ from .pdf_reader import pdf_to_images
 logger = logging.getLogger(__name__)
 
 
+# ───────────────────────── ファイル名年月パース ─────────────────────────
+# 決算書ファイル名から「期末年月 (year, month)」を取り出すユーティリティ。
+# 例:
+#   令和7年3月決算書        → (2025, 3)
+#   令和6年3月決算書        → (2024, 3)
+#   R7.3決算書              → (2025, 3)
+#   2025年3月期決算書        → (2025, 3)
+#   2025.03_決算書          → (2025, 3)
+#   平成31年4月決算書        → (2019, 4)
+# 取れなければ None。年月の妥当性チェック付き（年 1900-2100、月 1-12）。
+
+_REIWA_RE = re.compile(r'令和\s*(\d{1,2})\s*年\s*(\d{1,2})\s*月')
+_REIWA_GANNEN_RE = re.compile(r'令和\s*元\s*年\s*(\d{1,2})\s*月')
+_HEISEI_RE = re.compile(r'平成\s*(\d{1,2})\s*年\s*(\d{1,2})\s*月')
+_HEISEI_GANNEN_RE = re.compile(r'平成\s*元\s*年\s*(\d{1,2})\s*月')
+_RY_DOT_RE = re.compile(r'(?<![A-Za-z0-9])R\s*(\d{1,2})\s*[\.\-_／/]\s*(\d{1,2})(?!\d)')
+_YYYY_KANJI_RE = re.compile(r'(\d{4})\s*年\s*(\d{1,2})\s*月')
+_YYYY_SEP_RE = re.compile(r'(?<!\d)(\d{4})[\.\-_／/](\d{1,2})(?!\d)')
+
+
+def _parse_fiscal_end_from_filename(name: str) -> tuple[int, int] | None:
+    """ファイル名から期末年月 (year, month) を取り出す。失敗時 None。
+
+    NFC 正規化してから複数のパターンを試行し、最初に成立したものを返す。
+    """
+    s = unicodedata.normalize('NFC', name)
+
+    def _valid(y: int, m: int) -> tuple[int, int] | None:
+        if 1900 <= y <= 2100 and 1 <= m <= 12:
+            return (y, m)
+        return None
+
+    # 令和元年 (=2019)
+    m = _REIWA_GANNEN_RE.search(s)
+    if m:
+        return _valid(2019, int(m.group(1)))
+    # 令和N年M月 (令和N = 2018 + N)
+    m = _REIWA_RE.search(s)
+    if m:
+        return _valid(2018 + int(m.group(1)), int(m.group(2)))
+    # 平成元年 (=1989)
+    m = _HEISEI_GANNEN_RE.search(s)
+    if m:
+        return _valid(1989, int(m.group(1)))
+    # 平成N年M月 (平成N = 1988 + N)
+    m = _HEISEI_RE.search(s)
+    if m:
+        return _valid(1988 + int(m.group(1)), int(m.group(2)))
+    # RN.M / RN-M / RN_M (略式の令和)
+    m = _RY_DOT_RE.search(s)
+    if m:
+        return _valid(2018 + int(m.group(1)), int(m.group(2)))
+    # YYYY年M月
+    m = _YYYY_KANJI_RE.search(s)
+    if m:
+        return _valid(int(m.group(1)), int(m.group(2)))
+    # YYYY-MM / YYYY.MM / YYYY_MM
+    m = _YYYY_SEP_RE.search(s)
+    if m:
+        return _valid(int(m.group(1)), int(m.group(2)))
+    return None
+
+
+_WAGE_PERIOD_REIWA_RE = re.compile(
+    r'R\s*(\d{1,2})\s*[\.\-_／/]\s*(\d{1,2})\s*[-〜~～ー]\s*R\s*(\d{1,2})\s*[\.\-_／/]\s*(\d{1,2})'
+)
+_WAGE_PERIOD_YYYY_RE = re.compile(
+    r'(\d{4})\s*[\.\-_／/年]\s*(\d{1,2})\s*月?\s*[-〜~～ー]\s*(\d{4})\s*[\.\-_／/年]\s*(\d{1,2})'
+)
+
+
+def _parse_wage_ledger_period(name: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
+    """賃金台帳のファイル名から (期首年月, 期末年月) を取り出す。失敗時 None。
+
+    例:
+      R6.4-R7.3賃金台帳    → ((2024, 4), (2025, 3))
+      2024-04～2025-03賃金 → ((2024, 4), (2025, 3))
+    """
+    s = unicodedata.normalize('NFC', name)
+
+    def _valid(y: int, mo: int) -> bool:
+        return 1900 <= y <= 2100 and 1 <= mo <= 12
+
+    m = _WAGE_PERIOD_REIWA_RE.search(s)
+    if m:
+        sy = 2018 + int(m.group(1))
+        sm = int(m.group(2))
+        ey = 2018 + int(m.group(3))
+        em = int(m.group(4))
+        if _valid(sy, sm) and _valid(ey, em):
+            return ((sy, sm), (ey, em))
+    m = _WAGE_PERIOD_YYYY_RE.search(s)
+    if m:
+        sy = int(m.group(1))
+        sm = int(m.group(2))
+        ey = int(m.group(3))
+        em = int(m.group(4))
+        if _valid(sy, sm) and _valid(ey, em):
+            return ((sy, sm), (ey, em))
+    return None
+
+
+def _parse_year_month_from_iso(s: str) -> tuple[int, int] | None:
+    """'2025-03' / '2025-03-31' / '2025/03' → (2025, 3)。失敗時 None。"""
+    if not s:
+        return None
+    s = s.strip()
+    m = re.match(r'^(\d{4})[\-\./](\d{1,2})', s)
+    if not m:
+        return None
+    y, mo = int(m.group(1)), int(m.group(2))
+    if 1900 <= y <= 2100 and 1 <= mo <= 12:
+        return (y, mo)
+    return None
+
+
+def _check_pl_wage_period_consistency(
+    detector: 'FileDetector',
+    financial,  # FinancialData | None
+    fiscal_month_override: int | None,
+) -> tuple[object, str]:
+    """賃金台帳ファイル名の期間と PL 期末年月の整合性をチェック。
+
+    ズレを検出したら financial の数値情報を空に戻して「決算書由来の値を出力に
+    乗せない」+ 強警告メッセージを返す。給与支給総額の本算出は賃金台帳ベースで
+    続行されるが、テンプレ転記用の財務値はスキップされる。
+
+    Returns:
+        (financial_or_reset, warning_message)
+        - financial_or_reset: 整合OK時はそのまま。NG時は revenue=0 にリセット
+        - warning_message: 空 or 強警告（status.message 末尾に追加する想定）
+    """
+    if financial is None:
+        return financial, ''
+
+    pl_end = _parse_year_month_from_iso(getattr(financial, 'fiscal_year_end', '') or '')
+
+    # 賃金台帳ファイル名から期末を集める
+    ledger_paths = detector.get_all('wage_ledger')
+    wage_ends: list[tuple[int, int]] = []
+    for p in ledger_paths:
+        period = _parse_wage_ledger_period(p.name)
+        if period is not None:
+            wage_ends.append(period[1])
+
+    msgs: list[str] = []
+
+    # ── 賃金台帳期末 vs PL期末 ──
+    if wage_ends and pl_end is not None:
+        # 賃金台帳が複数あっても、通常は同一期末年月のはず。バラついていたら最頻値
+        # を採用（端末ばらつき疑い）。ここでは最も新しいものを採用して比較
+        latest_wage_end = max(wage_ends)
+        if latest_wage_end != pl_end:
+            msgs.append(
+                f' ⛔ 致命的不整合: 賃金台帳期末={latest_wage_end[0]:04d}-{latest_wage_end[1]:02d} ／ '
+                f'決算書期末={pl_end[0]:04d}-{pl_end[1]:02d}。'
+                f'別の期の決算書が読み込まれた可能性が高いため、決算書由来の'
+                f'財務値（売上・粗利・営業利益等）の転記をスキップしました。'
+                f'資料フォルダから前期の決算書を退避してから再実行してください。'
+            )
+
+    # ── 賃金台帳期末 vs ユーザー指定の決算月 ──
+    if wage_ends and fiscal_month_override is not None:
+        latest_wage_end = max(wage_ends)
+        if latest_wage_end[1] != fiscal_month_override:
+            msgs.append(
+                f' ⛔ 致命的不整合: 賃金台帳期末月={latest_wage_end[1]}月 ／ '
+                f'ユーザー指定決算月={fiscal_month_override}月。'
+                f'賃金台帳の対象期間がユーザー指定と矛盾しています。'
+                f'決算月の設定または賃金台帳の差し替えを確認してください。'
+            )
+
+    # ── PL期末 vs ユーザー指定の決算月 ──
+    if pl_end is not None and fiscal_month_override is not None and not wage_ends:
+        # 賃金台帳ファイル名から期間が取れなかった時のフォールバック
+        if pl_end[1] != fiscal_month_override:
+            msgs.append(
+                f' ⚠ 警告: 決算書期末月={pl_end[1]}月 ／ '
+                f'ユーザー指定決算月={fiscal_month_override}月で不一致。'
+                f'別の期の決算書が読み込まれた可能性があります。'
+            )
+
+    warning = ''.join(msgs)
+    if warning and '致命的不整合' in warning:
+        # 致命的不整合: financial を「revenue=0」状態にリセットして、テンプレ転記の
+        # 起点である「PL値の出力」を全部止める。給与支給総額は賃金台帳から再算出されるが
+        # 売上・粗利・営業利益・経常利益・減価償却費・役員報酬の決算書由来値は出ない。
+        from .models import FinancialData
+        reset = FinancialData()
+        # 賃金台帳から取れる情報（人件費周辺）は維持したいが、PL値はリセット
+        logger.warning(f'PL/賃金台帳整合性チェック失敗: {warning}')
+        return reset, warning
+
+    if warning:
+        logger.warning(f'PL/賃金台帳整合性チェック警告: {warning}')
+    return financial, warning
+
+
+def _pick_full_version(candidates: list[Path]) -> Path:
+    """同一期PDF候補から「フル版」を選ぶ。
+
+    PDFsam 等の部分抜粋を除外してサイズ最大を採用。
+    全候補が抜粋マーカー付きなら、消去法でサイズ最大を採用。
+    """
+    if len(candidates) == 1:
+        return candidates[0]
+    EXCLUDE_MARKERS = ('_PDFsam_', 'PDFsam', '部分抜粋', '抜粋')
+    full_versions = [
+        p for p in candidates
+        if not any(m in p.name for m in EXCLUDE_MARKERS)
+    ]
+    pool = full_versions or candidates
+    return max(pool, key=lambda p: p.stat().st_size)
+
+
 class FileDetector:
     """資料フォルダからファイルを自動分類"""
 
@@ -122,23 +337,26 @@ class FileDetector:
         """カテゴリの全ファイルを返す"""
         return self.files.get(category, [])
 
-    def get_pl_latest(self) -> Path | None:
+    def get_pl_latest(self, fiscal_month_override: int | None = None) -> Path | None:
         """損益計算書の直近期を返す。
 
-        判定優先順:
+        判定優先順（fiscal_month_override 指定時は決算月一致を最優先）:
           1. ファイル名に「第N期」を含む → N が最大のものを採用（事業年数の進んだ会社対応）
-          2. 同期が複数あれば、PDFsam等の部分抜粋を除外し、フル版（サイズ最大）を採用
-          3. 第N期表記が無ければ更新日時最新を採用
-             （旧実装の「ファイルサイズ最大」フォールバックは、たまたま前期決算書が最大の
-              ケースで前期/前々期の数値を抽出する誤動作を起こすため廃止。
-              実例: 第5期376KB > 第4期840KB のとき第4期が選ばれ、その「前期欄」=第3期の
-              数値が抽出されてしまった案件あり。）
+          2. ファイル名から期末年月を抽出（令和X年Y月 / RY.M / YYYY年M月 / YYYY-MM 等）
+             → fiscal_month_override が指定されていれば、月が一致する候補のみで比較
+             → 期末年月が最新のものを採用
+          3. 同期が複数あれば、PDFsam等の部分抜粋を除外し、フル版（サイズ最大）を採用
+          4. 上記いずれも該当なければ更新日時最新を採用
+
+        旧実装の問題: ステップ1・2が無いと「令和7年3月決算書」「令和6年3月決算書」のような
+        ファイル名（第N期表記なし）が並んだ際、mtime ガチャで前期決算書が選ばれて
+        賃金台帳の期間と整合しない財務値が転記される誤動作があった。
         """
         pls = self.files.get('pl', [])
         if not pls:
             return None
 
-        # 「第5期」「第10期」等から数値を取り出す
+        # ---- ステップ1: 第N期表記 ----
         period_re = re.compile(r'第(\d+)期')
 
         def period_num(p: Path) -> int:
@@ -150,19 +368,44 @@ class FileDetector:
 
         if max_num >= 0:
             latest = [p for p, n in nums if n == max_num]
-            if len(latest) == 1:
-                return latest[0]
-            # 同一期のPDFが複数 → 部分抜粋（PDFsam分割版・抜粋版）を除外してフル版優先
-            EXCLUDE_MARKERS = ('_PDFsam_', 'PDFsam', '部分抜粋', '抜粋')
-            full_versions = [
-                p for p in latest
-                if not any(m in p.name for m in EXCLUDE_MARKERS)
-            ]
-            if full_versions:
-                return max(full_versions, key=lambda p: p.stat().st_size)
-            return max(latest, key=lambda p: p.stat().st_size)
+            return _pick_full_version(latest)
 
-        # 第N期表記が無い → 更新日時最新（古いPDFが偶然サイズ最大でも誤選択しない）
+        # ---- ステップ2: ファイル名から期末年月を抽出 ----
+        date_pairs = [
+            (p, _parse_fiscal_end_from_filename(p.name))
+            for p in pls
+        ]
+        with_date = [(p, ym) for p, ym in date_pairs if ym is not None]
+
+        if with_date:
+            # 決算月指定があれば、月が一致する候補に絞る
+            if fiscal_month_override is not None:
+                month_match = [
+                    (p, ym) for p, ym in with_date
+                    if ym[1] == fiscal_month_override
+                ]
+                if month_match:
+                    with_date = month_match
+                else:
+                    logger.warning(
+                        f'決算月{fiscal_month_override}月と一致するファイル名が無く、'
+                        f'年月最新で選びます: '
+                        f'{[(p.name, ym) for p, ym in with_date]}'
+                    )
+            # 期末年月が最新のもの
+            max_ym = max(ym for _, ym in with_date)
+            latest = [p for p, ym in with_date if ym == max_ym]
+            if len(latest) > 1:
+                logger.info(
+                    f'同一期末年月のPL候補が{len(latest)}件あり → フル版優先で選択'
+                )
+            return _pick_full_version(latest)
+
+        # ---- ステップ3: フォールバック（mtime 最新） ----
+        logger.warning(
+            f'PL候補のファイル名から期番号も期末年月も抽出できないため、'
+            f'更新日時最新でフォールバックします: {[p.name for p in pls]}'
+        )
         return max(pls, key=lambda p: p.stat().st_mtime)
 
     def summary(self) -> str:
@@ -286,8 +529,11 @@ def run_application_transfer(
                 logger.info(f'履歴事項: {extraction.company.name}')
 
             # 損益計算書PDF → FinancialData
-            pl_path = detector.get_pl_latest()
+            # 決算月指定があれば、ファイル名年月と突合して直近期を確定（誤読防止）
+            pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
+            pl_period_warning = ''
             if pl_path:
+                logger.info(f'直近期決算書として採用: {pl_path.name}')
                 images = pdf_to_images(pl_path)
                 cost_report_path = detector.get('cost_report')
                 if cost_report_path:
@@ -296,6 +542,14 @@ def run_application_transfer(
                     cost_report_detected = True
                 extraction.financial = extractor.extract_pl(images)
                 logger.info(f'損益計算書: 売上{extraction.financial.revenue:,}')
+
+                # 賃金台帳期間 vs PL期末 / ユーザー指定決算月の整合性チェック
+                # ズレを検出したら財務値転記をスキップ + 強警告
+                extraction.financial, pl_period_warning = (
+                    _check_pl_wage_period_consistency(
+                        detector, extraction.financial, fiscal_month_override,
+                    )
+                )
 
             # 納税証明書PDF
             tax_path = detector.get('tax')
@@ -457,6 +711,7 @@ def run_application_transfer(
             + f'完了。空欄{len(empty_cells)}件{wage_warning}{consistency_warning}'
             + validation_warnings
             + fiscal_month_warning
+            + pl_period_warning
             + cost_report_warning
             + biz_desc_warning
             + wage_pdf_warning
@@ -518,13 +773,23 @@ def run_wage_calculation(
 
         # 損益計算書（任意: あれば精度向上）— キャッシュがあれば再利用
         financial = cached_financial
+        pl_period_warning = ''
         if financial is None:
-            pl_path = detector.get_pl_latest()
+            pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
             if pl_path:
+                logger.info(f'直近期決算書として採用: {pl_path.name}')
                 images = pdf_to_images(pl_path)
                 financial = extractor.extract_pl(images)
+                # 賃金台帳期間 vs PL期末 / ユーザー指定決算月の整合性チェック
+                financial, pl_period_warning = _check_pl_wage_period_consistency(
+                    detector, financial, fiscal_month_override,
+                )
         else:
             logger.info('PL: 申請書作成タスクの結果を再利用（API呼出スキップ）')
+            # 申請書作成タスクで既にチェック済みだが、キャッシュ経路でも再確認
+            financial, pl_period_warning = _check_pl_wage_period_consistency(
+                detector, financial, fiscal_month_override,
+            )
 
         if financial is None or financial.revenue == 0:
             from .models import FinancialData
@@ -626,7 +891,7 @@ def run_wage_calculation(
 
         status.status = '完了'
         status.output_files = [output_path.name]
-        status.message = '給与支給総額計算 完了' + fiscal_month_warning
+        status.message = '給与支給総額計算 完了' + fiscal_month_warning + pl_period_warning
         logger.info(f'給与計算完了: {output_path.name}')
 
     except Exception as e:
@@ -1138,10 +1403,16 @@ def _build_employees_detail_from_ledger(
             idx for idx in month_order
             if idx < len(emp.monthly_wages) and emp.monthly_wages[idx] is not None
         ]
+        tenure_months = len(ordered_months_with_data)
+        full_year = tenure_months >= 12
+
         last_three = ordered_months_with_data[-3:]
         m_vals = [emp.monthly_wages[m] or 0 for m in last_three]
+        # 中途者向け: 表示列に対応する暦月ラベル（実体が分かるように）
+        last_three_labels = [f'{m + 1}月' for m in last_three]
         while len(m_vals) < 3:
             m_vals.append(0)
+            last_three_labels.append('')
 
         detail.append({
             'no': len(detail) + 1,
@@ -1153,6 +1424,10 @@ def _build_employees_detail_from_ledger(
             'hr': emp.hourly_rate,
             'monthly_hours': emp.monthly_avg_hours,
             'judge': '',
+            # 中途入退社の扱いを正しくするための追加情報
+            'tenure_months': tenure_months,
+            'full_year': full_year,
+            'last_three_labels': last_three_labels,
         })
     return detail
 
@@ -1228,6 +1503,11 @@ def _read_wage_report(path: Path) -> tuple[list[dict], int, int, int]:
             'hr': round(avg_hr),
             'monthly_hours': round(avg_hours, 1),
             'judge': judge or '',
+            # 賃金状況報告シート由来は在籍中の社員のみが載る前提のため、
+            # 全員 12ヶ月在籍扱いとする（賃金台帳の中途入退社検出とは別系統）
+            'tenure_months': 12,
+            'full_year': True,
+            'last_three_labels': ['', '', ''],
         })
 
     wb.close()

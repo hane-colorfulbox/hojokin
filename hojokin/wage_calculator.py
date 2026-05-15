@@ -184,12 +184,18 @@ def create_wage_calculation(
     total_emp = seishain_count + part_count
     standard_monthly = STANDARD_ANNUAL_HOURS / 12
 
-    # パートFTE計算
+    # パートFTE計算（中途入退社者は在籍月按分で過大評価を防ぐ）
     fte_part = 0
     if employees_detail:
         for e in employees_detail:
-            if not is_full_time_employment(e.get('type')) and e.get('monthly_hours', 0) > 0:
-                fte_part += e['monthly_hours'] / standard_monthly
+            if is_full_time_employment(e.get('type')):
+                continue
+            monthly_h = e.get('monthly_hours', 0)
+            if monthly_h <= 0:
+                continue
+            tenure = e.get('tenure_months', 12)
+            tenure_factor = min(tenure, 12) / 12 if tenure > 0 else 0
+            fte_part += (monthly_h / standard_monthly) * tenure_factor
     fte_adjusted = seishain_count + fte_part
 
     # ===== Sheet 1: 給与支給総額計算 =====
@@ -344,29 +350,82 @@ def create_wage_calculation(
         _cell(ws2, 2, 2, '従業員別給与明細（直近3ヶ月）', TITLE_FONT, border=None)
 
         headers = ['No', '氏名', '雇用形態', '1月基本給', '2月基本給', '3月基本給',
-                   '3ヶ月平均', '時給', '月間平均時間', 'FTE', '最低賃金判定']
+                   '3ヶ月平均', '時給', '月間平均時間', 'FTE', '最低賃金判定', '備考']
         r = 4
         for i, h in enumerate(headers):
             _cell(ws2, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
             ws2.cell(r, 2 + i).alignment = Alignment(horizontal='center', wrap_text=True)
 
+        # 中途入退社社員のチェック視認性向上のため、行全体を灰色塗りする
+        FILL_INCOMPLETE = PatternFill(start_color='DDDDDD', end_color='DDDDDD', fill_type='solid')
+
         for e in employees_detail:
             r += 1
-            avg3 = (e.get('m1', 0) + e.get('m2', 0) + e.get('m3', 0)) / 3
+            m_vals = [e.get('m1', 0), e.get('m2', 0), e.get('m3', 0)]
+            # 在籍月のみで3ヶ月平均を算出（0月を分母に入れると過小評価される）
+            in_service = [v for v in m_vals if v > 0]
+            avg3 = sum(in_service) / len(in_service) if in_service else 0
+
             is_seishain = is_full_time_employment(e.get('type'))
-            fte = 1.0 if is_seishain else e.get('monthly_hours', 0) / standard_monthly
+            full_year = e.get('full_year', True)
+            tenure_months = e.get('tenure_months', 12)
+            # 在籍月数を反映した FTE（中途入退社は分母12を按分）
+            tenure_factor = min(tenure_months, 12) / 12 if tenure_months > 0 else 0
+            if is_seishain:
+                fte = 1.0 * tenure_factor
+            else:
+                monthly_h = e.get('monthly_hours', 0)
+                fte = (monthly_h / standard_monthly) * tenure_factor if standard_monthly else 0
+
+            # 備考: 中途入退社の表示 + 実際の月並びの提示（誤読防止）
+            note_parts = []
+            if not full_year:
+                note_parts.append(f'中途入退社（在籍{tenure_months}ヶ月）')
+                # 実際の在籍月ラベルが分かっていれば表示
+                labels = [l for l in e.get('last_three_labels', []) if l]
+                if labels:
+                    note_parts.append(f'実体: {"/".join(labels)}')
+            note = ' '.join(note_parts)
+
+            # 最低賃金判定: 賃金状況報告シート由来の judge があれば優先、
+            # 無ければ「-」（このシートでは時給・都道府県情報が揃わないため判定不能）
+            judge_val = e.get('judge') or '-'
 
             vals = [e['no'], e['name'], e['type'],
                     e.get('m1', 0), e.get('m2', 0), e.get('m3', 0),
                     round(avg3), e.get('hr', 0), round(e.get('monthly_hours', 0), 1),
-                    round(fte, 2), e.get('judge', '')]
+                    round(fte, 2), judge_val, note]
 
             for i, v in enumerate(vals):
                 fmt = NUMBER_FMT if i in (3, 4, 5, 6) else ('0.00' if i == 9 else None)
-                fill = None if is_seishain else FILL_GRAY
+                # 行の塗り分け（優先順位: 中途入退社 > 非正規 > 通常）
+                if not full_year:
+                    fill = FILL_INCOMPLETE
+                elif not is_seishain:
+                    fill = FILL_GRAY
+                else:
+                    fill = None
                 _cell(ws2, r, 2 + i, v, fmt=fmt, fill=fill)
 
-        for i, w in enumerate([4, 5, 14, 12, 12, 12, 12, 12, 8, 13, 8, 12]):
+        # 凡例
+        r += 2
+        _cell(ws2, r, 2,
+              '※灰色（濃）行＝直近事業年度に12ヶ月在籍していない社員（中途入社・退職含む）。',
+              SMALL_FONT, border=None)
+        r += 1
+        _cell(ws2, r, 2,
+              '　1月/2月/3月の列見出しは便宜表示で、中途者の列は実在籍月の時系列順（備考の「実体」欄を参照）。',
+              SMALL_FONT, border=None)
+        r += 1
+        _cell(ws2, r, 2,
+              '※灰色（薄）行＝非正規雇用（パート・アルバイト）。',
+              SMALL_FONT, border=None)
+        r += 1
+        _cell(ws2, r, 2,
+              '※最低賃金判定の「-」＝このシートでは判定なし（加点判定タスクで都道府県を指定した場合に判定されます）。',
+              SMALL_FONT, border=None)
+
+        for i, w in enumerate([4, 5, 14, 12, 12, 12, 12, 12, 8, 13, 8, 12, 30]):
             ws2.column_dimensions[get_column_letter(i + 1)].width = w
 
     # ===== Sheet 3: 賃上げ計画 =====
