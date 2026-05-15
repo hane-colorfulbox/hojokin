@@ -1511,8 +1511,28 @@ def export_wage_ledger_summary(
     if company_name:
         title = f'{company_name} — {title}'
     ws.cell(row=1, column=1, value=title).font = Font(bold=True, size=12)
+
+    # 抽出経路の明示（AI抽出かどうかを最上部に大きく表示）
+    is_ai_extraction = 'AI' in (extraction_method or '')
+    extraction_label = extraction_method or '未指定'
+    if is_ai_extraction:
+        warn_msg = (
+            f'⚠ 抽出経路: {extraction_label} '
+            '— AI（Claude）による読み取りのため誤読の可能性があります。'
+            '賃金台帳原本と必ず照合してください。'
+        )
+    else:
+        warn_msg = f'抽出経路: {extraction_label}'
+    cell_warn = ws.cell(row=2, column=1, value=warn_msg)
+    cell_warn.font = Font(bold=True, size=10, color='C00000' if is_ai_extraction else '333333')
+    if is_ai_extraction:
+        # 視認性のため薄オレンジで強調（給与支給総額計算.xlsx の AI 色と統一）
+        cell_warn.fill = PatternFill(
+            start_color='FCE4D6', end_color='FCE4D6', fill_type='solid',
+        )
+
     ws.cell(
-        row=2, column=1,
+        row=3, column=1,
         value=(
             '※採用列: 賃金台帳の「課税支給合計」（給与所得として課税対象となる経費。'
             '非課税通勤手当・社保等控除前）。'
@@ -1520,12 +1540,12 @@ def export_wage_ledger_summary(
             '抽出経路と公募要領原文の引用は「算定根拠」シートを参照。'
         ),
     )
-    ws.cell(row=2, column=1).font = Font(size=9, color='666666')
+    ws.cell(row=3, column=1).font = Font(size=9, color='666666')
     ws.cell(
-        row=3, column=1,
+        row=4, column=1,
         value='※グレー行は給与支給総額（R216）の集計対象外 — 役員 or 非全月在籍（中途入退社）',
     )
-    ws.cell(row=3, column=1).font = Font(size=9, color='666666')
+    ws.cell(row=4, column=1).font = Font(size=9, color='666666')
 
     # 列レイアウト
     # 1: No, 2: 従業員名, 3: 雇用形態,
@@ -1539,8 +1559,8 @@ def export_wage_ledger_summary(
     avg_hours_col = hours_total_col + 1  # 30
     source_col = avg_hours_col + 1  # 31
 
-    # グループヘッダー（4行目）
-    group_row = 4
+    # グループヘッダー（5行目）— 抽出経路メッセージを 2行目に追加したため1行ずれる
+    group_row = 5
     ws.cell(row=group_row, column=wage_start, value='月別課税対象額（円）')
     ws.merge_cells(start_row=group_row, start_column=wage_start,
                    end_row=group_row, end_column=wage_total_col)
@@ -1554,8 +1574,8 @@ def export_wage_ledger_summary(
         cell.alignment = Alignment(horizontal='center')
         cell.border = thin_border
 
-    # 列ヘッダー（5行目）
-    header_row = 5
+    # 列ヘッダー（6行目）
+    header_row = 6
     headers = (
         ['No', '従業員名', '雇用形態']
         + MONTH_NAMES + ['年間合計']

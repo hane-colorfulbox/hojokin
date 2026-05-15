@@ -142,6 +142,9 @@ FILL_YELLOW = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='s
 FILL_GREEN = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
 FILL_GRAY = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
 FILL_HEADER_DARK = PatternFill(start_color='2F5496', end_color='2F5496', fill_type='solid')
+# AI抽出値（決算書PDFから Claude が読み取った値）の視認用。誤読の可能性があるため
+# 人間チェックの対象として目立たせる。色は控えめなオレンジ系。
+FILL_AI_EXTRACTED = PatternFill(start_color='FCE4D6', end_color='FCE4D6', fill_type='solid')
 
 
 def _cell(ws, row, col, value, font=NORMAL_FONT, fmt=None, fill=None, border=THIN_BORDER):
@@ -204,30 +207,42 @@ def create_wage_calculation(
 
     _cell(ws1, 2, 2, '給与支給総額計算書', TITLE_FONT, border=None)
     _cell(ws1, 3, 2, f'株式会社 {company_name}', Font(name='游ゴシック', size=12), border=None)
-    _cell(ws1, 4, 2, f'事業年度: {fiscal_year_label}', NORMAL_FONT, border=None)
+    # 事業年度ラベルは PL 由来（AI抽出）or 賃金台帳期間からの導出。誤読リスクのあるセル
+    _cell(ws1, 4, 2, f'事業年度: {fiscal_year_label}', NORMAL_FONT,
+          fill=FILL_AI_EXTRACTED, border=None)
+
+    # 凡例（AI抽出セルの視認説明）— 計算結果より前に置いてユーザーに認識させる
+    r = 5
+    _cell(ws1, r, 2,
+          '※薄オレンジ色のセル＝AI（Claude）が決算書PDFから抽出した値です。'
+          '誤読の可能性があるため、決算書原本と必ず照合してください。',
+          SMALL_FONT, border=None)
+    ws1.cell(r, 2).fill = FILL_AI_EXTRACTED
 
     # P/Lデータ
-    r = 6
+    r = 7
     _cell(ws1, r, 2, '【損益計算書データ（販管費）】', HEADER_FONT, border=None)
     r += 1
     for i, h in enumerate(['科目', '金額（円）', '備考']):
         _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
 
     items = [
-        ('給料手当', financial.salary, '正社員給与'),
-        ('雑給', financial.misc_wages, 'パート・アルバイト給与'),
-        ('賞与', financial.bonus, ''),
-        ('法定福利費', financial.legal_welfare, '※給与支給総額から除外'),
-        ('福利厚生費', financial.welfare, '※給与支給総額から除外'),
+        ('給料手当', financial.salary, '正社員給与（AI抽出：決算書PDF）'),
+        ('雑給', financial.misc_wages, 'パート・アルバイト給与（AI抽出：決算書PDF）'),
+        ('賞与', financial.bonus, '（AI抽出：決算書PDF）'),
+        ('法定福利費', financial.legal_welfare, '※給与支給総額から除外（AI抽出：決算書PDF）'),
+        ('福利厚生費', financial.welfare, '※給与支給総額から除外（AI抽出：決算書PDF）'),
     ]
     for name, amount, note in items:
         r += 1
         _cell(ws1, r, 2, name)
-        _cell(ws1, r, 3, amount, fmt=NUMBER_FMT)
-        _cell(ws1, r, 4, note, SMALL_FONT)
-        if '除外' in note:
-            for c in range(2, 5):
-                ws1.cell(r, c).fill = FILL_GRAY
+        # AI抽出値はオレンジで塗る（除外行は灰色優先）
+        is_excluded = '除外' in note
+        cell_fill = FILL_GRAY if is_excluded else FILL_AI_EXTRACTED
+        _cell(ws1, r, 3, amount, fmt=NUMBER_FMT, fill=cell_fill)
+        _cell(ws1, r, 4, note, SMALL_FONT, fill=cell_fill if is_excluded else None)
+        if is_excluded:
+            ws1.cell(r, 2).fill = FILL_GRAY
 
     r += 1
     _cell(ws1, r, 2, '給与関連合計（A）', BOLD_FONT, fill=FILL_BLUE)
@@ -239,12 +254,25 @@ def create_wage_calculation(
     _cell(ws1, r, 2, '【役員報酬の控除】', HEADER_FONT, border=None)
     r += 1
     _cell(ws1, r, 2, '役員報酬（3ヶ月合計）')
-    _cell(ws1, r, 3, yakuin_hoshu_3m, fmt=NUMBER_FMT)
-    _cell(ws1, r, 4, '賃金状況報告シートより', SMALL_FONT)
+    # 役員報酬3ヶ月合計のソース判定: 賃金状況報告シート読込時はそれが優先、
+    # 未取込で PL.officer_compensation > 0 のときは PL から推定（AI 抽出）
+    # 現状の引数では source 情報が伝搬していないが、PL推定の場合 yakuin_hoshu_3m
+    # = officer_compensation / 4 のため、その整合性から推測する
+    yakuin_source_is_ai = (
+        financial.officer_compensation > 0
+        and yakuin_hoshu_3m == int(financial.officer_compensation / 4)
+    )
+    yakuin_cell_fill = FILL_AI_EXTRACTED if yakuin_source_is_ai else None
+    yakuin_note = (
+        '※AI抽出：決算書PDFの役員報酬を÷4で推定'
+        if yakuin_source_is_ai else '賃金状況報告シートより'
+    )
+    _cell(ws1, r, 3, yakuin_hoshu_3m, fmt=NUMBER_FMT, fill=yakuin_cell_fill)
+    _cell(ws1, r, 4, yakuin_note, SMALL_FONT, fill=yakuin_cell_fill)
     r += 1
     _cell(ws1, r, 2, '役員報酬（年間概算）（B）', BOLD_FONT, fill=FILL_YELLOW)
     _cell(ws1, r, 3, yakuin_annual, BOLD_FONT, NUMBER_FMT, FILL_YELLOW)
-    _cell(ws1, r, 4, '3ヶ月合計 x 4', SMALL_FONT, fill=FILL_YELLOW)
+    _cell(ws1, r, 4, '3ヶ月合計 x 4（機械計算）', SMALL_FONT, fill=FILL_YELLOW)
 
     # 給与支給総額
     r += 2
@@ -322,9 +350,14 @@ def create_wage_calculation(
         _cell(ws1, r, 3, round(amount), RESULT_FONT if is_last else NORMAL_FONT,
               NUMBER_FMT, FILL_GREEN if is_last else None)
 
-    # テンプレート転記用
+    # テンプレート転記用（全項目 AI 抽出：決算書PDF由来）
     r += 2
     _cell(ws1, r, 2, '【2026テンプレート転記用】', HEADER_FONT, border=None)
+    r += 1
+    _cell(ws1, r, 2,
+          '※下記すべてAI抽出値（決算書PDF由来）。テンプレ転記前に決算書原本と照合してください。',
+          SMALL_FONT, border=None)
+    ws1.cell(r, 2).fill = FILL_AI_EXTRACTED
     for name, val in [
         ('給料手当（販管費E5）', financial.salary),
         ('雑給（販管費E6）', financial.misc_wages),
@@ -337,7 +370,7 @@ def create_wage_calculation(
     ]:
         r += 1
         _cell(ws1, r, 2, name)
-        _cell(ws1, r, 3, val, fmt=NUMBER_FMT)
+        _cell(ws1, r, 3, val, fmt=NUMBER_FMT, fill=FILL_AI_EXTRACTED)
 
     ws1.column_dimensions['A'].width = 2
     ws1.column_dimensions['B'].width = 38
@@ -348,6 +381,11 @@ def create_wage_calculation(
     if employees_detail:
         ws2 = wb.create_sheet('従業員別明細')
         _cell(ws2, 2, 2, '従業員別給与明細（直近3ヶ月）', TITLE_FONT, border=None)
+        _cell(ws2, 3, 2,
+              '※氏名・雇用形態・月給・時給はAIが賃金台帳から読み取った値です。'
+              '誤読の可能性があるため賃金台帳原本と照合してください。',
+              SMALL_FONT, border=None)
+        ws2.cell(3, 2).fill = FILL_AI_EXTRACTED
 
         headers = ['No', '氏名', '雇用形態', '1月基本給', '2月基本給', '3月基本給',
                    '3ヶ月平均', '時給', '月間平均時間', 'FTE', '最低賃金判定', '備考']
