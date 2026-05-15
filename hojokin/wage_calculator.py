@@ -266,7 +266,10 @@ def create_wage_calculation(
         ('法定福利費', financial.legal_welfare, f'販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）{_page_tag("legal_welfare")}'),
         ('福利厚生費', financial.welfare, f'販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）{_page_tag("welfare")}'),
     ]
-    for name, amount, note in items:
+    # 各科目のセル位置を後段の Excel 計算式で参照できるよう記録
+    item_rows: dict[str, int] = {}
+    item_keys = ['salary', 'misc_wages', 'bonus', 'legal_welfare', 'welfare']
+    for (name, amount, note), key in zip(items, item_keys):
         r += 1
         _cell(ws1, r, 2, name)
         # AI抽出値はオレンジで塗る（除外行は灰色優先）
@@ -276,11 +279,20 @@ def create_wage_calculation(
         _cell(ws1, r, 4, note, SMALL_FONT, fill=cell_fill if is_excluded else None)
         if is_excluded:
             ws1.cell(r, 2).fill = FILL_GRAY
+        item_rows[key] = r
 
     r += 1
+    a_row = r  # (A) の行を覚えておく → 後段で参照
+    # 給与関連合計 (A) を Excel 式で表現（給料手当+雑給+賞与）。
+    # ユーザーが Excel 上で値を編集しても合計が自動更新される。
+    a_formula = (
+        f'=C{item_rows["salary"]}+C{item_rows["misc_wages"]}+C{item_rows["bonus"]}'
+    )
     _cell(ws1, r, 2, '給与関連合計（A）', BOLD_FONT, fill=FILL_BLUE)
-    _cell(ws1, r, 3, total_wage_pl, BOLD_FONT, NUMBER_FMT, FILL_BLUE)
-    _cell(ws1, r, 4, '給料手当 + 雑給 + 賞与', SMALL_FONT, fill=FILL_BLUE)
+    _cell(ws1, r, 3, a_formula, BOLD_FONT, NUMBER_FMT, FILL_BLUE)
+    _cell(ws1, r, 4,
+          f'機械計算: C{item_rows["salary"]}+C{item_rows["misc_wages"]}+C{item_rows["bonus"]}（給料手当+雑給+賞与）',
+          SMALL_FONT, fill=FILL_BLUE)
 
     # 役員報酬
     r += 2
@@ -312,22 +324,30 @@ def create_wage_calculation(
         )
     _cell(ws1, r, 3, yakuin_hoshu_3m, fmt=NUMBER_FMT, fill=yakuin_cell_fill)
     _cell(ws1, r, 4, yakuin_note, SMALL_FONT, fill=yakuin_cell_fill)
+    yakuin_3m_row = r  # 3ヶ月合計の行を覚えておく
     r += 1
+    b_row = r  # (B) の行を覚えておく
+    # (B) を Excel 式で表現（3ヶ月合計 × 4）
     _cell(ws1, r, 2, '役員報酬（年間概算）（B）', BOLD_FONT, fill=FILL_YELLOW)
-    _cell(ws1, r, 3, yakuin_annual, BOLD_FONT, NUMBER_FMT, FILL_YELLOW)
-    _cell(ws1, r, 4, '3ヶ月合計 x 4（機械計算）', SMALL_FONT, fill=FILL_YELLOW)
+    _cell(ws1, r, 3, f'=C{yakuin_3m_row}*4', BOLD_FONT, NUMBER_FMT, FILL_YELLOW)
+    _cell(ws1, r, 4, f'機械計算: C{yakuin_3m_row}×4（3ヶ月合計 × 4）',
+          SMALL_FONT, fill=FILL_YELLOW)
 
     # 給与支給総額
     r += 2
     _cell(ws1, r, 2, '【給与支給総額の算定】', HEADER_FONT, border=None)
     r += 1
+    # 役員報酬込 = (A) を Excel 式で再掲
     _cell(ws1, r, 2, '給与支給総額（役員報酬込）')
-    _cell(ws1, r, 3, total_wage_pl, fmt=NUMBER_FMT)
-    _cell(ws1, r, 4, '(A) テンプレートE13相当', SMALL_FONT)
+    _cell(ws1, r, 3, f'=C{a_row}', fmt=NUMBER_FMT)
+    _cell(ws1, r, 4, f'機械計算: =C{a_row}（=A の再掲、テンプレートE13相当）',
+          SMALL_FONT)
     r += 1
+    # 役員報酬除外 = (A) - (B) を Excel 式で
     _cell(ws1, r, 2, '給与支給総額（役員報酬除外）')
-    _cell(ws1, r, 3, wage_excl_yakuin, fmt=NUMBER_FMT)
-    _cell(ws1, r, 4, '(A) - (B) 賃上げ計算用', SMALL_FONT)
+    _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', fmt=NUMBER_FMT)
+    _cell(ws1, r, 4, f'機械計算: =C{a_row}-C{b_row}（=A-B 賃上げ計算用）',
+          SMALL_FONT)
 
     # 従業員数
     r += 2
