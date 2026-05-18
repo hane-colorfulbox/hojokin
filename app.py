@@ -143,6 +143,13 @@ def _get_drive_client():
 
 
 # ── Drive 取得用キャッシュ関数（モジュールレベル定義 = cache_key が引数で確定する） ──
+# Drive 案件フォルダ配下で、配下まで降りずに無視するサブフォルダ名。
+# 「申請時使用」は税理士納品の要約版PDFを置くカラフル運用上のサブフォルダ。
+# 要約版PDFは販管費の科目内訳が無く R216 算定が壊れるため、ツールは見に行かない。
+# 将来「2.実績報告」「アーカイブ」等で同様の事象が出たらここに追加するだけで対応。
+DRIVE_EXCLUDED_SUBFOLDERS: set[str] = {'申請時使用'}
+
+
 @st.cache_data(ttl=60)
 def _cached_list_drive_folders(folder_id: str) -> list[dict]:
     c = _get_drive_client()
@@ -152,7 +159,9 @@ def _cached_list_drive_folders(folder_id: str) -> list[dict]:
 @st.cache_data(ttl=30)
 def _cached_list_drive_files_recursive(folder_id: str) -> list[dict]:
     c = _get_drive_client()
-    return c.list_files_recursive(folder_id) if c else []
+    return c.list_files_recursive(
+        folder_id, exclude_folder_names=DRIVE_EXCLUDED_SUBFOLDERS
+    ) if c else []
 
 
 # ── 定数 ──

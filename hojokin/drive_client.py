@@ -116,13 +116,35 @@ class DriveClient:
         logger.info(f'ファイル一覧({folder_id}): {len(files)}件')
         return files
 
-    def list_files_recursive(self, folder_id: str, file_type: str | None = None) -> list[dict]:
-        """サブフォルダも含めて再帰的にファイルを検索"""
+    def list_files_recursive(
+        self,
+        folder_id: str,
+        file_type: str | None = None,
+        exclude_folder_names: set[str] | None = None,
+    ) -> list[dict]:
+        """サブフォルダも含めて再帰的にファイルを検索
+
+        Args:
+            folder_id: 起点フォルダID
+            file_type: 拡張子フィルタ（'xlsx', 'pdf'等）。Noneで全ファイル。
+            exclude_folder_names: 配下に降りないサブフォルダ名の集合。
+                例: {'申請時使用'} を渡すと、その名前のサブフォルダは丸ごとスキップ。
+                呼出し元（補助金 app.py 等）が用途別に除外ルールを管理する想定。
+                drive_client.py 自体は汎用に保ち、業務固有ルールは外部から注入。
+        """
         all_files = self.list_files(folder_id, file_type)
 
         subfolders = self.list_folders(folder_id)
         for folder in subfolders:
-            sub_files = self.list_files_recursive(folder['id'], file_type)
+            if exclude_folder_names and folder['name'] in exclude_folder_names:
+                logger.info(
+                    f'サブフォルダ除外: {folder["name"]} '
+                    f'(exclude_folder_names 指定)'
+                )
+                continue
+            sub_files = self.list_files_recursive(
+                folder['id'], file_type, exclude_folder_names
+            )
             for f in sub_files:
                 f['folder_name'] = folder['name']
             all_files.extend(sub_files)
