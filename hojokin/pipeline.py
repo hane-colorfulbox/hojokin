@@ -261,10 +261,13 @@ class FileDetector:
     # 出力ファイル命名規則 (app.py / pipeline.py を参照):
     #   - {会社名}_{枠}_AI版.xlsx
     #   - {会社名}_給与支給総額計算.xlsx
-    #   - {会社名}_賃金台帳一覧.xlsx
+    #   - {会社名}_賃金台帳_AI集計.xlsx
     #   - {会社名}_加点①_結果.xlsx / 加点②_結果.xlsx
+    # 旧名 `_賃金台帳一覧` はユーザーが手動で作る入力ファイル名と衝突するため
+    # マーカーから除外する（過去にツールが同名で出力していた経緯あり）。
     OUTPUT_FILE_MARKERS = (
-        '_AI版', '_給与支給総額計算', '_賃金台帳一覧',
+        '_AI版', '_給与支給総額計算',
+        '_賃金台帳_AI集計',
         '_加点①', '_加点②',
     )
 
@@ -720,10 +723,10 @@ def run_application_transfer(
         )
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件{wage_warning})')
 
-        # 賃金台帳一覧Excel出力（チェック用）— AI抽出結果をそのまま再利用してAPI呼出しの2重化を防ぐ
+        # 賃金台帳AI集計Excel出力（チェック用）— AI抽出結果をそのまま再利用してAPI呼出しの2重化を防ぐ
         if ledger_employees:
             company = output_path.stem.split('_')[0]
-            ledger_output = output_path.parent / f'{company}_賃金台帳一覧.xlsx'
+            ledger_output = output_path.parent / f'{company}_賃金台帳_AI集計.xlsx'
             export_wage_ledger_summary(
                 ledger_employees, ledger_output, company,
                 extraction_method=wage_extraction_method,
