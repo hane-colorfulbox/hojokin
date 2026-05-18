@@ -195,6 +195,70 @@ def _merge_pl_with_cost_report(pl: dict, cost: dict) -> dict:
     return merged
 
 
+def _verify_and_fix_pl_signs(basic: dict) -> dict:
+    """売上高・売上原価から各利益の符号を機械的に検算・補正する。
+
+    旧式決算書で全小計が「(数値)」表記の場合、AI が括弧を一律「負値」と誤読し、
+    実際は黒字なのに粗利益・営業利益・経常利益・純利益のすべてが負として
+    抽出される事故が発生する。プロンプトで整合性チェックを指示しているが
+    Sonnet が遵守しないケースが観測されたため、プログラム側で機械的に補正する。
+
+    補正発動条件（すべて満たすときのみ反転）:
+        1. revenue, cost_of_sales が共に正値（売上関連は信頼できる）
+        2. gross_profit と revenue - cost_of_sales が
+           「絶対値一致 かつ 符号逆」=粗利益の括弧誤読が確定
+        3. operating/ordinary/net_profit のうち負値のものを反転
+           （正常な赤字決算は粗利益が正で営業利益のみ負になるため発動しない）
+
+    Returns:
+        補正後の dict（補正時は '_sign_fixed' / '_sign_fixed_reason' を付与）。
+    """
+    if not isinstance(basic, dict):
+        return basic
+    revenue = basic.get('revenue') or 0
+    cost = basic.get('cost_of_sales') or 0
+    gross_ai = basic.get('gross_profit')
+    if revenue <= 0 or cost <= 0 or gross_ai is None:
+        return basic
+    try:
+        revenue = int(revenue)
+        cost = int(cost)
+        gross_ai = int(gross_ai)
+    except (TypeError, ValueError):
+        return basic
+
+    gross_calc = revenue - cost
+    # 正常（AIの粗利益が計算値と一致）
+    if gross_ai == gross_calc:
+        return basic
+    # 絶対値が一致しない、または符号が同じ → 別パターンの誤読なのでここでは触らない
+    if abs(gross_ai) != abs(gross_calc) or gross_ai * gross_calc >= 0:
+        return basic
+    # 粗利益の括弧誤読が確定 → 全利益を反転
+    fixed = dict(basic)
+    fixed['gross_profit'] = gross_calc
+    flipped = ['gross_profit']
+    for key in ('operating_profit', 'ordinary_profit', 'net_profit'):
+        v = basic.get(key)
+        if v is None:
+            continue
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            continue
+        if iv < 0:
+            fixed[key] = -iv
+            flipped.append(key)
+    fixed['_sign_fixed'] = True
+    fixed['_sign_fixed_reason'] = (
+        f'粗利益の括弧誤読を検知: AI抽出値={gross_ai:,} ≠ '
+        f'売上高({revenue:,}) - 売上原価({cost:,}) = {gross_calc:,} '
+        f'(絶対値一致・符号逆)。反転対象: {", ".join(flipped)}'
+    )
+    logger.warning(f'[_verify_and_fix_pl_signs] {fixed["_sign_fixed_reason"]}')
+    return fixed
+
+
 def _merge_wage_employees_by_month(
     chunks: list[list[dict]],
 ) -> list[dict]:
@@ -1788,6 +1852,9 @@ class ClaudeExtractor(BaseExtractor):
         basic = self._extract_pl_basic_section(basic_imgs)
         pl_part = self._extract_pl_pl_section(pl_imgs)
         cost_part = self._extract_pl_cost_section(cost_imgs)
+
+        # 旧式決算書の括弧書き誤読を機械的に補正（売上高 - 売上原価 = 粗利益 で検算）
+        basic = _verify_and_fix_pl_signs(basic)
 
         # 抽出失敗判定（空dict = API例外 or JSON parse失敗）
         basic_failed = not basic
