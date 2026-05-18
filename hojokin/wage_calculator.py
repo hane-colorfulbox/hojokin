@@ -264,23 +264,89 @@ def create_wage_calculation(
     ws1.cell(r, 2).fill = FILL_AI_EXTRACTED
 
     # P/Lデータ
+    # 販管費・原価部の合算が実施されたかでセクションヘッダーを切替（建設業・製造業対応）
+    breakdown = getattr(financial, 'breakdown', {}) or {}
+    has_cost_section_merge = any(
+        (breakdown.get(k, {}) or {}).get('cost_section', 0) > 0
+        for k in ('salary', 'misc_wages', 'bonus', 'legal_welfare', 'welfare')
+    )
+    pl_section_header = (
+        '【損益計算書データ（販管費＋製造原価報告書 合算）】'
+        if has_cost_section_merge else '【損益計算書データ（販管費）】'
+    )
+
     r = 7
-    _cell(ws1, r, 2, '【損益計算書データ（販管費）】', HEADER_FONT, border=None)
+    _cell(ws1, r, 2, pl_section_header, HEADER_FONT, border=None)
     _cell(ws1, r, 3, f'出所: {pl_source}', SMALL_FONT, border=None)
     r += 1
     for i, h in enumerate(['科目', '金額（円）', '備考']):
         _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
 
-    # 備考に「決算書のどの表に載っている値か」を明示。決算書の構造は中小企業会計指針で
-    # 標準化されており、これらの勘定科目は必ず「販売費及び一般管理費」（販管費）の内訳
-    # 表に記載される。AI による推定ではなく会計知識からの固定マッピングなので 100% 正確。
-    # 加えてページ番号は PDF テキストから機械的に逆引きしているので、これも 100% 正確。
+    # 各勘定科目に対応する販管費側ラベル・原価部側ラベル
+    # （cost_section_label には「給料手当/賃金/給料/労務費」など複数勘定が含まれるため
+    #  代表ラベルとして "賃金等" のような総称を採用）
+    PL_ITEM_LABELS = {
+        'salary':        ('給料手当', '賃金等（賃金/給料/労務費）'),
+        'misc_wages':    ('雑給', '雑給'),
+        'bonus':         ('賞与', '賞与'),
+        'legal_welfare': ('法定福利費', '法定福利費'),
+        'welfare':       ('福利厚生費', '福利厚生費'),
+    }
+
+    def _ai_source_tag(key: str) -> str:
+        """AI抽出マーカー + ページ番号の表示文字列を生成（「決算書PDF」の重複を回避）。
+
+        - ページ番号取得済み: 'AI抽出：決算書PDF p.3,5'
+        - PDF テキストに値なし: 'AI抽出：決算書PDF（⚠PDFに値なし／AI誤読の可能性）'
+        - ページ番号未取得（キー未登録）: 'AI抽出：決算書PDF'
+        """
+        if key not in pl_value_pages:
+            return 'AI抽出：決算書PDF'
+        pages = pl_value_pages[key]
+        if not pages:
+            return 'AI抽出：決算書PDF（⚠PDFに値なし／AI誤読の可能性）'
+        return f'AI抽出：決算書PDF p.{",".join(map(str, pages))}'
+
+    def _build_pl_note(key: str, default_pl_note: str = '', excluded: bool = False) -> str:
+        """販管費＋原価部の内訳を含む備考文を生成。
+
+        - 合算あり（販管費>0 かつ 原価部>0）: "内訳: 販管費「X」200,000 + 製造原価「Y」13,870,373 ..."
+        - 販管費のみ: "販管費「X」より ..."（金額は C列に出るため重複表示しない）
+        - 原価部のみ: "製造原価「Y」より ..."
+        - 内訳情報なし: 旧来の default_pl_note を返す（レガシー経路・テスト互換）
+        """
+        bd = (breakdown.get(key) or {}) if isinstance(breakdown, dict) else {}
+        pl_v = int(bd.get('pl_section') or 0)
+        cost_v = int(bd.get('cost_section') or 0)
+        excluded_tag = '｜※給与支給総額から除外' if excluded else ''
+        ai_tag = _ai_source_tag(key)
+        pl_label, cost_label = PL_ITEM_LABELS.get(key, (key, key))
+
+        if pl_v > 0 and cost_v > 0:
+            return (
+                f'内訳: 販管費「{pl_label}」{pl_v:,}円 ＋ '
+                f'製造原価「{cost_label}」{cost_v:,}円{excluded_tag}（{ai_tag}）'
+            )
+        if pl_v > 0 and cost_v == 0:
+            return f'販管費「{pl_label}」より{excluded_tag}（{ai_tag}）'
+        if pl_v == 0 and cost_v > 0:
+            return f'製造原価「{cost_label}」より{excluded_tag}（{ai_tag}）'
+        # breakdown 情報なし → 旧来表示にフォールバック（決算書構造の固定マッピング表現）
+        if default_pl_note:
+            return f'{default_pl_note}（{ai_tag}）'
+        return f'販管費「{pl_label}」より{excluded_tag}（{ai_tag}）'
+
     items = [
-        ('給料手当', financial.salary, f'販管費より｜正社員給与（AI抽出：決算書PDF）{_page_tag("salary")}'),
-        ('雑給', financial.misc_wages, f'販管費より｜パート・アルバイト給与（AI抽出：決算書PDF）{_page_tag("misc_wages")}'),
-        ('賞与', financial.bonus, f'販管費より（AI抽出：決算書PDF）{_page_tag("bonus")}'),
-        ('法定福利費', financial.legal_welfare, f'販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）{_page_tag("legal_welfare")}'),
-        ('福利厚生費', financial.welfare, f'販管費より｜※給与支給総額から除外（AI抽出：決算書PDF）{_page_tag("welfare")}'),
+        ('給料手当', financial.salary,
+            _build_pl_note('salary', default_pl_note='販管費より｜正社員給与')),
+        ('雑給', financial.misc_wages,
+            _build_pl_note('misc_wages', default_pl_note='販管費より｜パート・アルバイト給与')),
+        ('賞与', financial.bonus,
+            _build_pl_note('bonus', default_pl_note='販管費より')),
+        ('法定福利費', financial.legal_welfare,
+            _build_pl_note('legal_welfare', excluded=True)),
+        ('福利厚生費', financial.welfare,
+            _build_pl_note('welfare', excluded=True)),
     ]
     # 各科目のセル位置を後段の Excel 計算式で参照できるよう記録
     item_rows: dict[str, int] = {}

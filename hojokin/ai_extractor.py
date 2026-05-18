@@ -181,17 +181,28 @@ def _is_pl_extraction_suspicious(d: dict) -> tuple[bool, str]:
 
 
 def _merge_pl_with_cost_report(pl: dict, cost: dict) -> dict:
-    """販管費抽出結果と原価フォーカス抽出結果をマージする（人件費系のみ加算）"""
+    """販管費抽出結果と原価フォーカス抽出結果をマージする（人件費系のみ加算）。
+
+    Excel 備考に内訳を表示するため、合算が実施された項目については
+    `_breakdown` キーに {'pl_section': X, 'cost_section': Y} を残す。
+    """
     if not isinstance(pl, dict):
         pl = {}
     if not isinstance(cost, dict):
         return pl
     merged = dict(pl)
+    breakdown = {}
     for key in ('salary', 'misc_wages', 'bonus', 'legal_welfare', 'welfare', 'depreciation'):
         pl_val = pl.get(key) or 0
         cost_val = cost.get(key) or 0
         if cost_val > 0:
             merged[key] = pl_val + cost_val
+            breakdown[key] = {
+                'pl_section': int(pl_val) if pl_val else 0,
+                'cost_section': int(cost_val),
+            }
+    if breakdown:
+        merged['_breakdown'] = breakdown
     return merged
 
 
@@ -1369,6 +1380,7 @@ class ClaudeExtractor(BaseExtractor):
             welfare=d.get('welfare', 0) or 0,
             depreciation=d.get('depreciation', 0) or 0,
             travel_expense=d.get('travel_expense', 0) or 0,
+            breakdown=d.get('_breakdown', {}) or {},
         )
 
     def extract_tax(self, images: list[bytes]) -> TaxCertificate:
@@ -1952,6 +1964,25 @@ class ClaudeExtractor(BaseExtractor):
                         level='low', source_component=confidence[k].source_component,
                         reason=f'売上原価/人件費={ratio:.1f}倍で異常（人件費抽出全体に問題）')
 
+        # 販管費・原価部の合算内訳を保存（Excel備考に「販管費X + 製造原価Y」と内訳表示するため）
+        # 各値は int 化して 0 以上の範囲に正規化（負値が来た場合は 0 に丸める）
+        def _bd(key: str) -> dict:
+            try:
+                pl_v = max(int(float(pl_part.get(key) or 0)), 0)
+            except (TypeError, ValueError):
+                pl_v = 0
+            try:
+                cost_v = max(int(float(cost_part.get(key) or 0)), 0)
+            except (TypeError, ValueError):
+                cost_v = 0
+            return {'pl_section': pl_v, 'cost_section': cost_v}
+
+        breakdown = {
+            key: _bd(key)
+            for key in ('salary', 'misc_wages', 'bonus',
+                        'legal_welfare', 'welfare', 'depreciation', 'travel_expense')
+        }
+
         result = FinancialData(
             fiscal_year_start=basic.get('fiscal_year_start') or '',
             fiscal_year_end=end,
@@ -1971,6 +2002,7 @@ class ClaudeExtractor(BaseExtractor):
             depreciation=_sum('depreciation'),
             travel_expense=_sum('travel_expense'),
             confidence=confidence,
+            breakdown=breakdown,
         )
 
         # 低信頼項目をログに集約

@@ -68,6 +68,12 @@ class FinancialData:
     # 例: {'salary': FieldConfidence(level='high', source_component='PL+cost', reason='')}
     confidence: dict = field(default_factory=dict)
 
+    # 販管費・原価部の合算内訳（フィールド名→{'pl_section': int, 'cost_section': int}）
+    # 例: {'salary': {'pl_section': 200000, 'cost_section': 13870373}}
+    # Excel 備考に「販管費「給料手当」200,000 + 製造原価「賃金等」13,870,373」と内訳表示するための情報。
+    # 構造分解抽出（_extract_pl_structured）と原価フォールバック合算（_merge_pl_with_cost_report）で populate。
+    breakdown: dict = field(default_factory=dict)
+
 
 @dataclass
 class TaxCertificate:
