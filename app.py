@@ -954,6 +954,12 @@ def _render_file_check_result(result, total_count):
                     f'❌ **{display}** — **未検出（必須）** '
                     'ファイル名にキーワードが含まれているか確認してください'
                 )
+                if cat == 'wage_ledger':
+                    st.markdown(
+                        '&ensp;💡 PDFしか無い場合は Excel に変換してアップロードしてください。'
+                        '[変換手順（CC向け）](https://github.com/hane-colorfulbox/hojokin/blob/main/docs/%E8%B3%83%E9%87%91%E5%8F%B0%E5%B8%B3%E5%A4%89%E6%8F%9B%E6%89%8B%E9%A0%86_CC%E5%90%91%E3%81%91.md) ・ '
+                        '[空テンプレート](https://github.com/hane-colorfulbox/hojokin/blob/main/%E3%83%84%E3%83%BC%E3%83%AB/%E8%B3%83%E9%87%91%E5%8F%B0%E5%B8%B3%E3%83%86%E3%83%B3%E3%83%97%E3%83%AC%E3%83%BC%E3%83%88.xlsx)'
+                    )
             else:
                 st.markdown(f'➖ {display} — なし（任意）')
 
