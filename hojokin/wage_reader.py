@@ -130,6 +130,11 @@ _HEADER_ALIASES = {
                    '課税支給合計', '差引支給合計'],
     'paid_date':  ['支給日', '支払日'],
     'month_col':  ['対象年月', '給与年月', '支給年月', '年月'],
+    # 年間通勤手当（非課税分）。集計表型のみ有効。在籍月数で均等割して
+    # monthly_wages から減算する（R216 公募要領 p.10 の課税給与定義に揃える）
+    'transport_annual': ['年間通勤手当', '年間通勤費',
+                         '通勤手当(年間)', '通勤費(年間)',
+                         '非課税通勤手当(年間)'],
 }
 
 
@@ -358,6 +363,7 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
     col_type = fmap.get('emp_type')
     col_hours = fmap.get('hours')
     col_hourly = fmap.get('hourly_wage')
+    col_transport = fmap.get('transport_annual')
     month_cols: dict[int, int] = fmap['_month_cols']  # type: ignore[assignment]
 
     for r in range(header_row + 1, ws.max_row + 1):
@@ -391,6 +397,28 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
                 rec['monthly_wages'][midx] = (existing or 0) + v
                 if rec['hourly_rate_flat'] > 0:
                     rec['monthly_hourly_rates'][midx] = rec['hourly_rate_flat']
+
+        # \u5e74\u9593\u901a\u52e4\u624b\u5f53\uff08\u975e\u8ab2\u7a0e\u5206\uff09\u3092\u5728\u7c4d\u6708\u6570\u3067\u5747\u7b49\u5272\u3057\u3066 monthly_wages \u304b\u3089\u6e1b\u7b97\u3002
+        # R216 \u7b97\u5165\u984d\u3092\u300c\u7d66\u4e0e\u6240\u5f97\u3068\u3057\u3066\u8ab2\u7a0e\u5bfe\u8c61\u300d\u3060\u3051\u306b\u63c3\u3048\u308b\u305f\u3081\u306e\u88dc\u6b63\u3002
+        # \u901a\u52e4\u624b\u5f53\u306f\u56fd\u7a0e\u5e81 No.2585 \u3067\u670815\u4e07\u5186\u307e\u3067\u975e\u8ab2\u7a0e\u306e\u305f\u3081\u7d66\u4e0e\u6240\u5f97\u306b\u542b\u307e\u308c\u306a\u3044\u3002
+        # \uff08\u516c\u52df\u8981\u9818 \u7b2c6\u56de p.10 / docs/\u88dc\u52a9\u91d1_\u5b9f\u52d9\u77e5\u8b58\u30d9\u30fc\u30b9.md \u53c2\u7167\uff09
+        if col_transport:
+            ta = _to_float(ws.cell(r, col_transport).value)
+            if ta is not None and ta > 0:
+                non_null = [
+                    m for m in range(12)
+                    if rec['monthly_wages'][m] is not None
+                ]
+                if non_null:
+                    per_month = ta / len(non_null)
+                    for m in non_null:
+                        rec['monthly_wages'][m] = max(
+                            0.0, rec['monthly_wages'][m] - per_month
+                        )
+                    logger.info(
+                        f'\u901a\u52e4\u624b\u5f53\u6e1b\u7b97: {name} \u5e74\u9593{ta:,.0f}\u5186 \u00f7 '
+                        f'\u5728\u7c4d{len(non_null)}\u30f6\u6708 = \u6708{per_month:,.0f}\u5186\u6e1b'
+                    )
 
 
 def _read_csv(path: Path, emp_data: dict | None = None) -> None:
