@@ -629,43 +629,71 @@ def create_wage_calculation(
     # 決算書のどの表に載っている値かをセル右側の備考に明示する
     # （会計指針で標準化されているため固定マッピングで 100% 正確）
     # 加えて PDF テキストから逆引きしたページ番号も付記する
+    # 出所表記は AI に生成させず Python の固定マッピングで詳しく書く。
+    # 決算書の標準フォーマット（会計指針）に基づく固定対応なので 100% 正確。
+    # 業種別の呼称揺れや計算式も併記し、人間が決算書原本と照合するときの目印にする。
+    PL_LOCATIONS = {
+        'salary': (
+            '損益計算書「販売費及び一般管理費」内「給料手当」'
+            '（製造業は製造原価報告書「賃金」「給料」「労務費」も合算対象）'
+        ),
+        'misc_wages': '損益計算書「販売費及び一般管理費」内「雑給」',
+        'bonus': (
+            '損益計算書「販売費及び一般管理費」内「賞与」'
+            '「賞与引当金繰入額」'
+        ),
+        'revenue': (
+            '損益計算書 第1段「売上高」'
+            '（建設業＝「完成工事高」、不動産業＝「営業収益」等の呼称あり）'
+        ),
+        'gross_profit': '損益計算書 第3段「売上総利益」（＝売上高 − 売上原価）',
+        'operating_profit': (
+            '損益計算書 第5段「営業利益」'
+            '（＝売上総利益 − 販売費及び一般管理費）'
+        ),
+        'ordinary_profit': (
+            '損益計算書 第7段「経常利益」'
+            '（＝営業利益 ＋ 営業外収益 − 営業外費用）'
+        ),
+        'depreciation': (
+            '損益計算書「販売費及び一般管理費」内「減価償却費」'
+            '（製造業は製造原価報告書「減価償却費」と合算。複数箇所に分散記載される場合あり）'
+        ),
+    }
     # 給料手当・雑給・賞与手当は上の P/L データセクションの同じセルを参照する
     # Excel 式にする（ユーザーが上で誤読を訂正すると転記用も自動追従）。
     # 残り5項目は上のセクションに対応する元セルが無いため AI 抽出値の数値直書き。
     template_items = [
-        ('給料手当（販管費E5）',
-         f'=C{item_rows["salary"]}', '販売費及び一般管理費', 'salary', True),
-        ('雑給（販管費E6）',
-         f'=C{item_rows["misc_wages"]}', '販売費及び一般管理費', 'misc_wages', True),
-        ('賞与手当（販管費E7）',
-         f'=C{item_rows["bonus"]}', '販売費及び一般管理費', 'bonus', True),
-        ('売上高（B10）', financial.revenue, '損益計算書', 'revenue', False),
-        ('粗利益（B11）', financial.gross_profit,
-         '損益計算書（売上総利益）', 'gross_profit', False),
-        ('営業利益（B12）', financial.operating_profit,
-         '損益計算書', 'operating_profit', False),
-        ('経常利益（B13）', financial.ordinary_profit,
-         '損益計算書', 'ordinary_profit', False),
-        ('減価償却費（B14）', financial.depreciation,
-         '販売費及び一般管理費 or 製造原価報告書', 'depreciation', False),
+        ('給料手当（販管費E5）', f'=C{item_rows["salary"]}', 'salary', True),
+        ('雑給（販管費E6）', f'=C{item_rows["misc_wages"]}', 'misc_wages', True),
+        ('賞与手当（販管費E7）', f'=C{item_rows["bonus"]}', 'bonus', True),
+        ('売上高（B10）', financial.revenue, 'revenue', False),
+        ('粗利益（B11）', financial.gross_profit, 'gross_profit', False),
+        ('営業利益（B12）', financial.operating_profit, 'operating_profit', False),
+        ('経常利益（B13）', financial.ordinary_profit, 'ordinary_profit', False),
+        ('減価償却費（B14）', financial.depreciation, 'depreciation', False),
     ]
-    for name, val, where, page_key, is_ref in template_items:
+    for name, val, page_key, is_ref in template_items:
         r += 1
         _cell(ws1, r, 2, name)
         _cell(ws1, r, 3, val, fmt=NUMBER_FMT, fill=FILL_AI_EXTRACTED)
+        location = PL_LOCATIONS[page_key]
         if is_ref:
             note = (
-                f'上の販管費セル C{item_rows[page_key]} を参照'
-                f'（決算書「{where}」由来）{_page_tag(page_key)}'
+                f'上の販管費セル C{item_rows[page_key]} を参照／'
+                f'決算書記載: {location}{_page_tag(page_key)}'
             )
         else:
-            note = f'決算書「{where}」より{_page_tag(page_key)}'
+            note = f'決算書記載: {location}{_page_tag(page_key)}'
         _cell(ws1, r, 4, note, SMALL_FONT)
+        # 長い出所表記が読みやすいよう折り返し表示
+        ws1.cell(r, 4).alignment = Alignment(wrap_text=True, vertical='top')
 
     ws1.column_dimensions['A'].width = 2
     ws1.column_dimensions['B'].width = 38
     ws1.column_dimensions['C'].width = 20
-    ws1.column_dimensions['D'].width = 40
+    # D列は転記用の詳細な出所表記を入れるため広め。wrap_text=True と併用して折り返し表示
+    ws1.column_dimensions['D'].width = 55
 
     # ===== Sheet 2: 従業員別明細 =====
     if employees_detail:
