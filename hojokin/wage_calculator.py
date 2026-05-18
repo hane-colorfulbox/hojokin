@@ -530,8 +530,11 @@ def create_wage_calculation(
         _cell(ws1, r, 4, note, SMALL_FONT)
 
     r += 1
+    c_row = r  # 1人当たり計算で参照する用
     _cell(ws1, r, 2, '従業員合計（C）', BOLD_FONT, fill=FILL_BLUE)
-    _cell(ws1, r, 3, f'{total_emp}人', BOLD_FONT, fill=FILL_BLUE)
+    # 値は数値、表示は「3人」と維持（書式 '0"人"' で人付き表示）。
+    # 数値で書くことで下段の (A)÷(C) 等の Excel 式から参照可能になる。
+    _cell(ws1, r, 3, total_emp, BOLD_FONT, fmt='0"人"', fill=FILL_BLUE)
     _cell(ws1, r, 4, '', fill=FILL_BLUE)
 
     # FTE
@@ -571,6 +574,7 @@ def create_wage_calculation(
             ws1.cell(r, 3).fill = FILL_GRAY
             ws1.cell(r, 4).fill = FILL_GRAY
         r += 1
+        d_row = r  # 1人当たり計算で参照する用
         # FTE換算後（D）を Excel 関数化（正社員FTE + パートFTE）
         _cell(ws1, r, 2, 'FTE換算後従業員数（D）', BOLD_FONT, fill=FILL_GREEN)
         _cell(ws1, r, 3, f'=C{seishain_fte_row}+C{part_fte_row}',
@@ -578,6 +582,8 @@ def create_wage_calculation(
         _cell(ws1, r, 4,
               f'機械計算: C{seishain_fte_row}+C{part_fte_row}（正社員FTE + パートFTE）',
               SMALL_FONT, fill=FILL_GREEN)
+    else:
+        d_row = None  # employees_detail なし時は (A)÷(D) 系は出さない
 
     # 1人当たり計算
     r += 2
@@ -586,22 +592,29 @@ def create_wage_calculation(
     for i, h in enumerate(['算出方法', '金額', '']):
         _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER_DARK)
 
+    # (A) (A-B) (C) (D) 各セル参照の Excel 式で算出。ユーザーが上流セル
+    # （給与関連合計、役員報酬、従業員数、FTE）を編集すると即時再計算される。
+    # ゼロ除算は IF で防御（旧コードの `if total_emp else 0` と同等）。
     calc_methods = [
-        ('(A)÷(C) 頭数割り', total_wage_pl / total_emp if total_emp else 0),
-        ('(A-B)÷(C) 役員除外・頭数', wage_excl_yakuin / total_emp if total_emp else 0),
+        ('(A)÷(C) 頭数割り',
+         f'=IF(C{c_row}=0,0,ROUND(C{a_row}/C{c_row},0))'),
+        ('(A-B)÷(C) 役員除外・頭数',
+         f'=IF(C{c_row}=0,0,ROUND((C{a_row}-C{b_row})/C{c_row},0))'),
     ]
-    if employees_detail and fte_adjusted > 0:
+    if employees_detail and fte_adjusted > 0 and d_row is not None:
         calc_methods.extend([
-            ('(A)÷(D) FTE換算', total_wage_pl / fte_adjusted),
-            ('(A-B)÷(D) 役員除外・FTE（推奨）', wage_excl_yakuin / fte_adjusted),
+            ('(A)÷(D) FTE換算',
+             f'=IF(C{d_row}=0,0,ROUND(C{a_row}/C{d_row},0))'),
+            ('(A-B)÷(D) 役員除外・FTE（推奨）',
+             f'=IF(C{d_row}=0,0,ROUND((C{a_row}-C{b_row})/C{d_row},0))'),
         ])
 
-    for i, (label, amount) in enumerate(calc_methods):
+    for i, (label, formula) in enumerate(calc_methods):
         r += 1
         is_last = (i == len(calc_methods) - 1)
         _cell(ws1, r, 2, label, BOLD_FONT if is_last else NORMAL_FONT,
               fill=FILL_GREEN if is_last else None)
-        _cell(ws1, r, 3, round(amount), RESULT_FONT if is_last else NORMAL_FONT,
+        _cell(ws1, r, 3, formula, RESULT_FONT if is_last else NORMAL_FONT,
               NUMBER_FMT, FILL_GREEN if is_last else None)
 
     # テンプレート転記用（全項目 AI 抽出：決算書PDF由来）
@@ -616,22 +629,38 @@ def create_wage_calculation(
     # 決算書のどの表に載っている値かをセル右側の備考に明示する
     # （会計指針で標準化されているため固定マッピングで 100% 正確）
     # 加えて PDF テキストから逆引きしたページ番号も付記する
+    # 給料手当・雑給・賞与手当は上の P/L データセクションの同じセルを参照する
+    # Excel 式にする（ユーザーが上で誤読を訂正すると転記用も自動追従）。
+    # 残り5項目は上のセクションに対応する元セルが無いため AI 抽出値の数値直書き。
     template_items = [
-        ('給料手当（販管費E5）', financial.salary, '販売費及び一般管理費', 'salary'),
-        ('雑給（販管費E6）', financial.misc_wages, '販売費及び一般管理費', 'misc_wages'),
-        ('賞与手当（販管費E7）', financial.bonus, '販売費及び一般管理費', 'bonus'),
-        ('売上高（B10）', financial.revenue, '損益計算書', 'revenue'),
-        ('粗利益（B11）', financial.gross_profit, '損益計算書（売上総利益）', 'gross_profit'),
-        ('営業利益（B12）', financial.operating_profit, '損益計算書', 'operating_profit'),
-        ('経常利益（B13）', financial.ordinary_profit, '損益計算書', 'ordinary_profit'),
+        ('給料手当（販管費E5）',
+         f'=C{item_rows["salary"]}', '販売費及び一般管理費', 'salary', True),
+        ('雑給（販管費E6）',
+         f'=C{item_rows["misc_wages"]}', '販売費及び一般管理費', 'misc_wages', True),
+        ('賞与手当（販管費E7）',
+         f'=C{item_rows["bonus"]}', '販売費及び一般管理費', 'bonus', True),
+        ('売上高（B10）', financial.revenue, '損益計算書', 'revenue', False),
+        ('粗利益（B11）', financial.gross_profit,
+         '損益計算書（売上総利益）', 'gross_profit', False),
+        ('営業利益（B12）', financial.operating_profit,
+         '損益計算書', 'operating_profit', False),
+        ('経常利益（B13）', financial.ordinary_profit,
+         '損益計算書', 'ordinary_profit', False),
         ('減価償却費（B14）', financial.depreciation,
-         '販売費及び一般管理費 or 製造原価報告書', 'depreciation'),
+         '販売費及び一般管理費 or 製造原価報告書', 'depreciation', False),
     ]
-    for name, val, where, page_key in template_items:
+    for name, val, where, page_key, is_ref in template_items:
         r += 1
         _cell(ws1, r, 2, name)
         _cell(ws1, r, 3, val, fmt=NUMBER_FMT, fill=FILL_AI_EXTRACTED)
-        _cell(ws1, r, 4, f'決算書「{where}」より{_page_tag(page_key)}', SMALL_FONT)
+        if is_ref:
+            note = (
+                f'上の販管費セル C{item_rows[page_key]} を参照'
+                f'（決算書「{where}」由来）{_page_tag(page_key)}'
+            )
+        else:
+            note = f'決算書「{where}」より{_page_tag(page_key)}'
+        _cell(ws1, r, 4, note, SMALL_FONT)
 
     ws1.column_dimensions['A'].width = 2
     ws1.column_dimensions['B'].width = 38
