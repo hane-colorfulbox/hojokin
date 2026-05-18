@@ -454,13 +454,17 @@ def create_wage_calculation(
 
     # 役員報酬
     r += 2
-    _cell(ws1, r, 2, '【役員報酬の控除】', HEADER_FONT, border=None)
-    # ソース表示: 賃金状況報告シート優先、未取得時は PL から推定
-    yakuin_source_is_ai = (
+    _cell(
+        ws1, r, 2,
+        '【役員報酬の控除】※公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」',
+        HEADER_FONT, border=None,
+    )
+    # ソース判定: 賃金状況報告シート由来か、PL 由来（年額一致）か
+    yakuin_source_is_pl = (
         financial.officer_compensation > 0
         and yakuin_hoshu_3m == int(financial.officer_compensation / 4)
     )
-    if yakuin_source_is_ai:
+    if yakuin_source_is_pl:
         yakuin_source_label = f'出所: {pl_source}（決算書PDF）'
     elif wage_report_source:
         yakuin_source_label = f'出所: {wage_report_source}'
@@ -468,44 +472,64 @@ def create_wage_calculation(
         yakuin_source_label = '出所: （不明）'
     _cell(ws1, r, 3, yakuin_source_label, SMALL_FONT, border=None)
     r += 1
-    _cell(ws1, r, 2, '役員報酬（3ヶ月合計）')
-    yakuin_cell_fill = FILL_AI_EXTRACTED if yakuin_source_is_ai else None
-    yakuin_note = (
-        '※AI抽出：決算書PDFの役員報酬を÷4で推定'
-        if yakuin_source_is_ai else '賃金状況報告シートより'
-    )
-    # 役員報酬の備考に「販管費の役員報酬欄から」を明示
-    if yakuin_source_is_ai:
-        yakuin_note = (
-            f'販管費「役員報酬」より｜※AI抽出：決算書PDFの年額'
-            f'÷4で推定{_page_tag("officer_compensation")}'
+
+    if yakuin_source_is_pl:
+        # PL 由来: 決算書PDFに年額が直接記載されているため、年額1段で表示。
+        # （3ヶ月合計の概念は決算書には無いので、÷4 → ×4 の逆算を出力に出さない）
+        b_row = r
+        _cell(ws1, r, 2, '役員報酬（年額）（B）', BOLD_FONT, fill=FILL_YELLOW)
+        _cell(ws1, r, 3, int(financial.officer_compensation),
+              BOLD_FONT, NUMBER_FMT, FILL_AI_EXTRACTED)
+        _cell(
+            ws1, r, 4,
+            f'決算書記載: 損益計算書「販売費及び一般管理費」内「役員報酬」（年額）'
+            f'｜{_ai_source_tag("officer_compensation")}',
+            SMALL_FONT, fill=FILL_AI_EXTRACTED,
         )
-    _cell(ws1, r, 3, yakuin_hoshu_3m, fmt=NUMBER_FMT, fill=yakuin_cell_fill)
-    _cell(ws1, r, 4, yakuin_note, SMALL_FONT, fill=yakuin_cell_fill)
-    yakuin_3m_row = r  # 3ヶ月合計の行を覚えておく
-    r += 1
-    b_row = r  # (B) の行を覚えておく
-    # (B) を Excel 式で表現（3ヶ月合計 × 4）
-    _cell(ws1, r, 2, '役員報酬（年間概算）（B）', BOLD_FONT, fill=FILL_YELLOW)
-    _cell(ws1, r, 3, f'=C{yakuin_3m_row}*4', BOLD_FONT, NUMBER_FMT, FILL_YELLOW)
-    _cell(ws1, r, 4, f'機械計算: C{yakuin_3m_row}×4（3ヶ月合計 × 4）',
-          SMALL_FONT, fill=FILL_YELLOW)
+    else:
+        # 賃金状況報告シート由来 or 不明: 3ヶ月合計 → 年額（×4） の2段表示。
+        # 賃金状況報告シート（補助金提出書類のひとつ）は3ヶ月合計の様式なので、×4で年額化する。
+        yakuin_3m_row = r
+        _cell(ws1, r, 2, '役員報酬（3ヶ月合計）')
+        yakuin_note = (
+            '賃金状況報告シートより（3ヶ月合計）'
+            if wage_report_source else '※出所不明（賃金状況報告シート未取込）'
+        )
+        _cell(ws1, r, 3, yakuin_hoshu_3m, fmt=NUMBER_FMT)
+        _cell(ws1, r, 4, yakuin_note, SMALL_FONT)
+        r += 1
+        b_row = r
+        _cell(ws1, r, 2, '役員報酬（年額）（B）', BOLD_FONT, fill=FILL_YELLOW)
+        _cell(ws1, r, 3, f'=C{yakuin_3m_row}*4', BOLD_FONT, NUMBER_FMT, FILL_YELLOW)
+        _cell(ws1, r, 4, f'機械計算: C{yakuin_3m_row}×4（3ヶ月合計 × 4）',
+              SMALL_FONT, fill=FILL_YELLOW)
 
     # 給与支給総額
+    # 公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」を根拠に、
+    # 「給与支給総額」というラベルは役員除外の値（C{total_excl_row}）にのみ使う。
+    # 役員報酬込みの (A) は「給与関連合計（参考）」として残し、ラベルの誤解を防ぐ。
     r += 2
-    _cell(ws1, r, 2, '【給与支給総額の算定】', HEADER_FONT, border=None)
+    _cell(
+        ws1, r, 2,
+        '【給与支給総額の算定】※公募要領 p.10／応募申請の手引き p.24：給与支給総額は役員報酬を含めない定義',
+        HEADER_FONT, border=None,
+    )
     r += 1
-    # 役員報酬込 = (A) を Excel 式で再掲
-    _cell(ws1, r, 2, '給与支給総額（役員報酬込）')
+    # 役員報酬込 = (A) の再掲（参考値）
+    _cell(ws1, r, 2, '給与関連合計（参考・役員報酬含む）')
     _cell(ws1, r, 3, f'=C{a_row}', fmt=NUMBER_FMT)
-    _cell(ws1, r, 4, f'機械計算: =C{a_row}（=A の再掲、テンプレートE13相当）',
+    _cell(ws1, r, 4,
+          f'機械計算: =C{a_row}（=A の再掲。公募要領定義の「給与支給総額」ではない参考値）',
           SMALL_FONT)
     r += 1
-    # 役員報酬除外 = (A) - (B) を Excel 式で
-    _cell(ws1, r, 2, '給与支給総額（役員報酬除外）')
-    _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', fmt=NUMBER_FMT)
-    _cell(ws1, r, 4, f'機械計算: =C{a_row}-C{b_row}（=A-B 賃上げ計算用）',
-          SMALL_FONT)
+    # 役員報酬除外 = (A) - (B) → これが公募要領定義の「給与支給総額」
+    total_excl_row = r  # 後段の賃上げ計画シートからシート間参照する
+    _cell(ws1, r, 2, '給与支給総額（公募要領定義／役員報酬除外）', BOLD_FONT, fill=FILL_GREEN)
+    _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', BOLD_FONT, NUMBER_FMT, FILL_GREEN)
+    _cell(ws1, r, 4,
+          f'機械計算: =C{a_row}-C{b_row}（公募要領 p.10「給料・賃金・賞与・各種手当」、'
+          f'応募申請の手引き p.24「役員報酬・役員人数は含めません」／賃上げ計算用）',
+          SMALL_FONT, fill=FILL_GREEN)
 
     # 従業員数
     r += 2
@@ -679,12 +703,25 @@ def create_wage_calculation(
         _cell(ws1, r, 3, val, fmt=NUMBER_FMT, fill=FILL_AI_EXTRACTED)
         location = PL_LOCATIONS[page_key]
         if is_ref:
+            # 給料手当/雑給/賞与は販管費＋製造原価の合算が入りうるため、
+            # 上の損益計算書データセクションと同じヘルパーで内訳を生成して併記する。
+            # （breakdown が無い場合は default_pl_note にフォールバック）
+            breakdown_note = _build_pl_note(
+                page_key, default_pl_note=f'販管費「{name.split("（")[0]}」より'
+            )
             note = (
+                f'{breakdown_note}\n'
                 f'上の販管費セル C{item_rows[page_key]} を参照／'
-                f'決算書記載: {location}{_page_tag(page_key)}'
+                f'決算書記載: {location}'
             )
         else:
-            note = f'決算書記載: {location}{_page_tag(page_key)}'
+            # 売上高・粗利益・営業利益・経常利益・減価償却費は単一値で内訳なし。
+            # 既存の決算書セクション説明 + AI抽出マーカー + ページ番号タグで出所を明示。
+            note = (
+                f'決算書記載: {location}'
+                f'（{_ai_source_tag(page_key)}）'
+                f'{_page_tag(page_key)}'
+            )
         _cell(ws1, r, 4, note, SMALL_FONT)
         # 長い出所表記が読みやすいよう折り返し表示
         ws1.cell(r, 4).alignment = Alignment(wrap_text=True, vertical='top')
@@ -846,9 +883,10 @@ def create_wage_calculation(
     r += 1
     basis_row = r  # 給与支給総額 行（C列 = 直近実績、D-F 列 = 計画値）
     _cell(ws3, r, 2, '給与支給総額', BOLD_FONT)
-    # C5: 直近実績（給与支給総額計算シートの (A) と連動）
-    # シート間参照式でリンク → (A) を編集すると賃上げ計画も自動再計算
-    _cell(ws3, r, 3, f"='給与支給総額計算'!C{a_row}", fmt=NUMBER_FMT)
+    # C5: 直近実績（給与支給総額計算シートの「給与支給総額（公募要領定義／役員報酬除外）」と連動）
+    # 公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」を根拠に、
+    # 賃上げ計画の母数は (A-B) = total_excl_row を参照する（旧実装は a_row だった）。
+    _cell(ws3, r, 3, f"='給与支給総額計算'!C{total_excl_row}", fmt=NUMBER_FMT)
     # D5, E5, F5: 前年 × 1.03（年率3%）。ROUND で円単位に丸め
     prev_col = 'C'
     for i in range(1, 4):
