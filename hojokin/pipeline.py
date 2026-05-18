@@ -920,11 +920,17 @@ def run_wage_calculation(
 
         # PL の各値が決算書PDFのどのページに記載されているかを機械的に逆引き
         # （AI抽出結果の検証 + 人間チェック時のページ番号案内に兼用）
-        # PDFテキスト層が無い画像PDFの場合は空辞書になる
+        # 加えて breakdown 各内訳（販管費側/原価部側）について、AI判定がPDFの
+        # セクション見出しと整合しているかも機械的に検証する。
+        # PDFテキスト層が無い画像PDFの場合は空辞書になる（フォールバック側で扱う）
         pl_value_pages: dict[str, list[int]] = {}
+        pl_breakdown_verification: dict[str, dict] = {}
         if _pl_path and financial is not None:
             try:
-                from .pdf_text_extractor import get_pdf_pages_text, find_value_pages
+                from .pdf_text_extractor import (
+                    get_pdf_pages_text, find_value_pages,
+                    detect_pl_sections, classify_value_by_section,
+                )
                 _pages = get_pdf_pages_text(_pl_path)
                 if _pages and any(p.strip() for p in _pages):
                     for key in ('salary', 'misc_wages', 'bonus', 'legal_welfare',
@@ -941,6 +947,40 @@ def run_wage_calculation(
                         f'PL 値→ページ逆引き完了: '
                         f'{ {k: v for k, v in pl_value_pages.items() if v} }'
                     )
+
+                    # breakdown 各内訳（pl_section / cost_section）の機械検証
+                    # PDFの「販売費及び一般管理費」「製造原価報告書」等の見出しを検出し、
+                    # AIが pl_section に分類した値が本当に販管費表に載っているか照合する。
+                    pl_sections = detect_pl_sections(_pages)
+                    breakdown = getattr(financial, 'breakdown', {}) or {}
+                    for key, bd in breakdown.items():
+                        if not isinstance(bd, dict):
+                            continue
+                        pl_v = int(bd.get('pl_section') or 0)
+                        cost_v = int(bd.get('cost_section') or 0)
+                        pl_breakdown_verification[key] = {
+                            'pl_section_value': pl_v,
+                            'cost_section_value': cost_v,
+                            'pl_section_class': (
+                                classify_value_by_section(_pages, pl_sections, pl_v)
+                                if pl_v > 0 else 'none'
+                            ),
+                            'cost_section_class': (
+                                classify_value_by_section(_pages, pl_sections, cost_v)
+                                if cost_v > 0 else 'none'
+                            ),
+                            'pl_section_pages': (
+                                find_value_pages(_pages, pl_v) if pl_v > 0 else []
+                            ),
+                            'cost_section_pages': (
+                                find_value_pages(_pages, cost_v) if cost_v > 0 else []
+                            ),
+                        }
+                    if pl_breakdown_verification:
+                        logger.info(
+                            f'PL内訳の機械検証完了: {len(pl_breakdown_verification)}件 '
+                            f'(セクション検出ページ数: {len(pl_sections)})'
+                        )
                 else:
                     logger.info(
                         '決算書PDFのテキスト層が取得できなかったため、ページ番号特定はスキップ'
@@ -958,6 +998,7 @@ def run_wage_calculation(
             'wage_report': _wage_report.name if _wage_report else '',
             'registry': _registry.name if _registry else '',
             'pl_value_pages': pl_value_pages,
+            'pl_breakdown_verification': pl_breakdown_verification,
         }
 
         create_wage_calculation(

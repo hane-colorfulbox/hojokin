@@ -150,6 +150,104 @@ def get_pdf_pages_text(pdf_path) -> list[str]:
         return []
 
 
+# 決算書の各表セクションを判定するための見出しパターン
+# 中小企業会計指針に準拠した決算書の見出し表記揺れを網羅する。
+# 「販管費」と「製造原価系（製造原価/完成工事原価/工事原価/売上原価内訳/役務原価）」を
+# 機械的に区分し、AI抽出値が本当に該当セクションに記載されているかを照合する用途。
+PL_SECTION_PATTERNS = [
+    # 販管費系（販売費及び一般管理費の表）
+    ('販売費及び一般管理費', 'pl'),
+    ('販売費・一般管理費', 'pl'),
+    ('販売費 及び 一般管理費', 'pl'),
+    # 原価系（製造原価・完成工事原価・工事原価・売上原価内訳・役務原価）
+    ('製造原価報告書', 'cost'),
+    ('製造原価明細書', 'cost'),
+    ('完成工事原価報告書', 'cost'),
+    ('工事原価報告書', 'cost'),
+    ('売上原価内訳書', 'cost'),
+    ('売上原価報告書', 'cost'),
+    ('役務原価報告書', 'cost'),
+    ('役務原価明細書', 'cost'),
+]
+
+
+def detect_pl_sections(pages_text: list[str]) -> dict[int, str]:
+    """各ページに含まれる決算書セクションを機械的に判定する。
+
+    1ページに販管費の見出しと製造原価の見出しが両方ある（小さい決算書で稀にあり得る）
+    場合は、より上位（先に出現する）見出しを優先する。
+
+    Args:
+        pages_text: 1始まりインデックスのページ別テキストリスト
+            （[0]が1ページ目）。
+
+    Returns:
+        {page_num (1-indexed): section} 形式の辞書。
+        section は 'pl' / 'cost' / 'both' のいずれか。見出しが無いページは含めない。
+    """
+    sections: dict[int, str] = {}
+    for i, text in enumerate(pages_text, 1):
+        if not text:
+            continue
+        # ページ内に出現するパターンを全部拾い、種類を集計
+        found = set()
+        first_pos: dict[str, int] = {}
+        for pattern, kind in PL_SECTION_PATTERNS:
+            pos = text.find(pattern)
+            if pos >= 0:
+                found.add(kind)
+                if kind not in first_pos or pos < first_pos[kind]:
+                    first_pos[kind] = pos
+        if not found:
+            continue
+        if 'pl' in found and 'cost' in found:
+            # 両方の見出しがある: より上に書かれている方をメインとして採用
+            sections[i] = 'pl' if first_pos['pl'] < first_pos['cost'] else 'cost'
+        elif 'pl' in found:
+            sections[i] = 'pl'
+        else:
+            sections[i] = 'cost'
+    return sections
+
+
+def classify_value_by_section(
+    pages_text: list[str],
+    sections: dict[int, str],
+    value: int | float,
+) -> str:
+    """値がどのセクションに記載されているかを機械的に判定する。
+
+    PDFテキスト層から値が見つかったページを取得し、そのページのセクション判定
+    （detect_pl_sections）と照合する。決算書の表構造上、ある勘定科目の数値は
+    その勘定の所属表（販管費 or 原価部）にのみ出現するので、
+    一意に判定できれば「AI抽出値の出所は確実に X セクション」と言える。
+
+    Returns:
+        'pl'     : 販管費セクションのページにのみ出現
+        'cost'   : 原価部セクションのページにのみ出現
+        'both'   : 両方のセクションに出現（小計の再掲・同額の偶然一致など）
+        'absent' : どのページにも見つからない（AI誤読 or テキスト層欠落）
+        'unknown': 見つかったがセクション未判定ページ（決算書外のページ）
+    """
+    if not value:
+        return 'absent'
+    pages = find_value_pages(pages_text, value)
+    if not pages:
+        return 'absent'
+    found = set()
+    for p in pages:
+        sec = sections.get(p)
+        if sec:
+            found.add(sec)
+    if 'pl' in found and 'cost' in found:
+        return 'both'
+    if 'pl' in found:
+        return 'pl'
+    if 'cost' in found:
+        return 'cost'
+    return 'unknown'
+
+
 def find_value_pages(pages_text: list[str], value: int | float) -> list[int]:
     """整数値が含まれるページ番号（1始まり）のリストを返す。
 

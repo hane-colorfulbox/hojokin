@@ -190,6 +190,13 @@ def create_wage_calculation(
     registry_source = sources.get('registry', '') or '（不明）'
     # 値→ページ番号の逆引き結果（pipeline 側で機械的に特定済み）
     pl_value_pages: dict[str, list[int]] = sources.get('pl_value_pages', {}) or {}
+    # breakdown 各内訳（販管費/原価部）のセクション検証結果（pipeline 側で機械検証済み）
+    # 値: {key: {'pl_section_class': 'pl'/'cost'/'both'/'absent'/'unknown'/'none',
+    #            'cost_section_class': ...,
+    #            'pl_section_pages': [...], 'cost_section_pages': [...]}}
+    pl_breakdown_verification: dict[str, dict] = (
+        sources.get('pl_breakdown_verification', {}) or {}
+    )
 
     def _page_tag(key: str) -> str:
         """財務値が決算書PDFの何ページに見つかったかをタグ文字列化。
@@ -307,13 +314,70 @@ def create_wage_calculation(
             return 'AI抽出：決算書PDF（⚠PDFに値なし／AI誤読の可能性）'
         return f'AI抽出：決算書PDF p.{",".join(map(str, pages))}'
 
-    def _build_pl_note(key: str, default_pl_note: str = '', excluded: bool = False) -> str:
-        """販管費＋原価部の内訳を含む備考文を生成。
+    def _component_label(label: str, value: int, expected: str, ver: dict, side: str) -> str:
+        """内訳1成分のラベル文を生成（PDF機械検証結果を反映）。
 
-        - 合算あり（販管費>0 かつ 原価部>0）: "内訳: 販管費「X」200,000 + 製造原価「Y」13,870,373 ..."
-        - 販管費のみ: "販管費「X」より ..."（金額は C列に出るため重複表示しない）
-        - 原価部のみ: "製造原価「Y」より ..."
-        - 内訳情報なし: 旧来の default_pl_note を返す（レガシー経路・テスト互換）
+        Args:
+            label: 表示ラベル（例: '販管費「給料手当」'）
+            value: 金額
+            expected: 期待されるセクション（'pl' or 'cost'）
+            ver: 該当 key の検証結果 dict（空なら PDF照合なし）
+            side: 'pl_section' or 'cost_section'
+
+        セクション照合の振る舞い:
+            - expected と一致: '販管費「X」200,000円 (PDF p.3で確認)'
+            - 反対側に出現: '⚠ AI判定「X」200,000円(本来販管費だがPDF上は製造原価ページ p.5)'
+            - 両セクションに同値: '販管費「X」200,000円 (⚠両セクションのページに同値あり p.3,5)'
+            - PDFに存在せず: '販管費「X」200,000円 (⚠PDFテキストに該当数値なし／AI誤読の可能性)'
+            - セクション未判定ページ: '販管費「X」200,000円 (PDF p.7に出現／セクション特定不可)'
+            - 検証情報なし: '販管費「X」200,000円'（AI判定のみ）
+        """
+        cls = ver.get(f'{side}_class', 'none') if ver else 'none'
+        pages = ver.get(f'{side}_pages', []) if ver else []
+        page_str = ','.join(map(str, pages)) if pages else ''
+        if not ver or cls == 'none':
+            # 検証情報なし（PDFテキスト層なし or キー未対応）
+            return f'{label}{value:,}円'
+        if cls == expected:
+            return f'{label}{value:,}円 (PDF p.{page_str}で確認)'
+        if cls == 'both':
+            return f'{label}{value:,}円 (⚠両セクションのページに同値あり p.{page_str})'
+        if cls == 'absent':
+            return f'{label}{value:,}円 (⚠PDFテキストに該当数値なし／AI誤読の可能性)'
+        if cls == 'unknown':
+            return f'{label}{value:,}円 (PDF p.{page_str}に出現／セクション特定不可)'
+        # 反対側セクションに出現（AI誤分類の可能性）
+        opposite_jp = '製造原価' if expected == 'pl' else '販管費'
+        expected_jp = '販管費' if expected == 'pl' else '製造原価'
+        return (
+            f'⚠ AI判定「{label}」{value:,}円 '
+            f'(本来{expected_jp}だがPDF上は{opposite_jp}ページ p.{page_str} に出現)'
+        )
+
+    def _verified_source_tag(key: str) -> str:
+        """合算後の値そのものに対する出所ラベル。
+
+        breakdown が機械検証済みなら「PDF照合済」、PDFテキスト層が無ければ
+        「AI判定のみ（PDF照合不可）」と明示する。
+        """
+        if pl_breakdown_verification.get(key):
+            return 'PDFテキストで機械照合済'
+        if key in pl_value_pages and pl_value_pages[key]:
+            return f'AI抽出：決算書PDF p.{",".join(map(str, pl_value_pages[key]))}'
+        if key in pl_value_pages:
+            return 'AI抽出：決算書PDF（⚠PDF照合できず）'
+        return 'AI抽出：決算書PDF'
+
+    def _build_pl_note(key: str, default_pl_note: str = '', excluded: bool = False) -> str:
+        """販管費＋原価部の内訳を含む備考文を生成（機械検証ラベル付き）。
+
+        verification info あり（PDF テキスト層から検証済）:
+            "内訳: 販管費「給料手当」200,000円 (PDF p.3で確認) ＋
+                  製造原価「賃金等」13,870,373円 (PDF p.5で確認)"
+        verification なし（画像PDF・テスト等）:
+            "内訳: 販管費「給料手当」200,000円 ＋ 製造原価「賃金等」13,870,373円
+             (AI抽出：決算書PDF p.3,5)"
+        breakdown 情報なし: 旧来の default_pl_note にフォールバック（テスト互換）
         """
         bd = (breakdown.get(key) or {}) if isinstance(breakdown, dict) else {}
         pl_v = int(bd.get('pl_section') or 0)
@@ -321,16 +385,28 @@ def create_wage_calculation(
         excluded_tag = '｜※給与支給総額から除外' if excluded else ''
         ai_tag = _ai_source_tag(key)
         pl_label, cost_label = PL_ITEM_LABELS.get(key, (key, key))
+        ver = pl_breakdown_verification.get(key, {})
+        has_verification = bool(ver) and any(
+            ver.get(f'{s}_class', 'none') != 'none'
+            for s in ('pl_section', 'cost_section')
+        )
+        # 検証なし時の合算後出所タグ（成分ごとのエビデンスを出せない代わり）
+        agg_tag = f'（{ai_tag}）' if not has_verification else ''
 
         if pl_v > 0 and cost_v > 0:
-            return (
-                f'内訳: 販管費「{pl_label}」{pl_v:,}円 ＋ '
-                f'製造原価「{cost_label}」{cost_v:,}円{excluded_tag}（{ai_tag}）'
-            )
+            pl_part = _component_label(
+                f'販管費「{pl_label}」', pl_v, 'pl', ver, 'pl_section')
+            cost_part = _component_label(
+                f'製造原価「{cost_label}」', cost_v, 'cost', ver, 'cost_section')
+            return f'内訳: {pl_part} ＋ {cost_part}{excluded_tag}{agg_tag}'
         if pl_v > 0 and cost_v == 0:
-            return f'販管費「{pl_label}」より{excluded_tag}（{ai_tag}）'
+            pl_part = _component_label(
+                f'販管費「{pl_label}」', pl_v, 'pl', ver, 'pl_section')
+            return f'{pl_part}{excluded_tag}{agg_tag}'
         if pl_v == 0 and cost_v > 0:
-            return f'製造原価「{cost_label}」より{excluded_tag}（{ai_tag}）'
+            cost_part = _component_label(
+                f'製造原価「{cost_label}」', cost_v, 'cost', ver, 'cost_section')
+            return f'{cost_part}{excluded_tag}{agg_tag}'
         # breakdown 情報なし → 旧来表示にフォールバック（決算書構造の固定マッピング表現）
         if default_pl_note:
             return f'{default_pl_note}（{ai_tag}）'
