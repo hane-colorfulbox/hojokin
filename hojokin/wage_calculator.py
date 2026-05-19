@@ -251,6 +251,13 @@ def create_wage_calculation(
         _sheet2_target_row = 6 + len(employees_detail)
         ledger_total_cell = f"'従業員別明細'!Q{_sheet2_target_row}"
 
+    # クリーンモード判定: 賃金台帳ベース運用が成立しているか
+    # True: 決算書PL値由来セクション（損益計算書データ／役員報酬の控除／PL値参考）を全削除し、
+    #       賃金台帳ベース1本でレイアウトを単純化（ユーザー指示 2026-05-19）。
+    #       テンプレ転記用セクションは決算書PL値を直書きする（上のセル参照ではない）。
+    # False: 賃金台帳由来データなし → 従来の決算書PL値ベース＋参考値併記レイアウト。
+    clean_mode = bool(has_12_months and ledger_total_cell)
+
     # FTE 計算（R215「FTE換算従業員数」用）
     # 公募要領（IT2026 通常枠 p.9-10）原文:
     #   「基準年度および算出対象年度に全月分の給与等の支給を受けた従業員のみ算定対象。
@@ -312,16 +319,11 @@ def create_wage_calculation(
         if has_cost_section_merge else '【損益計算書データ（販管費）】'
     )
 
-    r = 7
-    _cell(ws1, r, 2, pl_section_header, HEADER_FONT, border=None)
-    _cell(ws1, r, 3, f'出所: {pl_source}', SMALL_FONT, border=None)
-    r += 1
-    for i, h in enumerate(['科目', '金額（円）', '備考']):
-        _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
-
     # 各勘定科目に対応する販管費側ラベル・原価部側ラベル
     # （cost_section_label には「給料手当/賃金/給料/労務費」など複数勘定が含まれるため
     #  代表ラベルとして "賃金等" のような総称を採用）
+    # ※ clean_mode（賃金台帳ベース運用）でもテンプレ転記用の出所表記で使うため、
+    #   if not clean_mode: ブロックより前で定義しておく。
     PL_ITEM_LABELS = {
         'salary':        ('給料手当', '賃金等（賃金/給料/労務費）'),
         'misc_wages':    ('雑給', '雑給'),
@@ -442,97 +444,120 @@ def create_wage_calculation(
             return f'{default_pl_note}（{ai_tag}）'
         return f'販管費「{pl_label}」より{excluded_tag}（{ai_tag}）'
 
-    items = [
-        ('給料手当', financial.salary,
-            _build_pl_note('salary', default_pl_note='販管費より｜正社員給与')),
-        ('雑給', financial.misc_wages,
-            _build_pl_note('misc_wages', default_pl_note='販管費より｜パート・アルバイト給与')),
-        ('賞与', financial.bonus,
-            _build_pl_note('bonus', default_pl_note='販管費より')),
-        ('法定福利費', financial.legal_welfare,
-            _build_pl_note('legal_welfare', excluded=True)),
-        ('福利厚生費', financial.welfare,
-            _build_pl_note('welfare', excluded=True)),
-    ]
-    # 各科目のセル位置を後段の Excel 計算式で参照できるよう記録
-    item_rows: dict[str, int] = {}
-    item_keys = ['salary', 'misc_wages', 'bonus', 'legal_welfare', 'welfare']
-    for (name, amount, note), key in zip(items, item_keys):
+    if not clean_mode:
+        # 決算書PL値由来セクション（賃金台帳ベース運用が成立しない場合のフォールバック表示）。
+        # clean_mode=True のときはユーザー指示（2026-05-19）により以下を全て省略し、
+        # 賃金台帳ベース1本のレイアウトに統一する:
+        #   - 損益計算書データ（販管費）セクション
+        #   - 役員報酬の控除セクション
+        #   - 給与支給総額算定の【参考】2行
+        #   - 1人当たり給与支給総額の【参考】式3つ
+        # 決算書PL値はテンプレ転記用セクションのみで直書きで提示する。
+        r = 7
+        _cell(ws1, r, 2, pl_section_header, HEADER_FONT, border=None)
+        _cell(ws1, r, 3, f'出所: {pl_source}', SMALL_FONT, border=None)
         r += 1
-        _cell(ws1, r, 2, name)
-        # AI抽出値はオレンジで塗る（除外行は灰色優先）
-        is_excluded = '除外' in note
-        cell_fill = FILL_GRAY if is_excluded else FILL_AI_EXTRACTED
-        _cell(ws1, r, 3, amount, fmt=NUMBER_FMT, fill=cell_fill)
-        _cell(ws1, r, 4, note, SMALL_FONT, fill=cell_fill if is_excluded else None)
-        if is_excluded:
-            ws1.cell(r, 2).fill = FILL_GRAY
-        item_rows[key] = r
+        for i, h in enumerate(['科目', '金額（円）', '備考']):
+            _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
 
-    r += 1
-    a_row = r  # (A) の行を覚えておく → 後段で参照
-    # 給与関連合計 (A) を Excel 式で表現（給料手当+雑給+賞与）。
-    # ユーザーが Excel 上で値を編集しても合計が自動更新される。
-    a_formula = (
-        f'=C{item_rows["salary"]}+C{item_rows["misc_wages"]}+C{item_rows["bonus"]}'
-    )
-    _cell(ws1, r, 2, '給与関連合計（A）', BOLD_FONT, fill=FILL_BLUE)
-    _cell(ws1, r, 3, a_formula, BOLD_FONT, NUMBER_FMT, FILL_BLUE)
-    _cell(ws1, r, 4,
-          f'機械計算: C{item_rows["salary"]}+C{item_rows["misc_wages"]}+C{item_rows["bonus"]}（給料手当+雑給+賞与）',
-          SMALL_FONT, fill=FILL_BLUE)
+        items = [
+            ('給料手当', financial.salary,
+                _build_pl_note('salary', default_pl_note='販管費より｜正社員給与')),
+            ('雑給', financial.misc_wages,
+                _build_pl_note('misc_wages', default_pl_note='販管費より｜パート・アルバイト給与')),
+            ('賞与', financial.bonus,
+                _build_pl_note('bonus', default_pl_note='販管費より')),
+            ('法定福利費', financial.legal_welfare,
+                _build_pl_note('legal_welfare', excluded=True)),
+            ('福利厚生費', financial.welfare,
+                _build_pl_note('welfare', excluded=True)),
+        ]
+        # 各科目のセル位置を後段の Excel 計算式で参照できるよう記録
+        item_rows: dict[str, int] = {}
+        item_keys = ['salary', 'misc_wages', 'bonus', 'legal_welfare', 'welfare']
+        for (name, amount, note), key in zip(items, item_keys):
+            r += 1
+            _cell(ws1, r, 2, name)
+            # AI抽出値はオレンジで塗る（除外行は灰色優先）
+            is_excluded = '除外' in note
+            cell_fill = FILL_GRAY if is_excluded else FILL_AI_EXTRACTED
+            _cell(ws1, r, 3, amount, fmt=NUMBER_FMT, fill=cell_fill)
+            _cell(ws1, r, 4, note, SMALL_FONT, fill=cell_fill if is_excluded else None)
+            if is_excluded:
+                ws1.cell(r, 2).fill = FILL_GRAY
+            item_rows[key] = r
 
-    # 役員報酬
-    r += 2
-    _cell(
-        ws1, r, 2,
-        '【役員報酬の控除】※公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」',
-        HEADER_FONT, border=None,
-    )
-    # ソース判定: 賃金状況報告シート由来か、PL 由来（年額一致）か
-    yakuin_source_is_pl = (
-        financial.officer_compensation > 0
-        and yakuin_hoshu_3m == int(financial.officer_compensation / 4)
-    )
-    if yakuin_source_is_pl:
-        yakuin_source_label = f'出所: {pl_source}（決算書PDF）'
-    elif wage_report_source:
-        yakuin_source_label = f'出所: {wage_report_source}'
-    else:
-        yakuin_source_label = '出所: （不明）'
-    _cell(ws1, r, 3, yakuin_source_label, SMALL_FONT, border=None)
-    r += 1
+        r += 1
+        a_row = r  # (A) の行を覚えておく → 後段で参照
+        # 給与関連合計 (A) を Excel 式で表現（給料手当+雑給+賞与）。
+        # ユーザーが Excel 上で値を編集しても合計が自動更新される。
+        a_formula = (
+            f'=C{item_rows["salary"]}+C{item_rows["misc_wages"]}+C{item_rows["bonus"]}'
+        )
+        _cell(ws1, r, 2, '給与関連合計（A）', BOLD_FONT, fill=FILL_BLUE)
+        _cell(ws1, r, 3, a_formula, BOLD_FONT, NUMBER_FMT, FILL_BLUE)
+        _cell(ws1, r, 4,
+              f'機械計算: C{item_rows["salary"]}+C{item_rows["misc_wages"]}+C{item_rows["bonus"]}（給料手当+雑給+賞与）',
+              SMALL_FONT, fill=FILL_BLUE)
 
-    if yakuin_source_is_pl:
-        # PL 由来: 決算書PDFに年額が直接記載されているため、年額1段で表示。
-        # （3ヶ月合計の概念は決算書には無いので、÷4 → ×4 の逆算を出力に出さない）
-        b_row = r
-        _cell(ws1, r, 2, '役員報酬（年額）（B）', BOLD_FONT, fill=FILL_YELLOW)
-        _cell(ws1, r, 3, int(financial.officer_compensation),
-              BOLD_FONT, NUMBER_FMT, FILL_AI_EXTRACTED)
+        # 役員報酬
+        r += 2
         _cell(
-            ws1, r, 4,
-            f'決算書記載: 損益計算書「販売費及び一般管理費」内「役員報酬」（年額）'
-            f'｜{_ai_source_tag("officer_compensation")}',
-            SMALL_FONT, fill=FILL_AI_EXTRACTED,
+            ws1, r, 2,
+            '【役員報酬の控除】※公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」',
+            HEADER_FONT, border=None,
         )
-    else:
-        # 賃金状況報告シート由来 or 不明: 3ヶ月合計 → 年額（×4） の2段表示。
-        # 賃金状況報告シート（補助金提出書類のひとつ）は3ヶ月合計の様式なので、×4で年額化する。
-        yakuin_3m_row = r
-        _cell(ws1, r, 2, '役員報酬（3ヶ月合計）')
-        yakuin_note = (
-            '賃金状況報告シートより（3ヶ月合計）'
-            if wage_report_source else '※出所不明（賃金状況報告シート未取込）'
+        # ソース判定: 賃金状況報告シート由来か、PL 由来（年額一致）か
+        yakuin_source_is_pl = (
+            financial.officer_compensation > 0
+            and yakuin_hoshu_3m == int(financial.officer_compensation / 4)
         )
-        _cell(ws1, r, 3, yakuin_hoshu_3m, fmt=NUMBER_FMT)
-        _cell(ws1, r, 4, yakuin_note, SMALL_FONT)
+        if yakuin_source_is_pl:
+            yakuin_source_label = f'出所: {pl_source}（決算書PDF）'
+        elif wage_report_source:
+            yakuin_source_label = f'出所: {wage_report_source}'
+        else:
+            yakuin_source_label = '出所: （不明）'
+        _cell(ws1, r, 3, yakuin_source_label, SMALL_FONT, border=None)
         r += 1
-        b_row = r
-        _cell(ws1, r, 2, '役員報酬（年額）（B）', BOLD_FONT, fill=FILL_YELLOW)
-        _cell(ws1, r, 3, f'=C{yakuin_3m_row}*4', BOLD_FONT, NUMBER_FMT, FILL_YELLOW)
-        _cell(ws1, r, 4, f'機械計算: C{yakuin_3m_row}×4（3ヶ月合計 × 4）',
-              SMALL_FONT, fill=FILL_YELLOW)
+
+        if yakuin_source_is_pl:
+            # PL 由来: 決算書PDFに年額が直接記載されているため、年額1段で表示。
+            # （3ヶ月合計の概念は決算書には無いので、÷4 → ×4 の逆算を出力に出さない）
+            b_row = r
+            _cell(ws1, r, 2, '役員報酬（年額）（B）', BOLD_FONT, fill=FILL_YELLOW)
+            _cell(ws1, r, 3, int(financial.officer_compensation),
+                  BOLD_FONT, NUMBER_FMT, FILL_AI_EXTRACTED)
+            _cell(
+                ws1, r, 4,
+                f'決算書記載: 損益計算書「販売費及び一般管理費」内「役員報酬」（年額）'
+                f'｜{_ai_source_tag("officer_compensation")}',
+                SMALL_FONT, fill=FILL_AI_EXTRACTED,
+            )
+        else:
+            # 賃金状況報告シート由来 or 不明: 3ヶ月合計 → 年額（×4） の2段表示。
+            # 賃金状況報告シート（補助金提出書類のひとつ）は3ヶ月合計の様式なので、×4で年額化する。
+            yakuin_3m_row = r
+            _cell(ws1, r, 2, '役員報酬（3ヶ月合計）')
+            yakuin_note = (
+                '賃金状況報告シートより（3ヶ月合計）'
+                if wage_report_source else '※出所不明（賃金状況報告シート未取込）'
+            )
+            _cell(ws1, r, 3, yakuin_hoshu_3m, fmt=NUMBER_FMT)
+            _cell(ws1, r, 4, yakuin_note, SMALL_FONT)
+            r += 1
+            b_row = r
+            _cell(ws1, r, 2, '役員報酬（年額）（B）', BOLD_FONT, fill=FILL_YELLOW)
+            _cell(ws1, r, 3, f'=C{yakuin_3m_row}*4', BOLD_FONT, NUMBER_FMT, FILL_YELLOW)
+            _cell(ws1, r, 4, f'機械計算: C{yakuin_3m_row}×4（3ヶ月合計 × 4）',
+                  SMALL_FONT, fill=FILL_YELLOW)
+    else:
+        # クリーンモード: 決算書PL値由来セクションを全省略。
+        # r は凡例直後の r=5 のまま → 後続 `r += 2` で r=7 となり、給与支給総額セクションが B7 から開始。
+        # 後段で参照される変数はスタブ（このパスでは参照されない式は出さない）。
+        a_row = None
+        b_row = None
+        item_rows = {}
 
     # 給与支給総額
     # 公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」+
@@ -548,22 +573,22 @@ def create_wage_calculation(
         HEADER_FONT, border=None,
     )
     r += 1
-    # 参考値1: (A) の再掲（役員報酬込み・決算書PL値）
-    _cell(ws1, r, 2, '【参考】給与関連合計（決算書PL値・役員報酬含む）')
-    _cell(ws1, r, 3, f'=C{a_row}', fmt=NUMBER_FMT)
-    _cell(ws1, r, 4,
-          f'機械計算: =C{a_row}（=A の再掲。決算書PL値ベース・役員報酬込みの参考値）',
-          SMALL_FONT)
-    r += 1
-    # 参考値2: (A-B) 役員報酬除外（決算書PL値ベース）— 突合用
-    pl_excl_row = r
-    _cell(ws1, r, 2, '【参考】給与支給総額（決算書PL値・役員除外）')
-    _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', fmt=NUMBER_FMT)
-    _cell(ws1, r, 4,
-          f'機械計算: =C{a_row}-C{b_row}（決算書PL値ベース。賃金台帳ベース値との'
-          f'突合チェックに使用。通勤費非課税分・中途者を含むため R216 母数とは差が出る）',
-          SMALL_FONT)
-    r += 1
+    if not clean_mode:
+        # 参考値1: (A) の再掲（役員報酬込み・決算書PL値）
+        _cell(ws1, r, 2, '【参考】給与関連合計（決算書PL値・役員報酬含む）')
+        _cell(ws1, r, 3, f'=C{a_row}', fmt=NUMBER_FMT)
+        _cell(ws1, r, 4,
+              f'機械計算: =C{a_row}（=A の再掲。決算書PL値ベース・役員報酬込みの参考値）',
+              SMALL_FONT)
+        r += 1
+        # 参考値2: (A-B) 役員報酬除外（決算書PL値ベース）— 突合用
+        _cell(ws1, r, 2, '【参考】給与支給総額（決算書PL値・役員除外）')
+        _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', fmt=NUMBER_FMT)
+        _cell(ws1, r, 4,
+              f'機械計算: =C{a_row}-C{b_row}（決算書PL値ベース。賃金台帳ベース値との'
+              f'突合チェックに使用。通勤費非課税分・中途者を含むため R216 母数とは差が出る）',
+              SMALL_FONT)
+        r += 1
     # メイン: 賃金台帳ベース給与支給総額（R216）
     total_excl_row = r  # 後段の賃上げ計画シート・1人当たり計算からシート間参照する
     if ledger_total_cell:
@@ -574,8 +599,9 @@ def create_wage_calculation(
               BOLD_FONT, NUMBER_FMT, FILL_GREEN)
         _cell(ws1, r, 4,
               f'機械計算: ={ledger_total_cell}（「従業員別明細」シートの12ヶ月在籍合計を参照。'
-              f'公募要領 p.10／実務知識ベース R216 定義：12ヶ月在籍者の課税給与12ヶ月合計、'
-              f'役員報酬・非課税通勤手当を除外）',
+              f'出典: 賃金台帳「{ledger_source}」の各従業員の課税支給合計列を12ヶ月分集計し、'
+              f'12ヶ月在籍者のみを抽出した値。'
+              f'公募要領 p.10／実務知識ベース R216 定義：役員報酬・非課税通勤手当を除外）',
               SMALL_FONT, fill=FILL_GREEN)
     else:
         # フォールバック: 賃金台帳由来データなし → 決算書PL値 (A-B) を採用
@@ -623,25 +649,31 @@ def create_wage_calculation(
         _cell(ws1, r, 2, '【FTE換算（12ヶ月在籍者のみ／中途入退社は除外）】',
               HEADER_FONT, border=None)
         _cell(ws1, r, 3,
-              f'出所: IT2026 通常枠公募要領 p.9-10（中途入退社者は算定対象外）',
+              f'出所: 賃金台帳「{ledger_source}」（雇用形態・月間労働時間列を集計）',
               SMALL_FONT, border=None)
         r += 1
         _cell(ws1, r, 2, '標準年間労働時間')
         _cell(ws1, r, 3, f'{STANDARD_ANNUAL_HOURS}時間')
-        _cell(ws1, r, 4, '40h/週 x 52週', SMALL_FONT)
+        _cell(ws1, r, 4,
+              f'40h/週 × 52週（IT2026 通常枠公募要領 p.9-10の標準値）',
+              SMALL_FONT)
         r += 1
         seishain_fte_row = r
         _cell(ws1, r, 2, '正社員FTE合計（12ヶ月在籍のみ）')
         _cell(ws1, r, 3, round(fte_seishain, 2), fmt='0.00')
         _cell(ws1, r, 4,
-              f'12ヶ月在籍正社員のみカウント（中途者は公募要領により除外）',
+              f'引用元: 賃金台帳「{ledger_source}」より、各従業員の「雇用形態」列が'
+              f'『正社員』または『契約社員』を含み、かつ12ヶ月在籍している人数。'
+              f'中途入退社者は公募要領 p.9-10「全月分の給与等の支給を受けた従業員」により除外',
               SMALL_FONT)
         r += 1
         part_fte_row = r
         _cell(ws1, r, 2, 'パートFTE換算合計（12ヶ月在籍のみ）')
         _cell(ws1, r, 3, round(fte_part, 2), fmt='0.00')
         _cell(ws1, r, 4,
-              f'12ヶ月在籍パートのみ。月間労働時間/標準月間時間 で正社員換算',
+              f'引用元: 賃金台帳「{ledger_source}」より、各パート・アルバイト従業員の'
+              f'「月間平均労働時間」 ÷ ({STANDARD_ANNUAL_HOURS}/12 = {round(STANDARD_ANNUAL_HOURS/12, 1)}時間) で正社員換算し合算。'
+              f'12ヶ月在籍者のみ',
               SMALL_FONT)
         if excluded_midyear:
             r += 1
@@ -668,44 +700,72 @@ def create_wage_calculation(
     # 1人当たり計算
     r += 2
     _cell(ws1, r, 2, '【1人当たり給与支給総額】', Font(name='游ゴシック', size=12, bold=True), border=None)
+    if clean_mode:
+        _cell(ws1, r, 3,
+              f'出所: 賃金台帳「{ledger_source}」（分子）／ 賃金台帳より算出した FTE（分母）',
+              SMALL_FONT, border=None)
     r += 1
-    for i, h in enumerate(['算出方法', '金額', '']):
+    for i, h in enumerate(['算出方法', '金額', '備考']):
         _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER_DARK)
 
     # 各算出方法を Excel 式で。ユーザーが上流セルを編集すると即時再計算。
     # ゼロ除算は IF で防御。
     # メイン値（推奨）の母数（分子）は「賃金台帳ベース給与支給総額」セル C{total_excl_row} を使う。
-    # has_12_months=True 時: 賃金台帳12ヶ月合計（R216 公募要領定義）
-    # has_12_months=False 時: 決算書PL値 (A-B)（フォールバック）
-    # （A）÷（C/D）系は参考値として残す（決算書PL値ベース・役員報酬含む）。
+    # clean_mode=True 時: メイン式のみ（決算書PL値由来の参考式は省略）
+    # clean_mode=False 時: 参考式(A)÷(C)/(A-B)÷(C)/(A)÷(D)も併記
     main_label_suffix = '（賃金台帳ベース・推奨）' if ledger_total_cell else '（決算書PL値・参考）'
-    calc_methods = [
-        ('【参考】(A)÷(C) 決算書PL値・頭数割り',
-         f'=IF(C{c_row}=0,0,ROUND(C{a_row}/C{c_row},0))'),
-        ('【参考】(A-B)÷(C) 決算書PL値・役員除外・頭数',
-         f'=IF(C{c_row}=0,0,ROUND((C{a_row}-C{b_row})/C{c_row},0))'),
-    ]
-    if employees_detail and fte_adjusted > 0 and d_row is not None:
-        calc_methods.extend([
-            ('【参考】(A)÷(D) 決算書PL値・FTE換算',
-             f'=IF(C{d_row}=0,0,ROUND(C{a_row}/C{d_row},0))'),
-            (f'1人当たり給与支給総額 = 給与支給総額 ÷ FTE{main_label_suffix}',
-             f'=IF(C{d_row}=0,0,ROUND(C{total_excl_row}/C{d_row},0))'),
-        ])
+    if clean_mode:
+        # クリーンモード: メイン式（賃金台帳÷FTE）のみ
+        if employees_detail and fte_adjusted > 0 and d_row is not None:
+            calc_methods = [
+                (
+                    f'1人当たり給与支給総額 = 給与支給総額 ÷ FTE{main_label_suffix}',
+                    f'=IF(C{d_row}=0,0,ROUND(C{total_excl_row}/C{d_row},0))',
+                    f'分子=C{total_excl_row}（賃金台帳12ヶ月合計／R216）／'
+                    f'分母=C{d_row}（賃金台帳由来のFTE：正社員FTE+パートFTE）',
+                ),
+            ]
+        else:
+            calc_methods = [
+                (
+                    f'1人当たり給与支給総額 = 給与支給総額 ÷ 従業員数{main_label_suffix}',
+                    f'=IF(C{c_row}=0,0,ROUND(C{total_excl_row}/C{c_row},0))',
+                    f'分子=C{total_excl_row}（賃金台帳12ヶ月合計）／'
+                    f'分母=C{c_row}（従業員合計）',
+                ),
+            ]
     else:
-        # FTE 列が無いケースは頭数割りをメインにする
-        calc_methods.append(
-            (f'1人当たり給与支給総額 = 給与支給総額 ÷ 従業員数{main_label_suffix}',
-             f'=IF(C{c_row}=0,0,ROUND(C{total_excl_row}/C{c_row},0))'),
-        )
+        # 従来モード: 決算書PL値由来の参考式も併記
+        calc_methods = [
+            ('【参考】(A)÷(C) 決算書PL値・頭数割り',
+             f'=IF(C{c_row}=0,0,ROUND(C{a_row}/C{c_row},0))', ''),
+            ('【参考】(A-B)÷(C) 決算書PL値・役員除外・頭数',
+             f'=IF(C{c_row}=0,0,ROUND((C{a_row}-C{b_row})/C{c_row},0))', ''),
+        ]
+        if employees_detail and fte_adjusted > 0 and d_row is not None:
+            calc_methods.extend([
+                ('【参考】(A)÷(D) 決算書PL値・FTE換算',
+                 f'=IF(C{d_row}=0,0,ROUND(C{a_row}/C{d_row},0))', ''),
+                (f'1人当たり給与支給総額 = 給与支給総額 ÷ FTE{main_label_suffix}',
+                 f'=IF(C{d_row}=0,0,ROUND(C{total_excl_row}/C{d_row},0))', ''),
+            ])
+        else:
+            calc_methods.append(
+                (f'1人当たり給与支給総額 = 給与支給総額 ÷ 従業員数{main_label_suffix}',
+                 f'=IF(C{c_row}=0,0,ROUND(C{total_excl_row}/C{c_row},0))', ''),
+            )
 
-    for i, (label, formula) in enumerate(calc_methods):
+    for i, (label, formula, note) in enumerate(calc_methods):
         r += 1
         is_last = (i == len(calc_methods) - 1)
         _cell(ws1, r, 2, label, BOLD_FONT if is_last else NORMAL_FONT,
               fill=FILL_GREEN if is_last else None)
         _cell(ws1, r, 3, formula, RESULT_FONT if is_last else NORMAL_FONT,
               NUMBER_FMT, FILL_GREEN if is_last else None)
+        if note:
+            _cell(ws1, r, 4, note, SMALL_FONT,
+                  fill=FILL_GREEN if is_last else None)
+            ws1.cell(r, 4).alignment = Alignment(wrap_text=True, vertical='top')
 
     # テンプレート転記用（全項目 AI 抽出：決算書PDF由来）
     r += 2
@@ -750,19 +810,33 @@ def create_wage_calculation(
             '（製造業は製造原価報告書「減価償却費」と合算。複数箇所に分散記載される場合あり）'
         ),
     }
-    # 給料手当・雑給・賞与手当は上の P/L データセクションの同じセルを参照する
-    # Excel 式にする（ユーザーが上で誤読を訂正すると転記用も自動追従）。
-    # 残り5項目は上のセクションに対応する元セルが無いため AI 抽出値の数値直書き。
-    template_items = [
-        ('給料手当（販管費E5）', f'=C{item_rows["salary"]}', 'salary', True),
-        ('雑給（販管費E6）', f'=C{item_rows["misc_wages"]}', 'misc_wages', True),
-        ('賞与手当（販管費E7）', f'=C{item_rows["bonus"]}', 'bonus', True),
-        ('売上高（B10）', financial.revenue, 'revenue', False),
-        ('粗利益（B11）', financial.gross_profit, 'gross_profit', False),
-        ('営業利益（B12）', financial.operating_profit, 'operating_profit', False),
-        ('経常利益（B13）', financial.ordinary_profit, 'ordinary_profit', False),
-        ('減価償却費（B14）', financial.depreciation, 'depreciation', False),
-    ]
+    # テンプレ転記用の値の出し方:
+    # - clean_mode=True: 上の損益計算書データセクションが存在しないため、給料手当・雑給・賞与も
+    #   決算書PL値（financial.*）を直書きする。
+    # - clean_mode=False: 上のセクションがあるので、給料手当・雑給・賞与は上のセルを Excel 式で参照
+    #   する（ユーザーが上で誤読を訂正すると転記用も自動追従）。
+    if clean_mode:
+        template_items = [
+            ('給料手当', financial.salary, 'salary', True),
+            ('雑給', financial.misc_wages, 'misc_wages', True),
+            ('賞与手当', financial.bonus, 'bonus', True),
+            ('売上高', financial.revenue, 'revenue', False),
+            ('粗利益', financial.gross_profit, 'gross_profit', False),
+            ('営業利益', financial.operating_profit, 'operating_profit', False),
+            ('経常利益', financial.ordinary_profit, 'ordinary_profit', False),
+            ('減価償却費', financial.depreciation, 'depreciation', False),
+        ]
+    else:
+        template_items = [
+            ('給料手当（販管費E5）', f'=C{item_rows["salary"]}', 'salary', True),
+            ('雑給（販管費E6）', f'=C{item_rows["misc_wages"]}', 'misc_wages', True),
+            ('賞与手当（販管費E7）', f'=C{item_rows["bonus"]}', 'bonus', True),
+            ('売上高（B10）', financial.revenue, 'revenue', False),
+            ('粗利益（B11）', financial.gross_profit, 'gross_profit', False),
+            ('営業利益（B12）', financial.operating_profit, 'operating_profit', False),
+            ('経常利益（B13）', financial.ordinary_profit, 'ordinary_profit', False),
+            ('減価償却費（B14）', financial.depreciation, 'depreciation', False),
+        ]
     for name, val, page_key, is_ref in template_items:
         r += 1
         _cell(ws1, r, 2, name)
@@ -770,16 +844,21 @@ def create_wage_calculation(
         location = PL_LOCATIONS[page_key]
         if is_ref:
             # 給料手当/雑給/賞与は販管費＋製造原価の合算が入りうるため、
-            # 上の損益計算書データセクションと同じヘルパーで内訳を生成して併記する。
-            # （breakdown が無い場合は default_pl_note にフォールバック）
+            # ヘルパー _build_pl_note で内訳を生成して併記する。
             breakdown_note = _build_pl_note(
                 page_key, default_pl_note=f'販管費「{name.split("（")[0]}」より'
             )
-            note = (
-                f'{breakdown_note}\n'
-                f'上の販管費セル C{item_rows[page_key]} を参照／'
-                f'決算書記載: {location}'
-            )
+            if clean_mode:
+                note = (
+                    f'{breakdown_note}\n'
+                    f'決算書記載: {location}'
+                )
+            else:
+                note = (
+                    f'{breakdown_note}\n'
+                    f'上の販管費セル C{item_rows[page_key]} を参照／'
+                    f'決算書記載: {location}'
+                )
         else:
             # 売上高・粗利益・営業利益・経常利益・減価償却費は単一値で内訳なし。
             # 既存の決算書セクション説明 + AI抽出マーカー + ページ番号タグで出所を明示。
