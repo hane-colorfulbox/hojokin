@@ -1038,10 +1038,34 @@ def _categorize_for_ui(file_names: list[str]) -> dict[str, dict[str, list[str]]]
     return result
 
 
-_OVERRIDE_AUTO_LABEL = '（自動検出に従う）'
+# 「自動検出」ラベルは動的に組み立てる（_auto_selected_for_display の結果を埋め込む）
 _OVERRIDE_EXCLUDE_LABEL = '─ 使わない（対象外）─'
 _OVERRIDE_SEP_RECOMMENDED = '── 推奨候補（自動検出ヒット）──'
 _OVERRIDE_SEP_OTHERS = '── その他のファイル（タイポ救済用）──'
+
+
+def _auto_selected_for_display(category: str, recommended: list[str]) -> str | None:
+    """カテゴリの自動選定結果（UI 表示用）を 1 件返す。
+
+    pipeline の選定ロジックを完全再現はしない（DRY 違反になるため簡易版）。
+    PL は「ファイル名から期末年月を抽出して最新」、それ以外は recommended[0]。
+    候補が無ければ None。
+    """
+    if not recommended:
+        return None
+    if category == 'pl':
+        try:
+            from hojokin.pipeline import _parse_fiscal_end_from_filename
+        except Exception:
+            return recommended[0]
+        with_date = [
+            (name, _parse_fiscal_end_from_filename(name))
+            for name in recommended
+        ]
+        valid = [(n, ym) for n, ym in with_date if ym is not None]
+        if valid:
+            return max(valid, key=lambda t: t[1])[0]
+    return recommended[0]
 
 
 def _render_file_selection_override(
@@ -1112,8 +1136,15 @@ def _render_file_selection_override(
                     overrides[cat] = list(selected)
             else:
                 # 単一選択。推奨/その他をセパレータで分割表示。
+                # 「自動検出」ラベルには実際に選定されるファイル名を埋め込んで
+                # 「今何が選ばれているか」を可視化する。
                 # セパレータ行は disabled 不可なので、選ばれたら自動扱いに戻す（後段ガード）。
-                opts: list[str] = [_OVERRIDE_AUTO_LABEL]
+                auto_name = _auto_selected_for_display(cat, recommended)
+                auto_label = (
+                    f'（自動検出: {auto_name}）'
+                    if auto_name else '（自動検出に従う・候補なし）'
+                )
+                opts: list[str] = [auto_label]
                 if recommended:
                     opts.append(_OVERRIDE_SEP_RECOMMENDED)
                     opts.extend(recommended)
@@ -1131,7 +1162,7 @@ def _render_file_selection_override(
                         '「使わない」で対象外指定できます。'
                     ),
                 )
-                if selected in SEP_LABELS or selected == _OVERRIDE_AUTO_LABEL:
+                if selected in SEP_LABELS or selected == auto_label:
                     overrides[cat] = None
                 elif selected == _OVERRIDE_EXCLUDE_LABEL:
                     overrides[cat] = []
@@ -1897,4 +1928,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.1.5 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.1.6 | カラフルボックス株式会社')
