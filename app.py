@@ -986,6 +986,13 @@ def _render_file_check_result(result, total_count):
                 st.markdown(f'&ensp; ⚠️ `{name}`（キーワードなし → 処理対象外）')
 
 
+# 差し替え UI に出すカテゴリ（実 Drive 27案件の調査結果に基づく）。
+# - pl: 複数期混在 48% / ファイル名タイポも頻発 → 差し替え必要性が圧倒的に高い
+# - wage_ledger: 個人別×複数 / 期別混在 / 空テンプレ混入 → 同上
+# 他カテゴリ（registry/tax 等）も複数候補が出ることはあるが、内容は「同名重複アップロード」
+# が大半で自動選定（先頭採用）で実害なし。UI に出してもノイズになるため非表示。
+_OVERRIDE_UI_CATS = {'pl', 'wage_ledger'}
+
 # 複数選択（multiselect）させるカテゴリ。それ以外は単一選択（selectbox）。
 _MULTI_SELECT_CATS = {'wage_ledger'}
 
@@ -1083,11 +1090,12 @@ def _render_file_selection_override(
             - list[str]: ユーザー指定（[] は「対象外」）
     """
     cat_info = _categorize_for_ui(file_names)
-    # 全候補（推奨 or その他）が 1 件以上あるカテゴリだけ UI に出す
+    # 差し替え UI 表示対象は _OVERRIDE_UI_CATS に絞る（pl と wage_ledger のみ）。
+    # 候補（推奨 or その他）が 1 件以上あるカテゴリだけ実際に描画。
     visible = [
         (cat, display)
         for cat, display, _ in _FILE_CATEGORIES
-        if cat_info[cat]['all']
+        if cat in _OVERRIDE_UI_CATS and cat_info[cat]['all']
     ]
     if not visible:
         return {}
@@ -1096,13 +1104,13 @@ def _render_file_selection_override(
     # selectbox の「セパレータ行」をユーザーが選べないよう、選ばれたら自動扱いに戻す
     SEP_LABELS = {_OVERRIDE_SEP_RECOMMENDED, _OVERRIDE_SEP_OTHERS}
 
-    with st.expander('▶ 使用するファイルを差し替える（必要な場合のみ）', expanded=False):
+    with st.expander('▶ 決算書・賃金台帳を差し替える（必要な場合のみ）', expanded=False):
         st.caption(
-            '通常は **自動検出のまま** で OK。同じカテゴリに該当するファイルが複数あって'
-            '自動選定が誤っているとき、または特定のファイル（空テンプレ・別期分など）を'
-            '除外したいときだけ変更してください。'
+            '通常は **自動検出のまま** で OK。'
+            '誤選択リスクが高いのは決算書（複数期分混在）と賃金台帳（個人別×複数 / 空テンプレ混入）'
+            'なので、差し替えはこの 2 カテゴリのみに絞っています。'
             '\n\n'
-            'ファイル名にキーワード（決算書/賃金台帳/ヒアリング等）が含まれないファイルも'
+            'ファイル名にキーワード（決算書 / 賃金台帳・給与台帳）が含まれないファイルも'
             '「その他のファイル」セクションから割り当てできます（タイポ救済用）。'
         )
         for cat, display in visible:
@@ -1928,4 +1936,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.1.6 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.1.7 | カラフルボックス株式会社')
