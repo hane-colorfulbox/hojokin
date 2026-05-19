@@ -221,6 +221,36 @@ def create_wage_calculation(
     total_emp = seishain_count + part_count
     standard_monthly = STANDARD_ANNUAL_HOURS / 12
 
+    # 賃金台帳由来の12ヶ月明細が渡っているか（_build_employees_detail_from_ledger 経由）。
+    # True なら Sheet 2 を12ヶ月レイアウトで出力し、Sheet 1 のメイン「給与支給総額」を
+    # 賃金台帳合計（R216 公募要領定義に即した値）で算定する。
+    # False なら賃金状況報告シート由来 or データなし → 従来の3ヶ月レイアウト＋PL値ベース。
+    has_12_months = bool(
+        employees_detail
+        and any(e.get('monthly_wages_full') for e in employees_detail)
+    )
+    # 12ヶ月明細から月並びを推定（事業年度開始月始まり）。employees_detail 各人で
+    # 同じ並びになる前提（_build_employees_detail_from_ledger が一括生成）。
+    if has_12_months:
+        for _e in employees_detail:
+            _labels = _e.get('month_labels_full')
+            if _labels and len(_labels) == 12:
+                month_labels_full = list(_labels)
+                break
+        else:
+            month_labels_full = [f'{i + 1}月' for i in range(12)]
+    else:
+        month_labels_full = [f'{i + 1}月' for i in range(12)]
+
+    # Sheet 2 の「12ヶ月在籍のみ合計」セル位置を事前計算（Sheet 1 から参照するため）。
+    # Sheet 2 レイアウト（後段で実装）:
+    #   row 4 ヘッダー / row 5〜(4+N) データ / row (5+N) 合計（全員） / row (6+N) 合計（12ヶ月在籍）
+    # 12ヶ月合計列は Q列（FIRST_MONTH_COL=E=5 から12列で P=16、その次 Q=17）。
+    ledger_total_cell: str | None = None
+    if has_12_months and employees_detail:
+        _sheet2_target_row = 6 + len(employees_detail)
+        ledger_total_cell = f"'従業員別明細'!Q{_sheet2_target_row}"
+
     # FTE 計算（R215「FTE換算従業員数」用）
     # 公募要領（IT2026 通常枠 p.9-10）原文:
     #   「基準年度および算出対象年度に全月分の給与等の支給を受けた従業員のみ算定対象。
@@ -505,31 +535,57 @@ def create_wage_calculation(
               SMALL_FONT, fill=FILL_YELLOW)
 
     # 給与支給総額
-    # 公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」を根拠に、
-    # 「給与支給総額」というラベルは役員除外の値（C{total_excl_row}）にのみ使う。
-    # 役員報酬込みの (A) は「給与関連合計（参考）」として残し、ラベルの誤解を防ぐ。
+    # 公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」+
+    # 実務知識ベース（docs/補助金_実務知識ベース.md）の R216 定義に従い、
+    # 「給与支給総額」は **賃金台帳の12ヶ月課税給与合計（役員除外・12ヶ月在籍者のみ）**
+    # を採用する。賃金台帳由来データが無い場合のみ決算書PL値ベースにフォールバック。
+    # 決算書PL値は突合チェック用の参考値として併記する。
     r += 2
     _cell(
         ws1, r, 2,
-        '【給与支給総額の算定】※公募要領 p.10／応募申請の手引き p.24：給与支給総額は役員報酬を含めない定義',
+        '【給与支給総額の算定】※公募要領 p.10／応募申請の手引き p.24：'
+        '給与支給総額は賃金台帳の課税給与（役員報酬・通勤費非課税分・中途者除外）',
         HEADER_FONT, border=None,
     )
     r += 1
-    # 役員報酬込 = (A) の再掲（参考値）
-    _cell(ws1, r, 2, '給与関連合計（参考・役員報酬含む）')
+    # 参考値1: (A) の再掲（役員報酬込み・決算書PL値）
+    _cell(ws1, r, 2, '【参考】給与関連合計（決算書PL値・役員報酬含む）')
     _cell(ws1, r, 3, f'=C{a_row}', fmt=NUMBER_FMT)
     _cell(ws1, r, 4,
-          f'機械計算: =C{a_row}（=A の再掲。公募要領定義の「給与支給総額」ではない参考値）',
+          f'機械計算: =C{a_row}（=A の再掲。決算書PL値ベース・役員報酬込みの参考値）',
           SMALL_FONT)
     r += 1
-    # 役員報酬除外 = (A) - (B) → これが公募要領定義の「給与支給総額」
-    total_excl_row = r  # 後段の賃上げ計画シートからシート間参照する
-    _cell(ws1, r, 2, '給与支給総額（公募要領定義／役員報酬除外）', BOLD_FONT, fill=FILL_GREEN)
-    _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', BOLD_FONT, NUMBER_FMT, FILL_GREEN)
+    # 参考値2: (A-B) 役員報酬除外（決算書PL値ベース）— 突合用
+    pl_excl_row = r
+    _cell(ws1, r, 2, '【参考】給与支給総額（決算書PL値・役員除外）')
+    _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', fmt=NUMBER_FMT)
     _cell(ws1, r, 4,
-          f'機械計算: =C{a_row}-C{b_row}（公募要領 p.10「給料・賃金・賞与・各種手当」、'
-          f'応募申請の手引き p.24「役員報酬・役員人数は含めません」／賃上げ計算用）',
-          SMALL_FONT, fill=FILL_GREEN)
+          f'機械計算: =C{a_row}-C{b_row}（決算書PL値ベース。賃金台帳ベース値との'
+          f'突合チェックに使用。通勤費非課税分・中途者を含むため R216 母数とは差が出る）',
+          SMALL_FONT)
+    r += 1
+    # メイン: 賃金台帳ベース給与支給総額（R216）
+    total_excl_row = r  # 後段の賃上げ計画シート・1人当たり計算からシート間参照する
+    if ledger_total_cell:
+        # 賃金台帳由来の12ヶ月合計（12ヶ月在籍者のみ・役員除外済み）
+        _cell(ws1, r, 2,
+              '給与支給総額（賃金台帳ベース／R216）', BOLD_FONT, fill=FILL_GREEN)
+        _cell(ws1, r, 3, f'={ledger_total_cell}',
+              BOLD_FONT, NUMBER_FMT, FILL_GREEN)
+        _cell(ws1, r, 4,
+              f'機械計算: ={ledger_total_cell}（「従業員別明細」シートの12ヶ月在籍合計を参照。'
+              f'公募要領 p.10／実務知識ベース R216 定義：12ヶ月在籍者の課税給与12ヶ月合計、'
+              f'役員報酬・非課税通勤手当を除外）',
+              SMALL_FONT, fill=FILL_GREEN)
+    else:
+        # フォールバック: 賃金台帳由来データなし → 決算書PL値 (A-B) を採用
+        _cell(ws1, r, 2,
+              '給与支給総額（決算書PL値ベース／役員報酬除外）', BOLD_FONT, fill=FILL_YELLOW)
+        _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', BOLD_FONT, NUMBER_FMT, FILL_YELLOW)
+        _cell(ws1, r, 4,
+              f'機械計算: =C{a_row}-C{b_row}（賃金台帳由来データが無いため決算書PL値で代用。'
+              f'通勤費非課税分・中途者を含むため R216 厳密値より過大評価の可能性あり）',
+              SMALL_FONT, fill=FILL_YELLOW)
 
     # 従業員数
     r += 2
@@ -616,22 +672,32 @@ def create_wage_calculation(
     for i, h in enumerate(['算出方法', '金額', '']):
         _cell(ws1, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER_DARK)
 
-    # (A) (A-B) (C) (D) 各セル参照の Excel 式で算出。ユーザーが上流セル
-    # （給与関連合計、役員報酬、従業員数、FTE）を編集すると即時再計算される。
-    # ゼロ除算は IF で防御（旧コードの `if total_emp else 0` と同等）。
+    # 各算出方法を Excel 式で。ユーザーが上流セルを編集すると即時再計算。
+    # ゼロ除算は IF で防御。
+    # メイン値（推奨）の母数（分子）は「賃金台帳ベース給与支給総額」セル C{total_excl_row} を使う。
+    # has_12_months=True 時: 賃金台帳12ヶ月合計（R216 公募要領定義）
+    # has_12_months=False 時: 決算書PL値 (A-B)（フォールバック）
+    # （A）÷（C/D）系は参考値として残す（決算書PL値ベース・役員報酬含む）。
+    main_label_suffix = '（賃金台帳ベース・推奨）' if ledger_total_cell else '（決算書PL値・参考）'
     calc_methods = [
-        ('(A)÷(C) 頭数割り',
+        ('【参考】(A)÷(C) 決算書PL値・頭数割り',
          f'=IF(C{c_row}=0,0,ROUND(C{a_row}/C{c_row},0))'),
-        ('(A-B)÷(C) 役員除外・頭数',
+        ('【参考】(A-B)÷(C) 決算書PL値・役員除外・頭数',
          f'=IF(C{c_row}=0,0,ROUND((C{a_row}-C{b_row})/C{c_row},0))'),
     ]
     if employees_detail and fte_adjusted > 0 and d_row is not None:
         calc_methods.extend([
-            ('(A)÷(D) FTE換算',
+            ('【参考】(A)÷(D) 決算書PL値・FTE換算',
              f'=IF(C{d_row}=0,0,ROUND(C{a_row}/C{d_row},0))'),
-            ('(A-B)÷(D) 役員除外・FTE（推奨）',
-             f'=IF(C{d_row}=0,0,ROUND((C{a_row}-C{b_row})/C{d_row},0))'),
+            (f'1人当たり給与支給総額 = 給与支給総額 ÷ FTE{main_label_suffix}',
+             f'=IF(C{d_row}=0,0,ROUND(C{total_excl_row}/C{d_row},0))'),
         ])
+    else:
+        # FTE 列が無いケースは頭数割りをメインにする
+        calc_methods.append(
+            (f'1人当たり給与支給総額 = 給与支給総額 ÷ 従業員数{main_label_suffix}',
+             f'=IF(C{c_row}=0,0,ROUND(C{total_excl_row}/C{c_row},0))'),
+        )
 
     for i, (label, formula) in enumerate(calc_methods):
         r += 1
@@ -733,9 +799,15 @@ def create_wage_calculation(
     ws1.column_dimensions['D'].width = 55
 
     # ===== Sheet 2: 従業員別明細 =====
+    # 12ヶ月モード（賃金台帳由来）: 月12列＋12ヶ月合計＋月間平均
+    # 3ヶ月モード（賃金状況報告シート由来 or データ欠落）: 従来の3ヶ月レイアウト
+    # 後段の Sheet 1 (賃金台帳ベース給与支給総額) と Sheet 3 (賃上げ計画) で
+    # 合計列の位置を参照するので、各セル位置を変数に保持する。
+    ledger_total_ref: str | None = None  # Sheet 1 から参照する「12ヶ月在籍合計」セルアドレス
     if employees_detail:
         ws2 = wb.create_sheet('従業員別明細')
-        _cell(ws2, 2, 2, '従業員別給与明細（直近3ヶ月）', TITLE_FONT, border=None)
+        title_suffix = '（12ヶ月）' if has_12_months else '（直近3ヶ月）'
+        _cell(ws2, 2, 2, f'従業員別給与明細{title_suffix}', TITLE_FONT, border=None)
         _cell(ws2, 2, 4, f'出所: {ledger_source}', SMALL_FONT, border=None)
         _cell(ws2, 3, 2,
               '※氏名・雇用形態・月給・時給はAIが賃金台帳から読み取った値です。'
@@ -743,8 +815,37 @@ def create_wage_calculation(
               SMALL_FONT, border=None)
         ws2.cell(3, 2).fill = FILL_AI_EXTRACTED
 
-        headers = ['No', '氏名', '雇用形態', '1月基本給', '2月基本給', '3月基本給',
-                   '3ヶ月平均', '時給', '月間平均時間', 'FTE', '最低賃金判定', '備考']
+        # ヘッダー構成
+        if has_12_months:
+            month_headers = [f'{lbl}支給額' for lbl in month_labels_full]
+            headers = (
+                ['No', '氏名', '雇用形態']
+                + month_headers
+                + ['12ヶ月合計', '月間平均', '時給', '月間平均時間', 'FTE', '最低賃金判定', '備考']
+            )
+            # 列位置インデックス（B=2 ベース）
+            FIRST_MONTH_COL = 5            # E列が事業年度開始月
+            LAST_MONTH_COL = FIRST_MONTH_COL + 11  # P列が事業年度末月
+            ANNUAL_TOTAL_COL = LAST_MONTH_COL + 1  # Q列 = 12ヶ月合計
+            MONTHLY_AVG_COL = ANNUAL_TOTAL_COL + 1  # R列 = 月間平均
+            HR_COL = MONTHLY_AVG_COL + 1            # S列
+            HOURS_COL = HR_COL + 1                   # T列
+            FTE_COL = HOURS_COL + 1                  # U列
+            JUDGE_COL = FTE_COL + 1                  # V列
+            NOTE_COL = JUDGE_COL + 1                 # W列
+        else:
+            headers = ['No', '氏名', '雇用形態', '1月基本給', '2月基本給', '3月基本給',
+                       '3ヶ月平均', '時給', '月間平均時間', 'FTE', '最低賃金判定', '備考']
+            FIRST_MONTH_COL = 5
+            LAST_MONTH_COL = 7
+            ANNUAL_TOTAL_COL = 8  # 3ヶ月平均（互換のため変数名は ANNUAL だが意味は 3M平均）
+            MONTHLY_AVG_COL = None
+            HR_COL = 9
+            HOURS_COL = 10
+            FTE_COL = 11
+            JUDGE_COL = 12
+            NOTE_COL = 13
+
         r = 4
         for i, h in enumerate(headers):
             _cell(ws2, r, 2 + i, h, HEADER_FONT_WHITE, fill=FILL_HEADER)
@@ -752,13 +853,12 @@ def create_wage_calculation(
 
         # 中途入退社社員のチェック視認性向上のため、行全体を灰色塗りする
         FILL_INCOMPLETE = PatternFill(start_color='DDDDDD', end_color='DDDDDD', fill_type='solid')
+        # データ欠落月（中途者の非在籍月）専用の薄塗り
+        FILL_MONTH_NODATA = PatternFill(start_color='F2F2F2', end_color='F2F2F2', fill_type='solid')
 
+        first_data_row = 5
         for e in employees_detail:
             r += 1
-            m_vals = [e.get('m1', 0), e.get('m2', 0), e.get('m3', 0)]
-            # 在籍月のみで3ヶ月平均を算出（0月を分母に入れると過小評価される）
-            in_service = [v for v in m_vals if v > 0]
-            avg3 = sum(in_service) / len(in_service) if in_service else 0
 
             is_seishain = is_full_time_employment(e.get('type'))
             full_year = e.get('full_year', True)
@@ -771,51 +871,95 @@ def create_wage_calculation(
                 monthly_h = e.get('monthly_hours', 0)
                 fte = (monthly_h / standard_monthly) * tenure_factor if standard_monthly else 0
 
-            # 備考: 中途入退社の表示 + 実際の月並びの提示（誤読防止）
+            # 行全体の塗り（優先: 中途 > 非正規 > 通常）
+            if not full_year:
+                row_fill = FILL_INCOMPLETE
+            elif not is_seishain:
+                row_fill = FILL_GRAY
+            else:
+                row_fill = None
+
+            # No / 氏名 / 雇用形態
+            _cell(ws2, r, 2, e['no'], fill=row_fill)
+            _cell(ws2, r, 3, e['name'], fill=row_fill)
+            _cell(ws2, r, 4, e['type'], fill=row_fill)
+
+            if has_12_months:
+                wages_full = e.get('monthly_wages_full') or [0.0] * 12
+                mask_full = e.get('month_data_mask') or [True] * 12
+                in_service = [v for v, has in zip(wages_full, mask_full) if has and v > 0]
+                avg_per_month = sum(in_service) / len(in_service) if in_service else 0
+
+                # 月別12列を書き込み（非在籍月は薄塗りで視認性UP）
+                for m_idx in range(12):
+                    col = FIRST_MONTH_COL + m_idx
+                    val = wages_full[m_idx]
+                    has_data = mask_full[m_idx] if m_idx < len(mask_full) else True
+                    # 在籍月なのに0円ということもあり得るので、マスクと0判定は分離
+                    fill_to_use = row_fill
+                    if not has_data:
+                        # 行塗りより明確に「データなし月」を示す
+                        fill_to_use = FILL_MONTH_NODATA if row_fill is None else row_fill
+                    _cell(ws2, r, col, val if has_data else '',
+                          fmt=NUMBER_FMT, fill=fill_to_use)
+
+                # 12ヶ月合計（Excel 式: SUM の方が人間チェック時に分かりやすい）
+                col_first = get_column_letter(FIRST_MONTH_COL)
+                col_last = get_column_letter(LAST_MONTH_COL)
+                _cell(ws2, r, ANNUAL_TOTAL_COL,
+                      f'=SUM({col_first}{r}:{col_last}{r})',
+                      BOLD_FONT, fmt=NUMBER_FMT, fill=row_fill)
+                # 月間平均（在籍月のみ）
+                _cell(ws2, r, MONTHLY_AVG_COL, round(avg_per_month), fmt=NUMBER_FMT, fill=row_fill)
+            else:
+                # 3ヶ月モード（賃金状況報告シート由来）
+                m_vals = [e.get('m1', 0), e.get('m2', 0), e.get('m3', 0)]
+                in_service = [v for v in m_vals if v > 0]
+                avg3 = sum(in_service) / len(in_service) if in_service else 0
+                for i, v in enumerate(m_vals):
+                    _cell(ws2, r, FIRST_MONTH_COL + i, v, fmt=NUMBER_FMT, fill=row_fill)
+                _cell(ws2, r, ANNUAL_TOTAL_COL, round(avg3), fmt=NUMBER_FMT, fill=row_fill)
+
+            # 時給 / 月間平均時間 / FTE / 最低賃金判定 / 備考
+            _cell(ws2, r, HR_COL, e.get('hr', 0), fmt=NUMBER_FMT, fill=row_fill)
+            _cell(ws2, r, HOURS_COL, round(e.get('monthly_hours', 0), 1),
+                  fmt='0.0', fill=row_fill)
+            _cell(ws2, r, FTE_COL, round(fte, 2), fmt='0.00', fill=row_fill)
+            judge_val = e.get('judge') or '-'
+            _cell(ws2, r, JUDGE_COL, judge_val, fill=row_fill)
+
             note_parts = []
             if not full_year:
                 note_parts.append(f'中途入退社（在籍{tenure_months}ヶ月）')
-                # 実際の在籍月ラベルが分かっていれば表示
                 labels = [l for l in e.get('last_three_labels', []) if l]
                 if labels:
                     note_parts.append(f'実体: {"/".join(labels)}')
-            note = ' '.join(note_parts)
-
-            # 最低賃金判定: 賃金状況報告シート由来の judge があれば優先、
-            # 無ければ「-」（このシートでは時給・都道府県情報が揃わないため判定不能）
-            judge_val = e.get('judge') or '-'
-
-            vals = [e['no'], e['name'], e['type'],
-                    e.get('m1', 0), e.get('m2', 0), e.get('m3', 0),
-                    round(avg3), e.get('hr', 0), round(e.get('monthly_hours', 0), 1),
-                    round(fte, 2), judge_val, note]
-
-            for i, v in enumerate(vals):
-                fmt = NUMBER_FMT if i in (3, 4, 5, 6) else ('0.00' if i == 9 else None)
-                # 行の塗り分け（優先順位: 中途入退社 > 非正規 > 通常）
-                if not full_year:
-                    fill = FILL_INCOMPLETE
-                elif not is_seishain:
-                    fill = FILL_GRAY
-                else:
-                    fill = None
-                _cell(ws2, r, 2 + i, v, fmt=fmt, fill=fill)
+            _cell(ws2, r, NOTE_COL, ' '.join(note_parts), SMALL_FONT, fill=row_fill)
 
         # ── 合計行（全員 / 12ヶ月在籍のみの2段）────────────────────────
-        # 後段の検算・他ファイルとの突合用。SUM 式で書いておくと行追加・編集後も
-        # 自動再計算される。
-        if any(e.get('m1') or e.get('m2') or e.get('m3') for e in employees_detail):
-            first_data_row = 5  # ヘッダー r=4 の直下が最初のデータ行
+        # 12ヶ月在籍のみ合計は、Sheet 1 の「賃金台帳ベース給与支給総額（R216）」と
+        # Sheet 3 の「賃上げ計画」基準値からシート間参照される。
+        has_any_amount = any(
+            (e.get('monthly_wages_full') and any(e['monthly_wages_full']))
+            or e.get('m1') or e.get('m2') or e.get('m3')
+            for e in employees_detail
+        )
+        if has_any_amount:
             last_data_row = r
             r += 1
             FILL_SUBTOTAL_ALL = PatternFill(start_color='B4C7E7', end_color='B4C7E7', fill_type='solid')
             FILL_SUBTOTAL_TARGET = PatternFill(start_color='C6E0B4', end_color='C6E0B4', fill_type='solid')
 
+            # 合計（全員）
+            all_row = r
             _cell(ws2, r, 2, '', BOLD_FONT, fill=FILL_SUBTOTAL_ALL)
             _cell(ws2, r, 3, '合計（全員）', BOLD_FONT, fill=FILL_SUBTOTAL_ALL)
             _cell(ws2, r, 4, '', fill=FILL_SUBTOTAL_ALL)
-            # 1月/2月/3月/3ヶ月平均 の列合計
-            for col_idx in (5, 6, 7, 8):
+            # 月別 + 12ヶ月合計（or 3ヶ月平均）列を SUM
+            sum_cols = list(range(FIRST_MONTH_COL, ANNUAL_TOTAL_COL + 1))
+            if MONTHLY_AVG_COL is not None:
+                sum_cols.append(MONTHLY_AVG_COL)
+            for col_idx in sum_cols:
                 col_letter = get_column_letter(col_idx)
                 _cell(
                     ws2, r, col_idx,
@@ -823,19 +967,20 @@ def create_wage_calculation(
                     BOLD_FONT, fmt=NUMBER_FMT, fill=FILL_SUBTOTAL_ALL,
                 )
             # 残り列はブランク（合計対象外）
-            for col_idx in (9, 10, 11, 12, 13):
+            for col_idx in range(HR_COL, NOTE_COL + 1):
                 _cell(ws2, r, col_idx, '', fill=FILL_SUBTOTAL_ALL)
 
-            # 12ヶ月在籍のみ（R216の母数になる集計対象）
+            # 合計（12ヶ月在籍のみ）— R216 母数
             target_rows = [
                 first_data_row + i for i, e in enumerate(employees_detail)
                 if e.get('full_year', True)
             ]
             r += 1
+            target_row = r
             _cell(ws2, r, 2, '', BOLD_FONT, fill=FILL_SUBTOTAL_TARGET)
             _cell(ws2, r, 3, '合計（12ヶ月在籍のみ）', BOLD_FONT, fill=FILL_SUBTOTAL_TARGET)
             _cell(ws2, r, 4, '', fill=FILL_SUBTOTAL_TARGET)
-            for col_idx in (5, 6, 7, 8):
+            for col_idx in sum_cols:
                 col_letter = get_column_letter(col_idx)
                 if target_rows:
                     parts = '+'.join(f'{col_letter}{tr}' for tr in target_rows)
@@ -846,18 +991,33 @@ def create_wage_calculation(
                     ws2, r, col_idx, formula,
                     BOLD_FONT, fmt=NUMBER_FMT, fill=FILL_SUBTOTAL_TARGET,
                 )
-            for col_idx in (9, 10, 11, 12, 13):
+            for col_idx in range(HR_COL, NOTE_COL + 1):
                 _cell(ws2, r, col_idx, '', fill=FILL_SUBTOTAL_TARGET)
+
+            # Sheet 1 から参照する「R216 母数」のセルアドレス
+            # 12ヶ月モードでは 12ヶ月合計列（Q列）、3ヶ月モードは「3ヶ月平均」列で
+            # 厳密には R216 母数にはならないので Sheet 1 側でフォールバック分岐する。
+            if has_12_months:
+                ledger_total_ref = (
+                    f"'従業員別明細'!{get_column_letter(ANNUAL_TOTAL_COL)}{target_row}"
+                )
 
         # 凡例
         r += 2
         _cell(ws2, r, 2,
-              '※灰色（濃）行＝直近事業年度に12ヶ月在籍していない社員（中途入社・退職含む）。',
+              '※灰色（濃）行＝直近事業年度に12ヶ月在籍していない社員（中途入社・退職含む）。'
+              'R216の母数（12ヶ月在籍のみ合計）からは除外されます。',
               SMALL_FONT, border=None)
-        r += 1
-        _cell(ws2, r, 2,
-              '　1月/2月/3月の列見出しは便宜表示で、中途者の列は実在籍月の時系列順（備考の「実体」欄を参照）。',
-              SMALL_FONT, border=None)
+        if has_12_months:
+            r += 1
+            _cell(ws2, r, 2,
+                  '　月列は事業年度開始月から時系列で12ヶ月分。データ欠落月は薄灰色で表示。',
+                  SMALL_FONT, border=None)
+        else:
+            r += 1
+            _cell(ws2, r, 2,
+                  '　1月/2月/3月の列見出しは便宜表示で、中途者の列は実在籍月の時系列順（備考の「実体」欄を参照）。',
+                  SMALL_FONT, border=None)
         r += 1
         _cell(ws2, r, 2,
               '※灰色（薄）行＝非正規雇用（パート・アルバイト）。',
@@ -867,7 +1027,13 @@ def create_wage_calculation(
               '※最低賃金判定の「-」＝このシートでは判定なし（加点判定タスクで都道府県を指定した場合に判定されます）。',
               SMALL_FONT, border=None)
 
-        for i, w in enumerate([4, 5, 14, 12, 12, 12, 12, 12, 8, 13, 8, 12, 30]):
+        # 列幅
+        if has_12_months:
+            # No, 氏名, 雇用形態, 月12列, 12ヶ月合計, 月間平均, 時給, 月間時間, FTE, 判定, 備考
+            widths = [4, 5, 14, 12] + [10] * 12 + [13, 11, 8, 12, 8, 12, 30]
+        else:
+            widths = [4, 5, 14, 12, 12, 12, 12, 12, 8, 13, 8, 12, 30]
+        for i, w in enumerate(widths):
             ws2.column_dimensions[get_column_letter(i + 1)].width = w
 
     # ===== Sheet 3: 賃上げ計画 =====

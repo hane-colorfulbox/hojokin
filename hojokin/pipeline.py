@@ -1542,6 +1542,20 @@ def _build_employees_detail_from_ledger(
             m_vals.append(0)
             last_three_labels.append('')
 
+        # 12ヶ月分の生データ（事業年度内の時系列順で並べる）。
+        # wage_calculator 側で12ヶ月明細表示と賃金台帳ベース給与支給総額の算定に使う。
+        # データが無い月は値0 / マスクFalse として渡し、表示側でグレーアウト判定する。
+        monthly_wages_full = [
+            float(emp.monthly_wages[idx] or 0) for idx in month_order
+        ]
+        monthly_hours_full = [
+            float(emp.monthly_hours[idx] or 0) for idx in month_order
+        ]
+        month_labels_full = [f'{idx + 1}月' for idx in month_order]
+        month_data_mask = [
+            emp.monthly_wages[idx] is not None for idx in month_order
+        ]
+
         detail.append({
             'no': len(detail) + 1,
             'name': emp.name,
@@ -1556,6 +1570,11 @@ def _build_employees_detail_from_ledger(
             'tenure_months': tenure_months,
             'full_year': full_year,
             'last_three_labels': last_three_labels,
+            # 12ヶ月明細・賃金台帳ベース集計用
+            'monthly_wages_full': monthly_wages_full,
+            'monthly_hours_full': monthly_hours_full,
+            'month_labels_full': month_labels_full,
+            'month_data_mask': month_data_mask,
         })
     return detail
 
