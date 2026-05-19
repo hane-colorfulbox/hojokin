@@ -639,9 +639,9 @@ with st.sidebar:
     st.divider()
 
     st.markdown('**処理の目安**')
-    st.caption('所要時間: 約1〜10分（案件規模により変動）')
-    st.caption('API利用料: 約30〜300円/社（案件規模により変動）')
-    st.caption('└ 賃金台帳PDFが大きい案件では数百円〜になることがあります')
+    st.caption('所要時間: 約1〜3分（PDF量により変動）')
+    st.caption('API利用料: 約20〜80円/社（PDF量により変動）')
+    st.caption('└ 賃金台帳は Excel / CSV のみ対応（PDF は受け付けません）')
     st.caption('└ Sonnet 4.6 の従量課金。確定額は Anthropic の請求でご確認ください')
     st.caption('実行前に「案件規模の予想」で詳細目安が表示されます')
 
@@ -724,30 +724,28 @@ def _analyze_files(file_names, task):
 
 
 def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
-    """ファイル(名前, バイト数)から大容量・大量警告と処理時間目安を作る。
+    """ファイル(名前, バイト数)から大容量・大量警告を作る。
 
     閾値（実害が出る前のソフト警告レベル）:
       - PDF 30MB超: API 残高消費が大きい・タイムアウトリスク
-      - 賃金台帳PDF合計 6MB超: 処理時間目安を表示（情報レベル）
-        → 7MB 前後から処理時間が顕著に伸びるため、6MB 超で事前案内
       - 賃金台帳ファイル合計 25MB超: AI 抽出に長時間かかる可能性（警告）
       - 賃金台帳ファイル 8件超: 個人別ファイル多数 → AI 抽出 max_tokens 不足の可能性
       - 単一 Excel/CSV 5MB超: 想定外に大きく、誤ったファイルの可能性
+      - 賃金台帳が PDF: ツール側で処理されないため Excel/CSV 変換誘導
     """
     warnings = []
     PDF_LIMIT = 30 * 1024 * 1024
     EXCEL_CSV_LIMIT = 5 * 1024 * 1024
-    WAGE_PDF_NOTICE_LIMIT = 6 * 1024 * 1024  # 賃金台帳PDFがこのサイズ超で処理時間目安を表示
     WAGE_TOTAL_LIMIT = 25 * 1024 * 1024
     WAGE_COUNT_LIMIT = 8
-    # 2026-05 方針変更: 賃金台帳は Excel/CSV のみ。PDF は集計対象外
+    # 2026-05 方針: 賃金台帳は Excel/CSV のみ処理（PDF は ALLOWED_EXTS で弾かれる）
     # FileDetector.ALLOWED_EXTS['wage_ledger'] と整合させる
     WAGE_EXTS = {'.xlsx', '.xlsm', '.csv'}
 
     # pipeline.FileDetector.PATTERNS['wage_ledger'] と整合（給与ソフト出力は「給与台帳」表記が多い）
     wage_keywords = ('賃金台帳', '給与台帳')
     wage_files = []
-    wage_pdf_files = []
+    wage_pdf_names = []
     for name, size in file_size_pairs:
         if not name or size is None or size <= 0:
             continue  # サイズ不明や空ファイルはスキップ（誤警告防止）
@@ -764,27 +762,18 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
                 f'想定外に大きいファイルです。誤ったファイルでないか確認してください'
             )
         # 賃金台帳カウントは処理対象拡張子のみ（.docx等の誤検出を防ぐ）
-        if any(kw in n for kw in wage_keywords) and ext in WAGE_EXTS:
-            wage_files.append((n, size))
-            if ext == '.pdf':
-                wage_pdf_files.append((n, size))
+        if any(kw in n for kw in wage_keywords):
+            if ext in WAGE_EXTS:
+                wage_files.append((n, size))
+            elif ext == '.pdf':
+                wage_pdf_names.append(n)
 
-    # 賃金台帳PDF合計サイズに応じた処理時間目安（情報レベル）
-    # 経験則: PDF 1MB あたり約 6 ページ、1 ページあたり 2〜3 秒の API 処理。
-    # 7MB → 約 1.5〜2分 / 10MB → 2〜3分 / 14MB → 3〜5分（タイムアウト 480秒に近づく）
-    if wage_pdf_files:
-        pdf_total = sum(s for _, s in wage_pdf_files)
-        if pdf_total > WAGE_PDF_NOTICE_LIMIT:
-            mb = pdf_total / 1024 / 1024
-            est_min_sec = mb * 12   # 1MB ≈ 12 秒（楽観値）
-            est_max_sec = mb * 25   # 1MB ≈ 25 秒（悲観値）
-            est_min = max(1, round(est_min_sec / 60))
-            est_max = max(est_min + 1, round(est_max_sec / 60))
-            warnings.append(
-                f'⏱ 賃金台帳PDFが大きめです（{mb:.1f}MB, {len(wage_pdf_files)}ファイル）— '
-                f'処理時間目安: 約{est_min}〜{est_max}分。'
-                f'可能であれば Excel / CSV 形式で提供いただくと数秒〜数十秒で完了します'
-            )
+    # 賃金台帳が PDF で投入されている場合（Excel/CSV 変換誘導）
+    if wage_pdf_names:
+        warnings.append(
+            f'📄 賃金台帳が PDF 形式で含まれています（{len(wage_pdf_names)}件）— '
+            f'ツールでは処理されません。Excel / CSV に変換してから再投入してください'
+        )
 
     if wage_files:
         total_size = sum(s for _, s in wage_files)
@@ -805,112 +794,115 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
 def _estimate_case_scale(file_size_pairs: list[tuple[str, int]]) -> dict | None:
     """案件規模・処理時間・APIコストを推定する。
 
-    ユーザー（坂平さん）が実行前に「これは何分かかりそう」「いくらぐらい」が
+    現運用（2026-05〜）では賃金台帳は Excel/CSV のみ処理されるため、
+    AI 抽出のコスト・時間を支配するのは主に **PDF 群**（履歴事項 / 損益
+    計算書 / 納税証明 / 見積書 / 製造原価報告書）。それに賃金台帳
+    Excel/CSV の AI 抽出（USE_AI_WAGE_EXTRACTION=true 時）が乗る。
+
+    ユーザー（坂平さん）が実行前に「これは何分かかりそう」「いくらぐらい」を
     把握できるよう、控えめ（多め見積もり）の数値を返す。
 
     Returns: {
-        'scale': '小型' | '中型' | '大型' | '超大型',
-        'time_label': '約1〜3分',
-        'cost_label': '約30〜80円',
-        'pre_split': bool,  # 事前分割発動の見込み
+        'scale': '小型' | '中型' | '大型',
+        'time_label': '約1〜2分',
+        'cost_label': '約20〜60円',
         'pdf_total_mb': float,
-        'wage_pdf_mb': float,
-        'note': str,  # ユーザー向け補足（推奨ファイル形式等）
+        'wage_excel_count': int,
+        'wage_pdf_count': int,  # 不正投入検出用（>0 なら警告表示）
+        'note': str,  # ユーザー向け補足
     }
     None: 推定不能（ファイルなし）
     """
     if not file_size_pairs:
         return None
 
-    PRE_SPLIT_BYTES = 4 * 1024 * 1024  # 賃金台帳PDF 4MB超で事前分割発動
+    WAGE_KEYWORDS = ('賃金台帳', '給与台帳')
+    WAGE_EXTS = {'.xlsx', '.xlsm', '.csv'}
 
-    # 賃金台帳PDFのサイズ
-    wage_pdf_total = 0
     pdf_total = 0
+    wage_excel_count = 0
+    wage_pdf_count = 0
     for name, size in file_size_pairs:
         if not name or size is None or size <= 0:
             continue
         n = unicodedata.normalize('NFC', name)
         ext = Path(n).suffix.lower()
-        if ext != '.pdf':
-            continue
-        pdf_total += size
-        if '賃金台帳' in n or '給与台帳' in n:
-            wage_pdf_total += size
+        is_wage = any(kw in n for kw in WAGE_KEYWORDS)
+        if ext == '.pdf':
+            if is_wage:
+                # 賃金台帳PDFは ALLOWED_EXTS で弾かれて処理対象外
+                # （カウントだけ取って警告表示に使う）
+                wage_pdf_count += 1
+            else:
+                pdf_total += size
+        elif ext in WAGE_EXTS and is_wage:
+            wage_excel_count += 1
 
-    wage_pdf_mb = wage_pdf_total / 1024 / 1024
     pdf_total_mb = pdf_total / 1024 / 1024
 
-    # サイズクラス判定（賃金台帳PDFのサイズが支配的）
-    if wage_pdf_mb >= 10:
-        scale = '超大型'
-    elif wage_pdf_mb >= 5:
+    # サイズクラス判定（処理対象 PDF の合計サイズ）
+    # 経験則: 通常案件で 3〜8MB、原価報告書ありで 5〜12MB
+    if pdf_total_mb >= 12:
         scale = '大型'
-    elif wage_pdf_mb >= 2:
+    elif pdf_total_mb >= 5:
         scale = '中型'
     else:
         scale = '小型'
 
-    # 事前分割発動見込み（4MB超で発動）
-    pre_split = wage_pdf_total > PRE_SPLIT_BYTES
-
     # ── 処理時間予想 ──
-    # 控えめ（多め見積もり）の値を出す。
     # 内訳の経験則:
-    #   履歴事項抽出 ~30秒、PL ~30秒、納税証明 ~20秒、見積 ~20秒、AI判断 ~30秒
-    #   = 共通 ~2分 (上振れで 3分)
-    #   賃金台帳: PDF 1MB あたり 12〜25秒（経験値）
-    #   事前分割発動時: API呼出が +1回 → +1〜2分
-    common_min = 60   # 共通処理 1分（楽観）
-    common_max = 180  # 共通処理 3分（悲観）
-    wage_min = wage_pdf_mb * 12
-    wage_max = wage_pdf_mb * 25
-    if pre_split:
-        wage_max += 90  # 事前分割発動時は最大1.5分追加
-        wage_min += 30
-    total_min_sec = common_min + wage_min
-    total_max_sec = common_max + wage_max
+    #   PDF 抽出（履歴/PL/税/見積/原価）: 各 10〜30 秒
+    #   AI 判断（高加点項目の総合判定）: 20〜40 秒
+    #   賃金台帳 Excel/CSV 抽出: 5〜20 秒
+    #   テンプレ書き込み・後処理: 5〜10 秒
+    common_min = 30   # 共通処理（楽観）
+    common_max = 90   # 共通処理（悲観）
+    pdf_min_sec = pdf_total_mb * 4
+    pdf_max_sec = pdf_total_mb * 10
+    wage_excel_sec_min = wage_excel_count * 5
+    wage_excel_sec_max = wage_excel_count * 15
+    total_min_sec = common_min + pdf_min_sec + wage_excel_sec_min
+    total_max_sec = common_max + pdf_max_sec + wage_excel_sec_max
 
-    if total_max_sec < 120:
-        time_label = f'約 30秒〜{round(total_max_sec/60)+1}分'
-    elif total_max_sec < 600:
-        time_label = f'約 {max(1, round(total_min_sec/60))}〜{round(total_max_sec/60)}分'
+    if total_max_sec < 90:
+        time_label = '約 30秒〜1分'
+    elif total_max_sec < 180:
+        time_label = f'約 1〜{max(2, round(total_max_sec/60))}分'
     else:
-        time_label = f'約 {round(total_min_sec/60)}〜{round(total_max_sec/60)}分（PDFが大きいため長めです）'
+        time_label = f'約 {max(1, round(total_min_sec/60))}〜{round(total_max_sec/60)}分'
 
     # ── APIコスト予想（円、Sonnet 4.6 / 1USD=150円） ──
-    # 実態に合わせ上方寄りに見積もる（過去案件で表示より高くなる傾向があったため）
-    # 共通処理（履歴/PL/税/見積/AI判断）: ~30円
-    # 賃金台帳: PDF 1MB あたり ~8〜15円
-    # 事前分割発動時: 賃金台帳側が +50〜80%（API呼出 +1回）
-    common_cost = 30
-    wage_cost_min = wage_pdf_mb * 8
-    wage_cost_max = wage_pdf_mb * 15
-    if pre_split:
-        wage_cost_max *= 1.8  # 分割発動でAPIコール+1回
-        wage_cost_min *= 1.5
-    total_cost_min = common_cost + wage_cost_min
-    total_cost_max = common_cost + wage_cost_max
+    # 経験則:
+    #   PDF 抽出: 1MB あたり 2〜5円
+    #   共通固定費（AI 判断・後処理）: 約 10〜15円
+    #   賃金台帳 Excel/CSV AI 抽出: 1ファイルあたり 3〜8円
+    common_cost = 10
+    pdf_cost_min = pdf_total_mb * 2
+    pdf_cost_max = pdf_total_mb * 5
+    wage_cost_min = wage_excel_count * 3
+    wage_cost_max = wage_excel_count * 8
+    total_cost_min = common_cost + pdf_cost_min + wage_cost_min
+    total_cost_max = common_cost + pdf_cost_max + wage_cost_max
 
-    # さらに上方寄りに（最大値を1.5倍に切り上げ）
-    cost_label = f'約 {max(30, int(total_cost_min))}〜{int(total_cost_max * 1.5)}円'
+    cost_label = f'約 {max(15, int(total_cost_min))}〜{max(25, int(total_cost_max))}円'
 
     # 補足メッセージ
     notes: list[str] = []
-    if pre_split:
-        notes.append('賃金台帳PDFが大きいため、自動で分割処理します（処理時間+1〜2分）')
-    if scale in ('大型', '超大型'):
-        notes.append('Excel/CSV形式の賃金台帳があれば数十秒で完了します')
-    if scale == '超大型':
-        notes.append('処理時間が長くなる可能性があるため、画面を閉じずにお待ちください')
+    if wage_pdf_count > 0:
+        notes.append(
+            f'賃金台帳PDFが {wage_pdf_count} 件含まれていますが、'
+            'ツールでは処理されません。Excel/CSV に変換してから再投入してください'
+        )
+    if scale == '大型':
+        notes.append('PDF 量が多めのため、処理時間が長くなる可能性があります。画面を閉じずにお待ちください')
 
     return {
         'scale': scale,
         'time_label': time_label,
         'cost_label': cost_label,
-        'pre_split': pre_split,
         'pdf_total_mb': pdf_total_mb,
-        'wage_pdf_mb': wage_pdf_mb,
+        'wage_excel_count': wage_excel_count,
+        'wage_pdf_count': wage_pdf_count,
         'note': ' / '.join(notes) if notes else '',
     }
 
@@ -921,20 +913,19 @@ def _render_case_scale_estimate(file_size_pairs: list[tuple[str, int]]):
     if not est:
         return
 
-    scale_emoji = {'小型': '🟢', '中型': '🟡', '大型': '🟠', '超大型': '🔴'}
+    scale_emoji = {'小型': '🟢', '中型': '🟡', '大型': '🟠'}
     emoji = scale_emoji.get(est['scale'], '📊')
 
     with st.expander(
         f'{emoji} 案件規模の予想: **{est["scale"]}** — '
         f'処理時間 {est["time_label"]} / APIコスト {est["cost_label"]}',
-        expanded=(est['scale'] in ('大型', '超大型')),
+        expanded=(est['scale'] == '大型'),
     ):
         st.markdown(
-            f'- **規模**: {emoji} {est["scale"]}（賃金台帳PDF {est["wage_pdf_mb"]:.1f}MB '
-            f'/ 全PDF {est["pdf_total_mb"]:.1f}MB）\n'
+            f'- **規模**: {emoji} {est["scale"]}（処理対象PDF合計 {est["pdf_total_mb"]:.1f}MB '
+            f'/ 賃金台帳Excel/CSV {est["wage_excel_count"]}件）\n'
             f'- **処理時間目安**: {est["time_label"]}\n'
-            f'- **APIコスト目安**: {est["cost_label"]}\n'
-            f'- **事前PDF分割**: {"✅ 発動見込み（精度向上のため）" if est["pre_split"] else "発動なし（小型のため不要）"}'
+            f'- **APIコスト目安**: {est["cost_label"]}'
         )
         if est['note']:
             for n in est['note'].split(' / '):
@@ -942,7 +933,7 @@ def _render_case_scale_estimate(file_size_pairs: list[tuple[str, int]]):
         st.caption(
             'コスト・時間は上方寄りに見積もった目安です。'
             '実際はこれより安く済むこともありますが、'
-            'PDFが多い・賃金台帳が大きい案件では上振れすることもあります。'
+            'PDF量が多い案件では上振れすることもあります。'
             '確定額は Anthropic の請求でご確認ください。'
         )
 
@@ -1936,4 +1927,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.1.7 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.1.8 | カラフルボックス株式会社')
