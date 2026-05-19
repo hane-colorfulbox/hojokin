@@ -321,6 +321,7 @@ def run_processing(
     prefecture: str = '',
     fiscal_month_override: int | None = None,
     has_cost_report_hint: bool = False,
+    selection_override: dict[str, list[Path]] | None = None,
 ):
     """メイン処理を実行"""
     results = {}
@@ -364,6 +365,7 @@ def run_processing(
                 extractor=extractor,
                 fiscal_month_override=fiscal_month_override,
                 has_cost_report_hint=has_cost_report_hint,
+                selection_override=selection_override,
             )
             # 追加出力ファイル（賃金台帳一覧等）を収集
             extra_files = {}
@@ -410,6 +412,7 @@ def run_processing(
             cached_financial=cached_financial,
             cached_ledger_employees=cached_ledger_employees,
             fiscal_month_override=fiscal_month_override,
+            selection_override=selection_override,
         )
         results['wage'] = {
             'status': status.status,
@@ -427,6 +430,7 @@ def run_processing(
         results['bonus'] = _run_bonus_judgment(
             work_dir, company_name, prefecture, template_dir,
             extractor=extractor,
+            selection_override=selection_override,
         )
 
     return results
@@ -439,37 +443,30 @@ def _run_bonus_judgment(
     template_dir: Path,
     extractor=None,
     cached_ledger_employees: list | None = None,
+    selection_override: dict[str, list[Path]] | None = None,
 ) -> dict:
     """加点判定を実行。
 
     cached_ledger_employees があれば再利用してAPI呼出をスキップする。
-    なければ賃金台帳ファイル（Excel/PDF/CSV）を検索して AI 経路で読み取る。
+    なければ FileDetector で賃金台帳ファイル（Excel/CSV）を検索して AI 経路で読み取る。
+    selection_override が渡されたら自動検出より優先する。
     """
     # キャッシュ優先（all + bonus を同時実行する将来拡張に備えた経路）
     if cached_ledger_employees:
         employees = cached_ledger_employees
     else:
-        # 賃金台帳ファイルを探す（Excel/PDF/CSV すべて対応）
-        # 2026-05 方針変更: 賃金台帳の回収は xlsx/xlsm/CSV に集約。
-        # PDF・旧 .xls 形式は受け付けない（pipeline 側 ALLOWED_EXTS, wage_reader が
-        # openpyxl 前提のため .xls は読めない）
-        WAGE_EXTS = ('.xlsx', '.xlsm', '.csv')
-        wage_files = [
-            f for f in work_dir.iterdir()
-            if f.suffix.lower() in WAGE_EXTS and not f.name.startswith('~$')
-            and ('賃金' in f.name or '給与' in f.name or '明細' in f.name or 'wage' in f.name.lower())
-        ]
-        if not wage_files:
-            # キーワードがなくても賃金台帳らしい拡張子は試す
-            wage_files = [
-                f for f in work_dir.iterdir()
-                if f.suffix.lower() in WAGE_EXTS and not f.name.startswith('~$')
-            ]
+        # FileDetector 経由で賃金台帳ファイルを取得（手動選択 override にも対応）。
+        # 拡張子フィルタ・出力ファイル除外・NFC 正規化は detector 側で実施済み。
+        detector = FileDetector(work_dir, selection_override=selection_override)
+        wage_files = detector.get_all('wage_ledger')
 
         if not wage_files:
             return {
                 'status': 'エラー',
-                'message': '賃金台帳ファイルが見つかりません。Excel/PDF/CSV のいずれかをアップロードしてください。',
+                'message': (
+                    '賃金台帳ファイルが見つかりません。Excel/CSV をアップロードしてください。'
+                    'ファイル名に「賃金台帳」または「給与台帳」を含めてください。'
+                ),
             }
 
         try:
@@ -986,6 +983,121 @@ def _render_file_check_result(result, total_count):
                 st.markdown(f'&ensp; ⚠️ `{name}`（キーワードなし → 処理対象外）')
 
 
+# 複数選択（multiselect）させるカテゴリ。それ以外は単一選択（selectbox）。
+_MULTI_SELECT_CATS = {'wage_ledger'}
+
+
+def _categorize_for_ui(file_names: list[str]) -> dict[str, list[str]]:
+    """ファイル名を _FILE_CATEGORIES のキーワード + _UI_ALLOWED_EXTS で分類。
+
+    `_analyze_files` の分類ロジックと整合させる（差し替え UI と判別結果表示で
+    候補ファイルが食い違うと混乱するため）。
+    """
+    candidates: dict[str, list[str]] = {cat: [] for cat, _, _ in _FILE_CATEGORIES}
+    for name in file_names:
+        name_nfc = unicodedata.normalize('NFC', name)
+        ext = Path(name_nfc).suffix.lower()
+        for cat, _, keywords in _FILE_CATEGORIES:
+            if any(kw in name_nfc for kw in keywords):
+                allowed = _UI_ALLOWED_EXTS.get(cat)
+                if allowed is not None and ext not in allowed:
+                    break  # 拡張子NG → 他カテゴリは試さない（_analyze_files と同じ挙動）
+                candidates[cat].append(name)
+                break
+    return candidates
+
+
+_OVERRIDE_AUTO_LABEL = '（自動検出に従う）'
+_OVERRIDE_EXCLUDE_LABEL = '─ 使わない（対象外）─'
+
+
+def _render_file_selection_override(
+    file_names: list[str], case_key: str,
+) -> dict[str, list[str] | None]:
+    """検出カテゴリ別の候補ファイルを差し替え可能な UI で表示し、選択結果を返す。
+
+    Returns:
+        dict[category, list[str] | None]
+            - None: 自動検出に従う（override なし）
+            - list[str]: ユーザー指定（[] は「対象外」）
+    """
+    candidates = _categorize_for_ui(file_names)
+    visible = [(cat, display) for cat, display, _ in _FILE_CATEGORIES if candidates[cat]]
+    if not visible:
+        return {}
+
+    overrides: dict[str, list[str] | None] = {}
+
+    with st.expander('▶ 使用するファイルを差し替える（必要な場合のみ）', expanded=False):
+        st.caption(
+            '通常は **自動検出のまま** で OK。'
+            '同じカテゴリに該当するファイルが複数あって自動選定が誤っているとき、'
+            'または特定のファイル（空テンプレ・別期分など）を除外したいときだけ変更してください。'
+        )
+        for cat, display in visible:
+            cat_files = candidates[cat]
+            sel_key = f'override_{case_key}_{cat}'
+
+            if cat in _MULTI_SELECT_CATS:
+                # 複数選択（賃金台帳など）: チェックを外せば除外。既定は全選択。
+                selected = st.multiselect(
+                    f'{display}（複数選択可）',
+                    options=cat_files,
+                    default=cat_files,
+                    key=sel_key,
+                    help='チェックを外したファイルは処理から除外されます。',
+                )
+                if list(selected) == cat_files:
+                    overrides[cat] = None  # 全選択=デフォルト → 自動扱い
+                else:
+                    overrides[cat] = list(selected)
+            else:
+                options = [_OVERRIDE_AUTO_LABEL] + cat_files + [_OVERRIDE_EXCLUDE_LABEL]
+                selected = st.selectbox(
+                    display,
+                    options=options,
+                    key=sel_key,
+                    help='候補が複数ある場合の差し替え・「使わない」指定ができます。',
+                )
+                if selected == _OVERRIDE_AUTO_LABEL:
+                    overrides[cat] = None
+                elif selected == _OVERRIDE_EXCLUDE_LABEL:
+                    overrides[cat] = []
+                else:
+                    overrides[cat] = [selected]
+    return overrides
+
+
+def _build_path_override(
+    name_override: dict[str, list[str] | None] | None,
+    work_dir: Path,
+) -> dict[str, list[Path]] | None:
+    """ファイル名ベースの override を work_dir 内の Path に解決する。
+
+    存在しないファイル名は無視してログに警告を残す（NFC 正規化済みファイル名で照合）。
+    実質的な上書きが何も無い場合は None を返す（pipeline 側で自動検出が動く）。
+    """
+    if not name_override:
+        return None
+    path_override: dict[str, list[Path]] = {}
+    for cat, names in name_override.items():
+        if names is None:
+            continue  # 自動検出を維持
+        paths: list[Path] = []
+        for name in names:
+            name_nfc = unicodedata.normalize('NFC', name)
+            candidate = work_dir / name_nfc
+            if candidate.exists():
+                paths.append(candidate)
+            else:
+                logger.warning(
+                    f'手動選択ファイルが work_dir に見つかりません: '
+                    f'{name_nfc} (カテゴリ: {cat})'
+                )
+        path_override[cat] = paths
+    return path_override if path_override else None
+
+
 def _check_required_by_names(file_names, task):
     """タスクに応じた必須ファイルが揃っているかチェック
 
@@ -1024,6 +1136,8 @@ st.markdown(
 # Drive連携用の変数
 drive_folder_id = None
 drive_files_to_download = []
+# 差し替え UI が積み上げるカテゴリ別ファイル名選択（None=自動、[]=対象外、list=明示指定）
+selection_override_names: dict[str, list[str] | None] = {}
 
 if data_source == 'Google Drive':
     # ── Google Drive モード ──
@@ -1101,6 +1215,12 @@ if data_source == 'Google Drive':
 
             drive_analysis = _analyze_files([f['name'] for f in all_files], task_type)
             _render_file_check_result(drive_analysis, len(all_files))
+
+            # 検出されたファイルの差し替え UI（自動検出が誤ったときの保険）
+            selection_override_names = _render_file_selection_override(
+                [f['name'] for f in all_files],
+                case_key=f'drive_{drive_folder_id}',
+            )
             # 容量・件数の事前警告（Drive ファイルのサイズは f['size'] が文字列の場合があるので int 変換）
             size_pairs = []
             for f in all_files:
@@ -1214,6 +1334,17 @@ else:
     if uploaded_files:
         upload_analysis = _analyze_files([f.name for f in uploaded_files], task_type)
         _render_file_check_result(upload_analysis, len(uploaded_files))
+
+        # 検出されたファイルの差し替え UI（同名で別期の決算書混在などへの保険）
+        # case_key にはファイル名集合のハッシュを使用 → 同じ顧客の同じ資料セットなら
+        # 選択状態を維持、別案件をドロップすれば自動でリセット
+        _upload_case_key = (
+            f'upload_{hash(tuple(sorted(f.name for f in uploaded_files)))}'
+        )
+        selection_override_names = _render_file_selection_override(
+            [f.name for f in uploaded_files],
+            case_key=_upload_case_key,
+        )
         # 案件規模・処理時間・APIコスト予想
         size_pairs_upload = [(f.name, f.size) for f in uploaded_files]
         _render_case_scale_estimate(size_pairs_upload)
@@ -1339,8 +1470,13 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
         else:
             template_dir = Path(__file__).parent
 
-        # ファイル検出プレビュー
-        detector = FileDetector(work_dir)
+        # ファイル名ベースの override 選択を、work_dir 内の Path に解決する
+        selection_override = _build_path_override(
+            selection_override_names, work_dir,
+        )
+
+        # ファイル検出プレビュー（summary 表示用）— UI と同じ override を反映
+        detector = FileDetector(work_dir, selection_override=selection_override)
 
         # 処理実行
         spinner_msg = '賃金台帳を分析中...' if task_type == 'bonus' else 'AIが資料を読み取り中...（1〜3分かかります）'
@@ -1354,6 +1490,7 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 prefecture=prefecture,
                 fiscal_month_override=fiscal_month_override,
                 has_cost_report_hint=has_cost_report_hint,
+                selection_override=selection_override,
             )
 
         # Drive 格納（オプション）— Drive ソース選択 + チェックON + 格納先フォルダ確定時のみ
@@ -1652,4 +1789,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.1.3 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.1.4 | カラフルボックス株式会社')

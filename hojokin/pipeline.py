@@ -351,13 +351,57 @@ class FileDetector:
         'wage_data':   {'.pdf'},
     }
 
-    def __init__(self, folder: Path):
+    def __init__(
+        self,
+        folder: Path,
+        selection_override: dict[str, list[Path]] | None = None,
+    ):
+        """フォルダをスキャンしてファイルを自動分類する。
+
+        Args:
+            folder: スキャン対象のフォルダ
+            selection_override: ユーザーが UI で明示指定したファイル群（カテゴリ別）。
+                指定されたカテゴリは自動検出結果を上書きし、`get_pl_latest` の
+                自動選定ロジックもバイパスする（手動指定 = ユーザーの責任で確定）。
+                値が None または欠落のカテゴリは自動検出を維持。
+                値が `[]` のカテゴリは「対象外」として明示的に空にする。
+        """
         self.folder = folder
         self.files: dict[str, list[Path]] = {k: [] for k in self.PATTERNS}
         self.skipped: list[tuple[str, str, str]] = []  # (category, filename, reason)
         # get_pl_latest が積む UI 表示用警告（毎回の呼び出しで上書き）
         self.pl_selection_warnings: list[str] = []
+        # ユーザーが UI で明示指定したカテゴリ集合（get_pl_latest のバイパス判定で使う）
+        self._manual_categories: set[str] = set()
         self._scan()
+        if selection_override:
+            self._apply_override(selection_override)
+
+    def _apply_override(self, override: dict[str, list[Path]]) -> None:
+        """ユーザー指定のファイル選択を適用する。
+
+        指定されたカテゴリの `self.files[cat]` を override の値で上書きし、
+        `_manual_categories` に追加する。未知のカテゴリは無視。
+        値が None のカテゴリは自動検出を維持（上書きしない）。
+        """
+        for cat, paths in override.items():
+            if cat not in self.files:
+                continue
+            if paths is None:
+                continue
+            self.files[cat] = list(paths)
+            self._manual_categories.add(cat)
+            logger.info(
+                f'手動選択: [{cat}] {[p.name for p in paths] if paths else "（対象外）"}'
+            )
+
+    def is_manual(self, category: str) -> bool:
+        """ユーザーが UI で明示指定したカテゴリか。
+
+        テスト用サブクラスなど `__init__` をスキップする呼び出し元に備えて
+        getattr フォールバック付き（未初期化なら自動検出扱い = False）。
+        """
+        return category in getattr(self, '_manual_categories', set())
 
     def _scan(self):
         """フォルダを再帰的にスキャンしてファイル分類"""
@@ -429,6 +473,14 @@ class FileDetector:
         pls = self.files.get('pl', [])
         if not pls:
             return None
+
+        # ---- 手動選択バイパス: ユーザーが UI で明示指定した場合 ----
+        # ファイル名から年月が取れないケースでも、ユーザーの選択を尊重する。
+        # 複数指定された場合は最初の1件を採用（通常は1件のはず）。
+        if self.is_manual('pl'):
+            chosen = pls[0]
+            logger.info(f'手動選択 PL: {chosen.name}（自動選定ロジックをスキップ）')
+            return chosen
 
         # ---- ステップ1: 第N期表記 ----
         period_re = re.compile(r'第(\d+)期')
@@ -518,6 +570,7 @@ def run_application_transfer(
     extractor: BaseExtractor | None = None,
     fiscal_month_override: int | None = None,
     has_cost_report_hint: bool = False,
+    selection_override: dict[str, list[Path]] | None = None,
 ) -> ProcessingStatus:
     """
     タスク1: 申請書転記の実行
@@ -531,6 +584,8 @@ def run_application_transfer(
         fiscal_month_override: ユーザー指定の決算月（1〜12）。指定時はAI推定より優先
         has_cost_report_hint: ユーザーが「製造原価報告書あり」とチェック済みなら True。
             自動検出されなかった場合の警告強化に使う
+        selection_override: ユーザーが UI で明示指定したファイル群（カテゴリ別）。
+            FileDetector に渡して自動検出を上書きする。
     """
     status = ProcessingStatus(
         company_name=resource_folder.name,
@@ -546,7 +601,7 @@ def run_application_transfer(
             extractor = create_extractor(CLAUDE_API_KEY)
 
         # ファイル検出
-        detector = FileDetector(resource_folder)
+        detector = FileDetector(resource_folder, selection_override=selection_override)
         logger.info(detector.summary())
 
         extraction = ExtractionResult()
@@ -835,6 +890,7 @@ def run_wage_calculation(
     cached_ledger_employees: list | None = None,
     fiscal_month_override: int | None = None,
     cached_company: 'CompanyInfo | None' = None,
+    selection_override: dict[str, list[Path]] | None = None,
 ) -> ProcessingStatus:
     """
     タスク2: 給与支給総額計算の実行
@@ -855,7 +911,7 @@ def run_wage_calculation(
         if extractor is None:
             extractor = create_extractor(CLAUDE_API_KEY)
 
-        detector = FileDetector(resource_folder)
+        detector = FileDetector(resource_folder, selection_override=selection_override)
         logger.info(detector.summary())
 
         # 損益計算書（任意: あれば精度向上）— キャッシュがあれば再利用
@@ -1757,6 +1813,7 @@ def run_full_pipeline(
     template_type: str,
     company_name: str,
     fiscal_month_override: int | None = None,
+    selection_override: dict[str, list[Path]] | None = None,
 ) -> list[ProcessingStatus]:
     """タスク1 + タスク2 を一括実行"""
     extractor = create_extractor(CLAUDE_API_KEY)
@@ -1767,6 +1824,7 @@ def run_full_pipeline(
     s1 = run_application_transfer(
         resource_folder, template_path, template_type, output_app, extractor,
         fiscal_month_override=fiscal_month_override,
+        selection_override=selection_override,
     )
     results.append(s1)
 
@@ -1775,6 +1833,7 @@ def run_full_pipeline(
     s2 = run_wage_calculation(
         resource_folder, company_name, output_wage, extractor,
         fiscal_month_override=fiscal_month_override,
+        selection_override=selection_override,
     )
     results.append(s2)
 
