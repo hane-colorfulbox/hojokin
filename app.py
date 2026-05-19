@@ -381,6 +381,10 @@ def run_processing(
                 # Phase 4: 低信頼項目の確認キュー（項目・値・根拠・警告理由）
                 'confidence_warnings': getattr(status, 'confidence_warnings', []),
                 'extra_files': extra_files,
+                # 直近年度として選定された決算書ファイル（UI 明示用）
+                'pl_selected_filename': getattr(status, 'pl_selected_filename', ''),
+                'pl_selected_end': getattr(status, 'pl_selected_end', ''),
+                'pl_selection_warnings': getattr(status, 'pl_selection_warnings', []),
                 # all タスクで run_wage_calculation に渡してAPI重複を防ぐためのキャッシュ
                 '_cached_financial': status.financial,
                 '_cached_ledger_employees': status.ledger_employees,
@@ -411,6 +415,9 @@ def run_processing(
             'status': status.status,
             'message': status.message,
             'output_path': output_path if status.status == '完了' else None,
+            'pl_selected_filename': getattr(status, 'pl_selected_filename', ''),
+            'pl_selected_end': getattr(status, 'pl_selected_end', ''),
+            'pl_selection_warnings': getattr(status, 'pl_selection_warnings', []),
         }
 
     if task_type == 'bonus':
@@ -1400,6 +1407,10 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 'extra_files': {},
                 'bonus_result': None,
                 'bonus_files': {},
+                # 直近年度として選定された決算書（UI 明示用）
+                'pl_selected_filename': result.get('pl_selected_filename', ''),
+                'pl_selected_end': result.get('pl_selected_end', ''),
+                'pl_selection_warnings': result.get('pl_selection_warnings', []),
             }
             if result.get('output_path') and result['output_path'].exists():
                 with open(result['output_path'], 'rb') as f:
@@ -1476,6 +1487,19 @@ if 'last_results' in st.session_state:
                 st.warning(f'{task_display}: 完了（一部警告あり）— {result["message"]}')
             else:
                 st.success(f'{task_display}: 完了 — {result["message"]}')
+
+            # 直近年度として使用した決算書ファイルを明示（誤選定の早期発見用）
+            _pl_name = result.get('pl_selected_filename')
+            if _pl_name:
+                _pl_end = result.get('pl_selected_end')
+                _suffix = f'（推定期末: {_pl_end}）' if _pl_end else ''
+                st.info(
+                    f"📄 直近年度として **『{_pl_name}』** を使用しました{_suffix}。"
+                    "違う期の決算書が必要な場合は、ファイル名に「令和N年」「YYYY年」など"
+                    "年情報を含めて Drive を更新してください。"
+                )
+            for _w in result.get('pl_selection_warnings', []):
+                st.warning(_w)
 
             # Drive 格納時のリンクを表示（ダウンロードボタンと併設）
             drive_links = st.session_state.get('drive_upload_links') or {}
@@ -1628,4 +1652,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.1.2 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.1.3 | カラフルボックス株式会社')

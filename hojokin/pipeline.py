@@ -44,10 +44,28 @@ _YYYY_KANJI_RE = re.compile(r'(\d{4})\s*年\s*(\d{1,2})\s*月')
 _YYYY_SEP_RE = re.compile(r'(?<!\d)(\d{4})[\.\-_／/](\d{1,2})(?!\d)')
 
 
-def _parse_fiscal_end_from_filename(name: str) -> tuple[int, int] | None:
+# 月情報なしファイル名フォールバック用パターン（fiscal_month_override 必須時のみ動作）
+# 「令和6年決算書」「R6年決算書」「2024年決算書」のように年号のみ含まれるケースを救済
+_REIWA_GANNEN_NOMONTH_RE = re.compile(r'令和\s*元\s*年(?!\s*\d+\s*月)')
+_REIWA_NOMONTH_RE = re.compile(r'令和\s*(\d{1,2})\s*年(?!\s*\d+\s*月)')
+_HEISEI_NOMONTH_RE = re.compile(r'平成\s*(\d{1,2})\s*年(?!\s*\d+\s*月)')
+_RY_NOMONTH_RE = re.compile(r'(?<![A-Za-z0-9])R\s*(\d{1,2})\s*年(?!\s*\d+\s*月)')
+_YYYY_NOMONTH_RE = re.compile(r'(?<!\d)(\d{4})\s*年(?!\s*\d+\s*月)')
+
+
+def _parse_fiscal_end_from_filename(
+    name: str,
+    fiscal_month_override: int | None = None,
+) -> tuple[int, int] | None:
     """ファイル名から期末年月 (year, month) を取り出す。失敗時 None。
 
     NFC 正規化してから複数のパターンを試行し、最初に成立したものを返す。
+
+    fiscal_month_override が指定されている場合、月情報の無いファイル名
+    （「R6年決算書」「令和6年決算書」「2024年決算書」など）も年単独で救済する。
+    その際の月は fiscal_month_override を組み合わせて返す（同一会社内の決算書を
+    年号で並べ替える比較目的の擬似値）。期首年・期末年どちらで命名するかは会社
+    依存だが、同一会社内の相対順序（より新しい決算書）の判定には影響しない。
     """
     s = unicodedata.normalize('NFC', name)
 
@@ -84,6 +102,25 @@ def _parse_fiscal_end_from_filename(name: str) -> tuple[int, int] | None:
     m = _YYYY_SEP_RE.search(s)
     if m:
         return _valid(int(m.group(1)), int(m.group(2)))
+
+    # ---- フォールバック: 月情報なしファイル名 (fiscal_month_override 必須) ----
+    if fiscal_month_override is not None:
+        m = _REIWA_GANNEN_NOMONTH_RE.search(s)
+        if m:
+            return _valid(2019, fiscal_month_override)
+        m = _REIWA_NOMONTH_RE.search(s)
+        if m:
+            return _valid(2018 + int(m.group(1)), fiscal_month_override)
+        m = _HEISEI_NOMONTH_RE.search(s)
+        if m:
+            return _valid(1988 + int(m.group(1)), fiscal_month_override)
+        m = _RY_NOMONTH_RE.search(s)
+        if m:
+            return _valid(2018 + int(m.group(1)), fiscal_month_override)
+        m = _YYYY_NOMONTH_RE.search(s)
+        if m:
+            return _valid(int(m.group(1)), fiscal_month_override)
+
     return None
 
 
@@ -138,6 +175,31 @@ def _parse_year_month_from_iso(s: str) -> tuple[int, int] | None:
     if 1900 <= y <= 2100 and 1 <= mo <= 12:
         return (y, mo)
     return None
+
+
+def _record_pl_selection(
+    status,
+    detector: 'FileDetector',
+    pl_path: Path | None,
+    fiscal_month_override: int | None,
+) -> None:
+    """選定された決算書ファイル名・推定期末年月・選定警告を ProcessingStatus に記録。
+
+    UI の処理開始ボタン直前 / 処理結果カードで「📄 直近年度として『...』を使用」
+    と明示するためのデータソース。ファイル名から年月が抽出できない場合は
+    pl_selected_end は空のままにし、UI 側で「期末: 不明（AI推定値で補完）」のように
+    表示するか、財務AI抽出後に上書きする。
+    """
+    if pl_path is None:
+        return
+    status.pl_selected_filename = pl_path.name
+    ym = _parse_fiscal_end_from_filename(
+        pl_path.name, fiscal_month_override=fiscal_month_override
+    )
+    if ym is not None:
+        status.pl_selected_end = f'{ym[0]:04d}-{ym[1]:02d}'
+    if detector.pl_selection_warnings:
+        status.pl_selection_warnings = list(detector.pl_selection_warnings)
 
 
 def _check_pl_wage_period_consistency(
@@ -293,6 +355,8 @@ class FileDetector:
         self.folder = folder
         self.files: dict[str, list[Path]] = {k: [] for k in self.PATTERNS}
         self.skipped: list[tuple[str, str, str]] = []  # (category, filename, reason)
+        # get_pl_latest が積む UI 表示用警告（毎回の呼び出しで上書き）
+        self.pl_selection_warnings: list[str] = []
         self._scan()
 
     def _scan(self):
@@ -346,15 +410,22 @@ class FileDetector:
         判定優先順（fiscal_month_override 指定時は決算月一致を最優先）:
           1. ファイル名に「第N期」を含む → N が最大のものを採用（事業年数の進んだ会社対応）
           2. ファイル名から期末年月を抽出（令和X年Y月 / RY.M / YYYY年M月 / YYYY-MM 等）
-             → fiscal_month_override が指定されていれば、月が一致する候補のみで比較
-             → 期末年月が最新のものを採用
+             → fiscal_month_override が指定されていれば、月情報なしファイル名
+               （「R6年決算書」「2024年決算書」等）も年単独で救済する
+             → 月一致する候補のみで比較し、期末年月が最新のものを採用
           3. 同期が複数あれば、PDFsam等の部分抜粋を除外し、フル版（サイズ最大）を採用
-          4. 上記いずれも該当なければ更新日時最新を採用
+          4. 上記いずれも該当なければ更新日時最新を採用（強警告：実務上ほぼ起こらないはず）
+
+        副作用:
+          self.pl_selection_warnings に UI 表示用の警告を積む（mtime フォールバック等）
 
         旧実装の問題: ステップ1・2が無いと「令和7年3月決算書」「令和6年3月決算書」のような
         ファイル名（第N期表記なし）が並んだ際、mtime ガチャで前期決算書が選ばれて
         賃金台帳の期間と整合しない財務値が転記される誤動作があった。
         """
+        # 選定過程の警告を UI に伝えるため、毎回リセットしてから積み直す
+        self.pl_selection_warnings: list[str] = []
+
         pls = self.files.get('pl', [])
         if not pls:
             return None
@@ -375,7 +446,8 @@ class FileDetector:
 
         # ---- ステップ2: ファイル名から期末年月を抽出 ----
         date_pairs = [
-            (p, _parse_fiscal_end_from_filename(p.name))
+            (p, _parse_fiscal_end_from_filename(
+                p.name, fiscal_month_override=fiscal_month_override))
             for p in pls
         ]
         with_date = [(p, ym) for p, ym in date_pairs if ym is not None]
@@ -395,6 +467,10 @@ class FileDetector:
                         f'年月最新で選びます: '
                         f'{[(p.name, ym) for p, ym in with_date]}'
                     )
+                    self.pl_selection_warnings.append(
+                        f'決算月{fiscal_month_override}月と一致する決算書ファイル名が'
+                        f'見つからず、年月最新で代替選択しました'
+                    )
             # 期末年月が最新のもの
             max_ym = max(ym for _, ym in with_date)
             latest = [p for p, ym in with_date if ym == max_ym]
@@ -404,10 +480,16 @@ class FileDetector:
                 )
             return _pick_full_version(latest)
 
-        # ---- ステップ3: フォールバック（mtime 最新） ----
+        # ---- ステップ3: フォールバック（mtime 最新）— 強警告 ----
         logger.warning(
             f'PL候補のファイル名から期番号も期末年月も抽出できないため、'
             f'更新日時最新でフォールバックします: {[p.name for p in pls]}'
+        )
+        self.pl_selection_warnings.append(
+            '⚠️ 決算書ファイル名から年度が判別できず、Drive更新日時で代替選択しました。'
+            '誤った期の決算書が選ばれている可能性があります。'
+            'ファイル名に「令和N年」「RN年」「YYYY年」など年情報を含めて再アップロードを推奨します。'
+            f'候補: {[p.name for p in pls]}'
         )
         return max(pls, key=lambda p: p.stat().st_mtime)
 
@@ -534,6 +616,7 @@ def run_application_transfer(
             # 損益計算書PDF → FinancialData
             # 決算月指定があれば、ファイル名年月と突合して直近期を確定（誤読防止）
             pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
+            _record_pl_selection(status, detector, pl_path, fiscal_month_override)
             pl_period_warning = ''
             if pl_path:
                 logger.info(f'直近期決算書として採用: {pl_path.name}')
@@ -780,6 +863,7 @@ def run_wage_calculation(
         pl_period_warning = ''
         if financial is None:
             pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
+            _record_pl_selection(status, detector, pl_path, fiscal_month_override)
             if pl_path:
                 logger.info(f'直近期決算書として採用: {pl_path.name}')
                 images = pdf_to_images(pl_path)
@@ -914,6 +998,9 @@ def run_wage_calculation(
 
         # データソース（ファイル名）— 人間チェックの突合用に各セクションに表示する
         _pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
+        # cached_financial 経路で line 865 をスキップした場合に備えて、ここでも記録
+        if not status.pl_selected_filename:
+            _record_pl_selection(status, detector, _pl_path, fiscal_month_override)
         _ledger_paths = detector.get_all('wage_ledger')
         _wage_report = detector.get('wage_report')
         _registry = detector.get('registry')

@@ -26,7 +26,7 @@ class DriveClient:
         logger.info('Google Drive API 接続完了')
 
     def list_files(self, folder_id: str) -> list[dict]:
-        """フォルダ内のファイル一覧を取得"""
+        """フォルダ内のファイル一覧を取得（マイドライブ/共有ドライブ両対応）"""
         results = []
         page_token = None
 
@@ -36,6 +36,10 @@ class DriveClient:
                 fields='nextPageToken, files(id, name, mimeType, size, modifiedTime)',
                 pageToken=page_token,
                 pageSize=100,
+                # 共有ドライブ配下のフォルダ内も列挙できるようにする。
+                # これらが無いと共有ドライブ内のフォルダで空配列が返る。
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
             ).execute()
 
             results.extend(response.get('files', []))
@@ -61,9 +65,11 @@ class DriveClient:
         return result
 
     def download_file(self, file_id: str, dest_path: Path) -> Path:
-        """ファイルをダウンロード"""
+        """ファイルをダウンロード（共有ドライブのファイルも対応）"""
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        request = self.service.files().get_media(fileId=file_id)
+        request = self.service.files().get_media(
+            fileId=file_id, supportsAllDrives=True
+        )
 
         with open(dest_path, 'wb') as fh:
             downloader = MediaIoBaseDownload(fh, request)
@@ -102,7 +108,8 @@ class DriveClient:
         }
         media = MediaFileUpload(str(local_path), mimetype=mime_type)
         file = self.service.files().create(
-            body=file_metadata, media_body=media, fields='id'
+            body=file_metadata, media_body=media, fields='id',
+            supportsAllDrives=True,
         ).execute()
 
         file_id = file.get('id')
@@ -119,7 +126,7 @@ class DriveClient:
             metadata['parents'] = [parent_id]
 
         folder = self.service.files().create(
-            body=metadata, fields='id'
+            body=metadata, fields='id', supportsAllDrives=True,
         ).execute()
 
         folder_id = folder.get('id')
@@ -127,10 +134,12 @@ class DriveClient:
         return folder_id
 
     def find_or_create_subfolder(self, parent_id: str, name: str) -> str:
-        """サブフォルダを検索し、なければ作成"""
+        """サブフォルダを検索し、なければ作成（共有ドライブ両対応）"""
         results = self.service.files().list(
             q=f"'{parent_id}' in parents and name = '{name}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
             fields='files(id)',
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
         ).execute()
 
         files = results.get('files', [])

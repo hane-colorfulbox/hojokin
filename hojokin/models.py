@@ -170,3 +170,8 @@ class ProcessingStatus:
     # Phase 4: 確認キュー（低信頼項目を UI で「要確認」一覧として表示）
     # 各要素: {'field': str, 'label': str, 'value': str, 'source': str, 'reason': str}
     confidence_warnings: list[dict] = field(default_factory=list)
+    # 直近年度として選定された決算書ファイル名と推定期末年月（UI 明示用）
+    # 例: pl_selected_filename='R6年決算書.pdf', pl_selected_end='2025-04'
+    pl_selected_filename: str = ''
+    pl_selected_end: str = ''  # 'YYYY-MM' 形式（AI推定 or ファイル名抽出 or 空）
+    pl_selection_warnings: list[str] = field(default_factory=list)
