@@ -160,6 +160,49 @@ def _cell(ws, row, col, value, font=NORMAL_FONT, fmt=None, fill=None, border=THI
     return c
 
 
+def _apply_readable_layout(ws, text_columns: tuple[int, ...], max_widths: dict[int, int]):
+    """指定列のセルに wrap_text を一括適用し、長文行の行高を文字数から見積もって設定する。
+
+    openpyxl は行高の自動計算をしないため、長文セルが入った行は明示設定しないと
+    1行表示で切れたままになる。日本語は1文字≒全角幅なので、列幅 W に対して
+    1行に入る文字数を W * 1.0（半角換算でないので 1.0）として行数を見積もる。
+
+    Args:
+        ws: 対象シート
+        text_columns: 折り返し対象列のインデックス（1始まり、B=2, C=3, D=4 など）
+        max_widths: 各列の表示幅（列インデックス → Excel 列幅）
+    """
+    line_height = 14  # 1行あたりの目安（Excel デフォルト 14.4pt 程度）
+    max_height = 120  # 上限。これ以上は折り返さず横スクロールで対応
+    for r in range(1, ws.max_row + 1):
+        needed_lines = 1
+        for col in text_columns:
+            cell = ws.cell(r, col)
+            if cell.value is None or not isinstance(cell.value, str):
+                continue
+            # 既存 alignment の horizontal を保持しつつ wrap_text と vertical='top' を適用
+            existing = cell.alignment
+            cell.alignment = Alignment(
+                horizontal=existing.horizontal,
+                vertical='top',
+                wrap_text=True,
+            )
+            # 行数見積もり: 改行 + 列幅から計算
+            text = cell.value
+            chars_per_line = max(10, max_widths.get(col, 30))
+            # 改行ごとに分割し、各セグメントが何行分か計算
+            seg_lines = sum(
+                max(1, (len(seg) + chars_per_line - 1) // chars_per_line)
+                for seg in text.split('\n')
+            )
+            needed_lines = max(needed_lines, seg_lines)
+        if needed_lines > 1:
+            target_h = min(needed_lines * line_height + 4, max_height)
+            current_h = ws.row_dimensions[r].height or 15
+            if target_h > current_h:
+                ws.row_dimensions[r].height = target_h
+
+
 def create_wage_calculation(
     output_path: Path,
     company_name: str,
@@ -872,10 +915,17 @@ def create_wage_calculation(
         ws1.cell(r, 4).alignment = Alignment(wrap_text=True, vertical='top')
 
     ws1.column_dimensions['A'].width = 2
-    ws1.column_dimensions['B'].width = 38
+    # B列は項目名（例: '1人当たり給与支給総額 = 給与支給総額 ÷ FTE（賃金台帳ベース・推奨）'）
+    # まで入れるため余裕を持たせる
+    ws1.column_dimensions['B'].width = 44
     ws1.column_dimensions['C'].width = 20
     # D列は転記用の詳細な出所表記を入れるため広め。wrap_text=True と併用して折り返し表示
-    ws1.column_dimensions['D'].width = 55
+    ws1.column_dimensions['D'].width = 58
+
+    # 備考列（B/C/D）に wrap_text を一括適用 + 長文行の行高を見積もり調整。
+    # 個別セルで wrap_text を設定し忘れても、表示崩れ（長文がセル境界を越える／隣セルに被る）
+    # を防ぐ。行高は openpyxl が「自動」を計算してくれないため、文字数から見積もって明示設定する。
+    _apply_readable_layout(ws1, text_columns=(2, 3, 4), max_widths={2: 44, 3: 20, 4: 58})
 
     # ===== Sheet 2: 従業員別明細 =====
     # 12ヶ月モード（賃金台帳由来）: 月12列＋12ヶ月合計＋月間平均
