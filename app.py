@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import logging
 import unicodedata
+import hashlib
 from pathlib import Path
 from datetime import datetime
 
@@ -653,7 +654,8 @@ _FILE_CATEGORIES = [
     ('tax',         '納税証明書',              ['納税証明']),
     ('estimate',    '見積書',                  ['見積']),
     ('wage_report', '賃金状況報告シート',      ['賃金状況報告']),
-    ('wage_ledger', '賃金台帳',                ['賃金台帳']),
+    # pipeline.FileDetector.PATTERNS と整合: 給与ソフト出力は「給与台帳」表記が多いため両対応
+    ('wage_ledger', '賃金台帳 / 給与台帳',     ['賃金台帳', '給与台帳']),
 ]
 
 _REQUIRED_CATS_BY_TASK = {
@@ -742,7 +744,8 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
     # FileDetector.ALLOWED_EXTS['wage_ledger'] と整合させる
     WAGE_EXTS = {'.xlsx', '.xlsm', '.csv'}
 
-    wage_keywords = ('賃金台帳',)
+    # pipeline.FileDetector.PATTERNS['wage_ledger'] と整合（給与ソフト出力は「給与台帳」表記が多い）
+    wage_keywords = ('賃金台帳', '給与台帳')
     wage_files = []
     wage_pdf_files = []
     for name, size in file_size_pairs:
@@ -832,7 +835,7 @@ def _estimate_case_scale(file_size_pairs: list[tuple[str, int]]) -> dict | None:
         if ext != '.pdf':
             continue
         pdf_total += size
-        if '賃金台帳' in n:
+        if '賃金台帳' in n or '給与台帳' in n:
             wage_pdf_total += size
 
     wage_pdf_mb = wage_pdf_total / 1024 / 1024
@@ -987,13 +990,22 @@ def _render_file_check_result(result, total_count):
 _MULTI_SELECT_CATS = {'wage_ledger'}
 
 
-def _categorize_for_ui(file_names: list[str]) -> dict[str, list[str]]:
-    """ファイル名を _FILE_CATEGORIES のキーワード + _UI_ALLOWED_EXTS で分類。
+def _categorize_for_ui(file_names: list[str]) -> dict[str, dict[str, list[str]]]:
+    """ファイル名をカテゴリ別に「推奨候補」「その他候補」「全候補」に分類する。
 
-    `_analyze_files` の分類ロジックと整合させる（差し替え UI と判別結果表示で
-    候補ファイルが食い違うと混乱するため）。
+    - recommended: ファイル名キーワード一致 + 拡張子許可 → 自動検出と同じ判定
+    - others:      キーワード未一致 だが 拡張子は許可される候補（タイポ救済枠）
+    - all:         recommended + others（差し替え UI の候補プール）
+
+    例: PL カテゴリで「PL_R7.pdf」はキーワード（決算書/損益計算書）を含まないが
+    `_UI_ALLOWED_EXTS['pl'] = {'.pdf'}` を満たすので others に入る。
     """
-    candidates: dict[str, list[str]] = {cat: [] for cat, _, _ in _FILE_CATEGORIES}
+    result: dict[str, dict[str, list[str]]] = {
+        cat: {'recommended': [], 'others': [], 'all': []}
+        for cat, _, _ in _FILE_CATEGORIES
+    }
+
+    # 「推奨候補」: 既存 _analyze_files と同じロジックで一意決定（最初に一致したカテゴリのみ）
     for name in file_names:
         name_nfc = unicodedata.normalize('NFC', name)
         ext = Path(name_nfc).suffix.lower()
@@ -1001,14 +1013,35 @@ def _categorize_for_ui(file_names: list[str]) -> dict[str, list[str]]:
             if any(kw in name_nfc for kw in keywords):
                 allowed = _UI_ALLOWED_EXTS.get(cat)
                 if allowed is not None and ext not in allowed:
-                    break  # 拡張子NG → 他カテゴリは試さない（_analyze_files と同じ挙動）
-                candidates[cat].append(name)
+                    break  # 拡張子NG → 他カテゴリも試さない（_analyze_files と整合）
+                result[cat]['recommended'].append(name)
                 break
-    return candidates
+
+    # 「その他候補」: キーワード一致しないが拡張子は許可（タイポ救済）。
+    # 1ファイルが複数カテゴリの「その他」に同時所属し得る（PDF は registry/pl/tax/estimate/cost_report の全候補）
+    # ただし recommended に既に入っているカテゴリにはその名前を入れない（重複排除）
+    for name in file_names:
+        name_nfc = unicodedata.normalize('NFC', name)
+        ext = Path(name_nfc).suffix.lower()
+        for cat, _, _kw in _FILE_CATEGORIES:
+            allowed = _UI_ALLOWED_EXTS.get(cat)
+            if allowed is not None and ext not in allowed:
+                continue
+            if name in result[cat]['recommended']:
+                continue
+            result[cat]['others'].append(name)
+
+    # all = recommended + others
+    for cat in result:
+        result[cat]['all'] = result[cat]['recommended'] + result[cat]['others']
+
+    return result
 
 
 _OVERRIDE_AUTO_LABEL = '（自動検出に従う）'
 _OVERRIDE_EXCLUDE_LABEL = '─ 使わない（対象外）─'
+_OVERRIDE_SEP_RECOMMENDED = '── 推奨候補（自動検出ヒット）──'
+_OVERRIDE_SEP_OTHERS = '── その他のファイル（タイポ救済用）──'
 
 
 def _render_file_selection_override(
@@ -1016,50 +1049,89 @@ def _render_file_selection_override(
 ) -> dict[str, list[str] | None]:
     """検出カテゴリ別の候補ファイルを差し替え可能な UI で表示し、選択結果を返す。
 
+    候補は「推奨候補（キーワード一致）」と「その他のファイル（許可拡張子のみ）」
+    の両セクションに分けて並べる。タイポ等でキーワードが含まれないファイルも
+    その他セクションから割り当てて処理対象にできる。
+
     Returns:
         dict[category, list[str] | None]
             - None: 自動検出に従う（override なし）
             - list[str]: ユーザー指定（[] は「対象外」）
     """
-    candidates = _categorize_for_ui(file_names)
-    visible = [(cat, display) for cat, display, _ in _FILE_CATEGORIES if candidates[cat]]
+    cat_info = _categorize_for_ui(file_names)
+    # 全候補（推奨 or その他）が 1 件以上あるカテゴリだけ UI に出す
+    visible = [
+        (cat, display)
+        for cat, display, _ in _FILE_CATEGORIES
+        if cat_info[cat]['all']
+    ]
     if not visible:
         return {}
 
     overrides: dict[str, list[str] | None] = {}
+    # selectbox の「セパレータ行」をユーザーが選べないよう、選ばれたら自動扱いに戻す
+    SEP_LABELS = {_OVERRIDE_SEP_RECOMMENDED, _OVERRIDE_SEP_OTHERS}
 
     with st.expander('▶ 使用するファイルを差し替える（必要な場合のみ）', expanded=False):
         st.caption(
-            '通常は **自動検出のまま** で OK。'
-            '同じカテゴリに該当するファイルが複数あって自動選定が誤っているとき、'
-            'または特定のファイル（空テンプレ・別期分など）を除外したいときだけ変更してください。'
+            '通常は **自動検出のまま** で OK。同じカテゴリに該当するファイルが複数あって'
+            '自動選定が誤っているとき、または特定のファイル（空テンプレ・別期分など）を'
+            '除外したいときだけ変更してください。'
+            '\n\n'
+            'ファイル名にキーワード（決算書/賃金台帳/ヒアリング等）が含まれないファイルも'
+            '「その他のファイル」セクションから割り当てできます（タイポ救済用）。'
         )
         for cat, display in visible:
-            cat_files = candidates[cat]
+            recommended = cat_info[cat]['recommended']
+            others = cat_info[cat]['others']
             sel_key = f'override_{case_key}_{cat}'
 
             if cat in _MULTI_SELECT_CATS:
-                # 複数選択（賃金台帳など）: チェックを外せば除外。既定は全選択。
-                selected = st.multiselect(
-                    f'{display}（複数選択可）',
-                    options=cat_files,
-                    default=cat_files,
-                    key=sel_key,
-                    help='チェックを外したファイルは処理から除外されます。',
+                # 複数選択（賃金台帳など）。
+                # 推奨候補は default 全選択、その他は default 未選択（タイポ救済時のみ手動追加）。
+                options = recommended + others
+                default = list(recommended)
+                label_suffix = (
+                    f'（推奨{len(recommended)} / その他{len(others)}）'
+                    if others else f'（{len(recommended)}件）'
                 )
-                if list(selected) == cat_files:
-                    overrides[cat] = None  # 全選択=デフォルト → 自動扱い
+                selected = st.multiselect(
+                    f'{display}{label_suffix}',
+                    options=options,
+                    default=default,
+                    key=sel_key,
+                    help=(
+                        '推奨候補（自動検出ヒット）は既定でチェック済み。'
+                        'その他のファイルは既定で未チェック（必要なら手動で追加）。'
+                        'チェックを外したファイルは処理から除外されます。'
+                    ),
+                )
+                if list(selected) == default:
+                    overrides[cat] = None  # 既定 → 自動扱い
                 else:
                     overrides[cat] = list(selected)
             else:
-                options = [_OVERRIDE_AUTO_LABEL] + cat_files + [_OVERRIDE_EXCLUDE_LABEL]
+                # 単一選択。推奨/その他をセパレータで分割表示。
+                # セパレータ行は disabled 不可なので、選ばれたら自動扱いに戻す（後段ガード）。
+                opts: list[str] = [_OVERRIDE_AUTO_LABEL]
+                if recommended:
+                    opts.append(_OVERRIDE_SEP_RECOMMENDED)
+                    opts.extend(recommended)
+                if others:
+                    opts.append(_OVERRIDE_SEP_OTHERS)
+                    opts.extend(others)
+                opts.append(_OVERRIDE_EXCLUDE_LABEL)
+
                 selected = st.selectbox(
                     display,
-                    options=options,
+                    options=opts,
                     key=sel_key,
-                    help='候補が複数ある場合の差し替え・「使わない」指定ができます。',
+                    help=(
+                        '推奨候補（自動検出ヒット）またはその他のファイル（タイポ救済）から選択。'
+                        '「使わない」で対象外指定できます。'
+                    ),
                 )
-                if selected == _OVERRIDE_AUTO_LABEL:
+                if selected in SEP_LABELS or selected == _OVERRIDE_AUTO_LABEL:
                     overrides[cat] = None
                 elif selected == _OVERRIDE_EXCLUDE_LABEL:
                     overrides[cat] = []
@@ -1098,8 +1170,13 @@ def _build_path_override(
     return path_override if path_override else None
 
 
-def _check_required_by_names(file_names, task):
-    """タスクに応じた必須ファイルが揃っているかチェック
+def _check_required_by_names(file_names, task, name_override=None):
+    """タスクに応じた必須ファイルが揃っているかチェック。
+
+    判定優先順:
+    1. ユーザーが UI で override に明示指定したファイルがあれば、それを充足とみなす
+       （タイポでキーワード未一致のファイルでも、ユーザーが手動でカテゴリ割当すれば OK）
+    2. それ以外は従来通り、ファイル名キーワード + 拡張子フィルタで自動検出を確認
 
     拡張子フィルタ（_UI_ALLOWED_EXTS）も適用するため、賃金台帳PDFだけ
     アップした状態では can_run を有効にしない（実行後の skipped 失敗を防ぐ）。
@@ -1109,11 +1186,30 @@ def _check_required_by_names(file_names, task):
     # NFD（macOS の濁点分離形式）でも比較が通るよう NFC 化してから判定
     names_nfc = [unicodedata.normalize('NFC', n) for n in file_names]
     required_cats = _REQUIRED_CATS_BY_TASK.get(task, set())
+    name_override = name_override or {}
+
+    _SENTINEL = object()  # 「override に key が存在しない」を None と区別するための番兵
     for cat, _, keywords in _FILE_CATEGORIES:
         if cat not in required_cats:
             continue
         allowed = _UI_ALLOWED_EXTS.get(cat)
 
+        # 1) ユーザー override に明示エントリがあれば優先
+        override_val = name_override.get(cat, _SENTINEL)
+        if override_val is not _SENTINEL and override_val is not None:
+            # 空リストは「対象外」明示 → 必須カテゴリでは即座に未充足判定
+            if not override_val:
+                return False
+            # ファイル指定あり → 拡張子要件を満たしているか確認
+            ok = all(
+                allowed is None or Path(n).suffix.lower() in allowed
+                for n in override_val
+            )
+            if not ok:
+                return False
+            continue  # 充足
+
+        # 2) override 未指定（key なし or None）→ 自動検出: キーワード + 拡張子
         def _name_ok(name: str) -> bool:
             if not any(kw in name for kw in keywords):
                 return False
@@ -1274,7 +1370,7 @@ else:
          '履歴事項全部証明書_○○様.pdf',           {'application', 'all'},          {'application', 'all'}),
         ('pl',          '損益計算書 / 決算報告書', 'PDF',       ['損益計算書', '決算報告書', '決算書'],
          '42期 決算報告書.pdf',                    {'application', 'wage', 'all'},  {'application', 'all'}),
-        ('wage_ledger', '賃金台帳',               'Excel/CSV',     ['賃金台帳'],
+        ('wage_ledger', '賃金台帳 / 給与台帳',     'Excel/CSV',     ['賃金台帳', '給与台帳'],
          '賃金台帳_2025年度.xlsx',                 {'wage', 'bonus'},              {'wage', 'bonus'}),
         ('cost_report', '製造原価報告書',          'PDF',       ['製造原価報告書', '原価報告書'],
          '製造原価報告書.pdf',                     {'application', 'wage', 'all'},  set()),
@@ -1317,8 +1413,8 @@ else:
 
     with st.expander('その他の注意事項'):
         st.markdown("""
-- キーワードが含まれないファイルは**無視されます**（エラーにはなりません）
-- 決算書が2期分ある場合、**サイズの大きい方**が自動選択されます
+- キーワードが含まれないファイルもアップロード可。**「使用するファイルを差し替える」expander**から手動でカテゴリ割当てできます（タイポ救済）
+- 決算書が複数期分ある場合、**ファイル名の「第N期」「令和N年M月」「YYYY-MM」**等から直近期を自動選定します
 - 関係ないファイルが混ざっていても問題ありません
 - テンプレート選択（通常枠/インボイス枠）とテンプレート原本の種類を**一致**させてください
         """)
@@ -1336,10 +1432,14 @@ else:
         _render_file_check_result(upload_analysis, len(uploaded_files))
 
         # 検出されたファイルの差し替え UI（同名で別期の決算書混在などへの保険）
-        # case_key にはファイル名集合のハッシュを使用 → 同じ顧客の同じ資料セットなら
-        # 選択状態を維持、別案件をドロップすれば自動でリセット
+        # case_key にはファイル名+サイズの安定ハッシュ（sha1）を使用。
+        # 1) sha1 はプロセス再起動でも値が変わらない（hash() は PYTHONHASHSEED でランダム化）
+        # 2) サイズも組み込むことで「別案件で同名 generic ファイルが衝突」を回避
+        _upload_signature = '|'.join(
+            f'{f.name}:{f.size}' for f in sorted(uploaded_files, key=lambda x: x.name)
+        )
         _upload_case_key = (
-            f'upload_{hash(tuple(sorted(f.name for f in uploaded_files)))}'
+            f'upload_{hashlib.sha1(_upload_signature.encode("utf-8")).hexdigest()[:16]}'
         )
         selection_override_names = _render_file_selection_override(
             [f.name for f in uploaded_files],
@@ -1376,12 +1476,20 @@ st.markdown(
 
 has_files = bool(uploaded_files)
 has_drive_files = bool(drive_files_to_download)
+# 差し替え UI でユーザーがカテゴリ割当しているファイルも「必須充足」とみなす
+# （タイポ救済: キーワード未一致でも override に入っていれば OK）
 has_required = (
-    _check_required_by_names([f.name for f in uploaded_files], task_type)
+    _check_required_by_names(
+        [f.name for f in uploaded_files], task_type,
+        name_override=selection_override_names,
+    )
     if has_files else False
 )
 has_drive_required = (
-    _check_required_by_names([f['name'] for f in drive_files_to_download], task_type)
+    _check_required_by_names(
+        [f['name'] for f in drive_files_to_download], task_type,
+        name_override=selection_override_names,
+    )
     if has_drive_files else False
 )
 
@@ -1789,4 +1897,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.1.4 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.1.5 | カラフルボックス株式会社')
