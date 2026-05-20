@@ -1259,6 +1259,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# 賃金台帳の作成手順（CC向けマニュアル） — 賃金台帳を作る/直す前に必ず読む。
+# 過去事故：暦年と事業年度が混在した独自フォーマットで作って R215/R216 が誤集計された
+_WAGE_MANUAL_PATH = Path(__file__).parent / 'docs' / '賃金台帳変換手順_CC向け.md'
+with st.expander(
+    '📘 賃金台帳の作成手順（CC向けマニュアル） — 賃金台帳を作る/直すときは必ずここを確認',
+    expanded=False,
+):
+    if _WAGE_MANUAL_PATH.exists():
+        st.markdown(_WAGE_MANUAL_PATH.read_text(encoding='utf-8'))
+    else:
+        st.warning(f'マニュアルファイルが見つかりません: {_WAGE_MANUAL_PATH}')
+
 # Drive連携用の変数
 drive_folder_id = None
 drive_files_to_download = []
@@ -1927,4 +1939,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.1.8 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.1.9 | カラフルボックス株式会社')
