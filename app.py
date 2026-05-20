@@ -831,7 +831,10 @@ def _analyze_files(file_names, task):
     }
 
 
-def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
+def _check_size_warnings(
+    file_size_pairs: list[tuple[str, int]],
+    task: str | None = None,
+) -> list[str]:
     """ファイル(名前, バイト数)から大容量・大量警告を作る。
 
     閾値（実害が出る前のソフト警告レベル）:
@@ -877,7 +880,8 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
                 wage_pdf_names.append(n)
 
     # 賃金台帳が PDF で投入されている場合（Excel/CSV 変換誘導）
-    if wage_pdf_names:
+    # ただし「賃金台帳の作成」タスクは PDF を主入力として処理するため警告を出さない
+    if wage_pdf_names and task != 'wage_ledger_creation':
         warnings.append(
             f'📄 賃金台帳が PDF 形式で含まれています（{len(wage_pdf_names)}件）— '
             f'ツールでは処理されません。Excel / CSV に変換してから再投入してください'
@@ -899,7 +903,10 @@ def _check_size_warnings(file_size_pairs: list[tuple[str, int]]) -> list[str]:
     return warnings
 
 
-def _estimate_case_scale(file_size_pairs: list[tuple[str, int]]) -> dict | None:
+def _estimate_case_scale(
+    file_size_pairs: list[tuple[str, int]],
+    task: str | None = None,
+) -> dict | None:
     """案件規模・処理時間・APIコストを推定する。
 
     現運用（2026-05〜）では賃金台帳は Excel/CSV のみ処理されるため、
@@ -996,7 +1003,8 @@ def _estimate_case_scale(file_size_pairs: list[tuple[str, int]]) -> dict | None:
 
     # 補足メッセージ
     notes: list[str] = []
-    if wage_pdf_count > 0:
+    # 「賃金台帳の作成」タスクは PDF を主入力として処理するため除外メッセージを出さない
+    if wage_pdf_count > 0 and task != 'wage_ledger_creation':
         notes.append(
             f'賃金台帳PDFが {wage_pdf_count} 件含まれていますが、'
             'ツールでは処理されません。Excel/CSV に変換してから再投入してください'
@@ -1015,9 +1023,12 @@ def _estimate_case_scale(file_size_pairs: list[tuple[str, int]]) -> dict | None:
     }
 
 
-def _render_case_scale_estimate(file_size_pairs: list[tuple[str, int]]):
+def _render_case_scale_estimate(
+    file_size_pairs: list[tuple[str, int]],
+    task: str | None = None,
+):
     """案件規模・処理時間・APIコスト予想を UI に表示。"""
-    est = _estimate_case_scale(file_size_pairs)
+    est = _estimate_case_scale(file_size_pairs, task=task)
     if not est:
         return
 
@@ -1091,6 +1102,15 @@ def _render_file_check_result(result, total_count):
 # 他カテゴリ（registry/tax 等）も複数候補が出ることはあるが、内容は「同名重複アップロード」
 # が大半で自動選定（先頭採用）で実害なし。UI に出してもノイズになるため非表示。
 _OVERRIDE_UI_CATS = {'pl', 'wage_ledger'}
+# 「賃金台帳の作成」タスクでは決算書は使わず、賃金台帳PDFと履歴事項PDFを差し替え対象にする
+_OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION = {'wage_ledger', 'registry'}
+
+
+def _get_override_ui_cats(task: str | None) -> set[str]:
+    """タスクに応じた差し替え UI 対象カテゴリを返す。"""
+    if task == 'wage_ledger_creation':
+        return _OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION
+    return _OVERRIDE_UI_CATS
 
 # 複数選択（multiselect）させるカテゴリ。それ以外は単一選択（selectbox）。
 _MULTI_SELECT_CATS = {'wage_ledger'}
@@ -1195,12 +1215,14 @@ def _render_file_selection_override(
             - list[str]: ユーザー指定（[] は「対象外」）
     """
     cat_info = _categorize_for_ui(file_names, task=task)
-    # 差し替え UI 表示対象は _OVERRIDE_UI_CATS に絞る（pl と wage_ledger のみ）。
-    # 候補（推奨 or その他）が 1 件以上あるカテゴリだけ実際に描画。
+    # 差し替え UI 表示対象はタスクごとに変える:
+    #   - 通常: pl と wage_ledger
+    #   - 賃金台帳の作成: wage_ledger と registry（履歴事項PDF も差し替え可能に）
+    override_cats = _get_override_ui_cats(task)
     visible = [
         (cat, display)
         for cat, display, _ in _FILE_CATEGORIES
-        if cat in _OVERRIDE_UI_CATS and cat_info[cat]['all']
+        if cat in override_cats and cat_info[cat]['all']
     ]
     if not visible:
         return {}
@@ -1209,7 +1231,12 @@ def _render_file_selection_override(
     # selectbox の「セパレータ行」をユーザーが選べないよう、選ばれたら自動扱いに戻す
     SEP_LABELS = {_OVERRIDE_SEP_RECOMMENDED, _OVERRIDE_SEP_OTHERS}
 
-    with st.expander('▶ 決算書・賃金台帳を差し替える（必要な場合のみ）', expanded=False):
+    # タスクに応じてタイトルを変える（決算書を使わないタスクで「決算書」と表示しない）
+    if task == 'wage_ledger_creation':
+        _expander_title = '▶ 賃金台帳・履歴事項を差し替える（必要な場合のみ）'
+    else:
+        _expander_title = '▶ 決算書・賃金台帳を差し替える（必要な場合のみ）'
+    with st.expander(_expander_title, expanded=False):
         st.caption(
             '通常は **自動検出のまま** で OK。'
             '誤選択リスクが高いのは決算書（複数期分混在）と賃金台帳（個人別×複数 / 空テンプレ混入）'
@@ -1536,8 +1563,8 @@ if data_source == 'Google Drive':
                     sz = 0
                 size_pairs.append((f['name'], sz))
             # 案件規模・処理時間・APIコスト予想（実行前にユーザーに把握してもらう）
-            _render_case_scale_estimate(size_pairs)
-            for w in _check_size_warnings(size_pairs):
+            _render_case_scale_estimate(size_pairs, task=task_type)
+            for w in _check_size_warnings(size_pairs, task=task_type):
                 st.warning(w)
 
             with st.expander('ファイル一覧（Drive上の場所）', expanded=False):
@@ -1657,9 +1684,9 @@ else:
         )
         # 案件規模・処理時間・APIコスト予想
         size_pairs_upload = [(f.name, f.size) for f in uploaded_files]
-        _render_case_scale_estimate(size_pairs_upload)
+        _render_case_scale_estimate(size_pairs_upload, task=task_type)
         # 容量・件数の事前警告（処理は続行可能、ユーザーに確認を促すだけ）
-        size_warnings = _check_size_warnings(size_pairs_upload)
+        size_warnings = _check_size_warnings(size_pairs_upload, task=task_type)
         for w in size_warnings:
             st.warning(w)
 
@@ -2128,4 +2155,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.10 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.11 | カラフルボックス株式会社')
