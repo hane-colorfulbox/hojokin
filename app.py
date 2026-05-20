@@ -175,6 +175,7 @@ TEMPLATE_OPTIONS = {
 TASK_OPTIONS = {
     '申請書作成のみ': 'application',
     '給与計算のみ': 'wage',
+    '一人当たり給与支給総額': 'per_employee_wage',
     '加点判定（賃金台帳）': 'bonus',
     '両方（申請書 + 給与計算）': 'all',
 }
@@ -329,7 +330,7 @@ def run_processing(
 
     # Extractor作成（加点判定もPDF/CSV対応のためAI経路を使用）
     extractor = None
-    if task_type in ('application', 'wage', 'all', 'bonus'):
+    if task_type in ('application', 'wage', 'per_employee_wage', 'all', 'bonus'):
         def _on_api_retry(attempt: int, max_attempts: int, wait: float, err: str):
             # Anthropic APIの一時エラー（422/429/5xx/529/timeout等）時の再試行をユーザーに通知
             try:
@@ -422,6 +423,26 @@ def run_processing(
             'pl_selected_filename': getattr(status, 'pl_selected_filename', ''),
             'pl_selected_end': getattr(status, 'pl_selected_end', ''),
             'pl_selection_warnings': getattr(status, 'pl_selection_warnings', []),
+        }
+
+    if task_type == 'per_employee_wage':
+        if progress_callback:
+            progress_callback('一人当たり給与支給総額を計算中...')
+
+        output_path = work_dir / f'{company_name}_一人当たり給与支給総額.xlsx'
+        status = run_wage_calculation(
+            resource_folder=work_dir,
+            company_name=company_name,
+            output_path=output_path,
+            extractor=extractor,
+            fiscal_month_override=fiscal_month_override,
+            selection_override=selection_override,
+            per_employee_only=True,
+        )
+        results['per_employee_wage'] = {
+            'status': status.status,
+            'message': status.message,
+            'output_path': output_path if status.status == '完了' else None,
         }
 
     if task_type == 'bonus':
@@ -564,7 +585,10 @@ with st.sidebar:
     task_label = st.selectbox(
         '実行タスク',
         list(TASK_OPTIONS.keys()),
-        help='申請書作成：ヒアリングシート+各種PDFから申請書を自動作成。給与計算：損益計算書+賃金データから給与支給総額を計算。加点判定：賃金台帳から加点措置の対象かを判定。',
+        help='申請書作成：ヒアリングシート+各種PDFから申請書を自動作成。'
+             '給与計算：損益計算書+賃金データから給与支給総額を計算。'
+             '一人当たり給与支給総額：賃金台帳のみで計算（決算書PDFは参照しない／決算書由来の項目シートも削除）。'
+             '加点判定：賃金台帳から加点措置の対象かを判定。',
     )
     task_type = TASK_OPTIONS[task_label]
 
@@ -659,10 +683,11 @@ _FILE_CATEGORIES = [
 ]
 
 _REQUIRED_CATS_BY_TASK = {
-    'application': {'hearing', 'registry', 'pl'},
-    'wage':        {'wage_ledger'},
-    'bonus':       {'wage_ledger'},
-    'all':         {'hearing', 'registry', 'pl'},
+    'application':       {'hearing', 'registry', 'pl'},
+    'wage':              {'wage_ledger'},
+    'per_employee_wage': {'wage_ledger'},
+    'bonus':             {'wage_ledger'},
+    'all':               {'hearing', 'registry', 'pl'},
 }
 
 # カテゴリ別の許可拡張子（pipeline.FileDetector.ALLOWED_EXTS と整合）。
@@ -1618,6 +1643,12 @@ else:
     source_label = 'Google Drive' if data_source == 'Google Drive' else 'アップロード'
     if task_type == 'bonus':
         st.info(f'**{company_name}** の賃金台帳を分析して加点判定を行います（{source_label}）— 準備OKです')
+    elif task_type == 'per_employee_wage':
+        st.info(
+            f'**{company_name}** の賃金台帳から一人当たり給与支給総額を算定します'
+            f'（{source_label}）— 準備OKです\n\n'
+            '※決算書PDFは参照されません。決算書由来の8項目は出力Excelから自動削除されます。'
+        )
     else:
         st.info(f'**{company_name}** の書類を **{template_label}** で作成します（{source_label}）— 準備OKです')
 
@@ -1680,7 +1711,11 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
         detector = FileDetector(work_dir, selection_override=selection_override)
 
         # 処理実行
-        spinner_msg = '賃金台帳を分析中...' if task_type == 'bonus' else 'AIが資料を読み取り中...（1〜3分かかります）'
+        spinner_msg = (
+            '賃金台帳を分析中...'
+            if task_type in ('bonus', 'per_employee_wage')
+            else 'AIが資料を読み取り中...（1〜3分かかります）'
+        )
         with st.spinner(spinner_msg):
             results = run_processing(
                 company_name=company_name,
@@ -1815,6 +1850,7 @@ if 'last_results' in st.session_state:
         task_display_map = {
             'application': '📝 申請書作成',
             'wage': '💰 給与支給総額計算',
+            'per_employee_wage': '👤 一人当たり給与支給総額（賃金台帳のみ）',
             'bonus': '📊 加点判定',
         }
         task_display = task_display_map.get(task_name, task_name)
@@ -1990,4 +2026,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.6 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.7 | カラフルボックス株式会社')

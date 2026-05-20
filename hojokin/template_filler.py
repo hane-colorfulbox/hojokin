@@ -462,4 +462,79 @@ def fill_template(
     wb.close()
     logger.info(f'保存完了: {output_path}')
 
+
+# 「一人当たり給与支給総額」タスク向けに、給与支給総額計算シートから
+# 決算書PDF由来のセクション（【2026テンプレート転記用】＋見出し注記＋給料手当/雑給/賞与手当/
+# 売上高/粗利益/営業利益/経常利益/減価償却費）を機械的に削除する。
+# 賃金台帳のみを参照源としてシートを完成させる仕様。
+_PL_SECTION_HEADER_MARKER = '【2026テンプレート転記用】'
+_PL_SECTION_END_LABELS = (
+    '給料手当', '雑給', '賞与手当',
+    '売上高', '粗利益', '営業利益', '経常利益', '減価償却費',
+)
+
+
+def strip_pl_section_from_wage_sheet(output_path: Path) -> int:
+    """給与支給総額計算シートから決算書PDF由来セクションを削除する。
+
+    削除範囲: 「【2026テンプレート転記用】」見出し行から、その下の
+    決算書由来項目（給料手当〜減価償却費）の最後の行まで。
+    途中の空行・注記行（『※下記すべてAI抽出値…』等）も連帯して削除。
+
+    Returns:
+        削除した行数（0 ならセクションが見つからなかった）
+    """
+    if not output_path.exists():
+        logger.warning(f'strip_pl_section: 出力ファイル不在 {output_path}')
+        return 0
+
+    wb = openpyxl.load_workbook(output_path)
+    try:
+        target_sheet = '給与支給総額計算'
+        if target_sheet not in wb.sheetnames:
+            logger.warning(
+                f'strip_pl_section: シート「{target_sheet}」が見つからずスキップ'
+            )
+            return 0
+        ws = wb[target_sheet]
+
+        # 見出し行を B列で検索
+        header_row = None
+        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=2):
+            cell_b = row[1] if len(row) > 1 else None
+            if cell_b is not None and isinstance(cell_b.value, str) \
+                    and _PL_SECTION_HEADER_MARKER in cell_b.value:
+                header_row = cell_b.row
+                break
+
+        if header_row is None:
+            logger.info(
+                f'strip_pl_section: セクション見出し未検出のためスキップ '
+                f'(既に削除済みの可能性)'
+            )
+            return 0
+
+        # 見出し行以降で、決算書由来ラベル群の最終出現行を探す
+        last_target_row = header_row
+        for row in ws.iter_rows(
+            min_row=header_row, max_row=ws.max_row, max_col=2,
+        ):
+            cell_b = row[1] if len(row) > 1 else None
+            if cell_b is None or not isinstance(cell_b.value, str):
+                continue
+            label = cell_b.value.strip()
+            if any(label == end_label for end_label in _PL_SECTION_END_LABELS):
+                last_target_row = max(last_target_row, cell_b.row)
+
+        amount = last_target_row - header_row + 1
+        ws.delete_rows(header_row, amount)
+        logger.info(
+            f'strip_pl_section: 行{header_row}〜{last_target_row} ({amount}行) を削除'
+        )
+
+        wb.save(output_path)
+        return amount
+    finally:
+        wb.close()
+
     return empty

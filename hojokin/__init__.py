@@ -2,4 +2,4 @@
 """hojokin - IT導入補助金 書類自動作成システム"""
 from __future__ import annotations
 
-__version__ = '0.1.2'
+__version__ = '0.1.3'

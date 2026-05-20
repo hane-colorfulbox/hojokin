@@ -132,6 +132,21 @@ def cmd_local(args):
         if status.message:
             print(f'  {status.message}')
 
+    if args.task == 'per_employee_wage':
+        output_wage = folder / f'{company}_一人当たり給与支給総額.xlsx'
+
+        status = run_wage_calculation(
+            resource_folder=folder,
+            company_name=company,
+            output_path=output_wage,
+            extractor=extractor,
+            per_employee_only=True,
+        )
+
+        print(f'\n=== 一人当たり給与支給総額: {status.status} ===')
+        if status.message:
+            print(f'  {status.message}')
+
 
 def cmd_drive(args):
     """Google Drive連携実行"""
@@ -243,8 +258,9 @@ def main():
     local.add_argument('--template', default='通常枠_2026',
                        choices=['通常枠_2026', 'インボイス枠_2026'], help='テンプレートタイプ')
     local.add_argument('--template-path', help='テンプレートExcelの直接パス')
-    local.add_argument('--task', default='all', choices=['all', 'application', 'wage'],
-                       help='実行タスク')
+    local.add_argument('--task', default='all',
+                       choices=['all', 'application', 'wage', 'per_employee_wage'],
+                       help='実行タスク（per_employee_wage は賃金台帳のみで一人当たり給与支給総額を算定）')
     local.add_argument('--dry-run', action='store_true', help='APIなしでテスト実行')
 
     # Drive連携

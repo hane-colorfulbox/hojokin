@@ -328,7 +328,7 @@ class FileDetector:
     # 旧名 `_賃金台帳一覧` はユーザーが手動で作る入力ファイル名と衝突するため
     # マーカーから除外する（過去にツールが同名で出力していた経緯あり）。
     OUTPUT_FILE_MARKERS = (
-        '_AI版', '_給与支給総額計算',
+        '_AI版', '_給与支給総額計算', '_一人当たり給与支給総額',
         '_賃金台帳_AI集計',
         '_加点①', '_加点②',
     )
@@ -891,6 +891,7 @@ def run_wage_calculation(
     fiscal_month_override: int | None = None,
     cached_company: 'CompanyInfo | None' = None,
     selection_override: dict[str, list[Path]] | None = None,
+    per_employee_only: bool = False,
 ) -> ProcessingStatus:
     """
     タスク2: 給与支給総額計算の実行
@@ -900,10 +901,15 @@ def run_wage_calculation(
 
     fiscal_month_override (1〜12) が指定された場合、ユーザー指定の決算月で
     賃金台帳の対象期間（直近12ヶ月）を確定する。AI 推定とズレていれば警告。
+
+    per_employee_only=True のとき「一人当たり給与支給総額」タスクとして動作:
+        - 決算書PDF（損益計算書）は一切読まない
+        - 出力Excelから決算書由来セクション（給料手当〜減価償却費）を削除
+        - 賃金台帳のみが情報源
     """
     status = ProcessingStatus(
         company_name=company_name,
-        template_type='給与計算',
+        template_type='一人当たり給与支給総額' if per_employee_only else '給与計算',
         status='処理中',
     )
 
@@ -915,9 +921,14 @@ def run_wage_calculation(
         logger.info(detector.summary())
 
         # 損益計算書（任意: あれば精度向上）— キャッシュがあれば再利用
+        # per_employee_only モードでは PL を一切参照しない
         financial = cached_financial
         pl_period_warning = ''
-        if financial is None:
+        if per_employee_only:
+            from .models import FinancialData
+            financial = FinancialData()
+            logger.info('per_employee_only: 決算書PDFは参照せず賃金台帳のみで計算')
+        elif financial is None:
             pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
             _record_pl_selection(status, detector, pl_path, fiscal_month_override)
             if pl_path:
@@ -939,7 +950,8 @@ def run_wage_calculation(
             from .models import FinancialData
             if financial is None:
                 financial = FinancialData()
-            logger.info('損益計算書なし → 賃金台帳ベースで計算')
+            if not per_employee_only:
+                logger.info('損益計算書なし → 賃金台帳ベースで計算')
 
         # 賃金状況報告シートから従業員データ読取（あれば）
         employees_detail = None
@@ -1053,10 +1065,14 @@ def run_wage_calculation(
             fiscal_label = f'{financial.fiscal_year_start} ～ {financial.fiscal_year_end}'
 
         # データソース（ファイル名）— 人間チェックの突合用に各セクションに表示する
-        _pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
-        # cached_financial 経路で line 865 をスキップした場合に備えて、ここでも記録
-        if not status.pl_selected_filename:
-            _record_pl_selection(status, detector, _pl_path, fiscal_month_override)
+        # per_employee_only モードでは PL 関連の取得・検証も一切行わない
+        if per_employee_only:
+            _pl_path = None
+        else:
+            _pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
+            # cached_financial 経路で line 865 をスキップした場合に備えて、ここでも記録
+            if not status.pl_selected_filename:
+                _record_pl_selection(status, detector, _pl_path, fiscal_month_override)
         _ledger_paths = detector.get_all('wage_ledger')
         _wage_report = detector.get('wage_report')
         _registry = detector.get('registry')
@@ -1068,7 +1084,7 @@ def run_wage_calculation(
         # PDFテキスト層が無い画像PDFの場合は空辞書になる（フォールバック側で扱う）
         pl_value_pages: dict[str, list[int]] = {}
         pl_breakdown_verification: dict[str, dict] = {}
-        if _pl_path and financial is not None:
+        if _pl_path and financial is not None and not per_employee_only:
             try:
                 from .pdf_text_extractor import (
                     get_pdf_pages_text, find_value_pages,
@@ -1157,13 +1173,20 @@ def run_wage_calculation(
             source_files=source_files,
         )
 
+        # per_employee_only: 出力Excelから決算書PDF由来セクションを機械削除
+        if per_employee_only:
+            from .template_filler import strip_pl_section_from_wage_sheet
+            removed = strip_pl_section_from_wage_sheet(output_path)
+            logger.info(f'per_employee_only: 決算書由来セクション {removed}行を削除')
+
         # ユーザー指定の決算月 vs AI 推定の照合（警告のみ）
         _, fiscal_month_warning = _resolve_fiscal_period(financial, fiscal_month_override)
 
         status.status = '完了'
         status.output_files = [output_path.name]
-        status.message = '給与支給総額計算 完了' + fiscal_month_warning + pl_period_warning
-        logger.info(f'給与計算完了: {output_path.name}')
+        task_label = '一人当たり給与支給総額計算' if per_employee_only else '給与支給総額計算'
+        status.message = f'{task_label} 完了' + fiscal_month_warning + pl_period_warning
+        logger.info(f'{task_label} 完了: {output_path.name}')
 
     except Exception as e:
         from .ai_extractor import APICreditExhaustedError
