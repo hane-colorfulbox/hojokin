@@ -1036,6 +1036,21 @@ def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
         valid_hours = [h for h in monthly_hours if h is not None and h > 0]
         avg_hours = sum(valid_hours) / len(valid_hours) if valid_hours else 0.0
 
+        # 月給制（正社員 = 役員でもパートでもない）で時間データが部分的（12ヶ月のうち
+        # PARTIAL_HOURS_THRESHOLD 未満）の場合は、月給制と判断して時間情報を全 null にする。
+        # → 賃金台帳に「平日普通4時間、休日普通15時間」等の勤怠内訳が部分記録された月だけ
+        #    AI が拾ってしまい、後段で時給を誤計算する問題を回避。
+        PARTIAL_HOURS_THRESHOLD = 3  # 3ヶ月未満なら「月給制で部分記録」と判定
+        is_monthly_paid_full_time = not is_officer and not is_part
+        if is_monthly_paid_full_time and 0 < len(valid_hours) < PARTIAL_HOURS_THRESHOLD:
+            logger.info(
+                f'AI抽出補正: {emp_name} (正社員) は時間データが {len(valid_hours)}ヶ月のみで '
+                f'月給制と判断 → monthly_hours を全 null に補正'
+            )
+            monthly_hours = [None] * 12
+            valid_hours = []
+            avg_hours = 0.0
+
         # 労働時間が無い、または役員/パート以外で異常に少ない場合は労働日数×8hで補完
         needs_fallback = not valid_hours or (
             not is_officer
@@ -1047,7 +1062,14 @@ def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
                 d for d in monthly_work_days
                 if d is not None and isinstance(d, (int, float)) and d > 0
             ]
-            if valid_days:
+            # 正社員で労働日数も部分的（PARTIAL_HOURS_THRESHOLD 未満）の場合は補完しない
+            # → 中途入社月給制で、入社月だけ勤怠記録が残るケース対策
+            if is_monthly_paid_full_time and 0 < len(valid_days) < PARTIAL_HOURS_THRESHOLD:
+                logger.info(
+                    f'AI抽出補正: {emp_name} (正社員) は労働日数も {len(valid_days)}ヶ月のみで '
+                    '月給制と判断 → 労働日数×8h補完をスキップ'
+                )
+            elif valid_days:
                 old_avg = avg_hours
                 monthly_hours = [
                     float(d) * HOURS_PER_DAY if (d is not None and isinstance(d, (int, float)) and d > 0) else None

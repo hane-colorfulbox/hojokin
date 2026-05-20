@@ -553,17 +553,20 @@ def _write_employee_row(ws, row: int, no: int, emp: WageEmployee, is_kojin: bool
     """1名分のデータをテンプレ行に書き込む。"""
     ws.cell(row=row, column=COL_NO, value=no)
     ws.cell(row=row, column=COL_NAME, value=emp.name)
-    ws.cell(
-        row=row, column=COL_EMP_TYPE,
-        value=normalize_employment_type(emp.employment_type, is_kojin=is_kojin),
-    )
+    norm_type = normalize_employment_type(emp.employment_type, is_kojin=is_kojin)
+    ws.cell(row=row, column=COL_EMP_TYPE, value=norm_type)
 
-    # E列: 月間平均時間（>0 のみ書込、整数化）
-    if emp.monthly_avg_hours and emp.monthly_avg_hours > 0:
+    # 雇用形態が「正社員」または「役員」の場合、E列「月間平均時間」と F列「時給」は
+    # 出力しない（月給制が前提のため、AI が誤って値を入れても xlsx には載せない）。
+    # パート・アルバイトのみ時給情報を活用する設計（R215 FTE 換算）と整合させる。
+    skip_hours_and_rate = norm_type in ('正社員', '役員')
+
+    # E列: 月間平均時間（>0 かつ パートのみ書込、整数化）
+    if not skip_hours_and_rate and emp.monthly_avg_hours and emp.monthly_avg_hours > 0:
         ws.cell(row=row, column=COL_AVG_HOURS, value=round(emp.monthly_avg_hours, 1))
 
-    # F列: 時給（>0 のみ書込、整数化）
-    if emp.hourly_rate and emp.hourly_rate > 0:
+    # F列: 時給（>0 かつ パートのみ書込、整数化）
+    if not skip_hours_and_rate and emp.hourly_rate and emp.hourly_rate > 0:
         ws.cell(row=row, column=COL_HOURLY, value=int(round(emp.hourly_rate)))
 
     # G〜R列: monthly_wages[0..11]（カレンダー月そのまま）
