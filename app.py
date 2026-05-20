@@ -606,14 +606,18 @@ with st.sidebar:
         fiscal_month_override = int(fiscal_month_label.replace('月', ''))
 
     # 製造原価ありフラグ — 製造業向け。チェック時、AI に「製造原価報告書が存在する」ヒントを注入
-    has_cost_report_hint = st.checkbox(
-        '製造原価報告書あり（製造業向け）',
-        value=False,
-        help='製造業のお客様で「製造原価報告書」を提出いただいている場合はチェック。'
-             'AIの読み落としを防ぎ、損益計算書＋製造原価を統合して人件費を算出します。'
-             '（資料に製造原価報告書PDFがあれば自動検出されるため、'
-             '通常は自動検出に任せて構いません）',
-    )
+    # 決算書PDFを参照しないタスク（per_employee_wage / bonus）では意味を持たないため非表示
+    if task_type in ('per_employee_wage', 'bonus'):
+        has_cost_report_hint = False
+    else:
+        has_cost_report_hint = st.checkbox(
+            '製造原価報告書あり（製造業向け）',
+            value=False,
+            help='製造業のお客様で「製造原価報告書」を提出いただいている場合はチェック。'
+                 'AIの読み落としを防ぎ、損益計算書＋製造原価を統合して人件費を算出します。'
+                 '（資料に製造原価報告書PDFがあれば自動検出されるため、'
+                 '通常は自動検出に任せて構いません）',
+        )
 
     # Drive 格納オプション（データソースが Drive のときのみ有効化される）
     upload_to_drive = st.checkbox(
@@ -2026,4 +2030,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.7 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.8 | カラフルボックス株式会社')
