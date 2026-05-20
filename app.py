@@ -86,6 +86,7 @@ from hojokin.ai_extractor import create_extractor
 from hojokin.config import CLAUDE_API_KEY, detect_prefecture
 from hojokin.pipeline import (
     FileDetector, run_application_transfer, run_wage_calculation,
+    run_wage_ledger_conversion,
 )
 from hojokin.wage_reader import (
     read_wage_ledgers, judge_bonus_points,
@@ -177,6 +178,7 @@ TASK_OPTIONS = {
     '給与計算のみ': 'wage',
     '一人当たり給与支給総額': 'per_employee_wage',
     '加点判定（賃金台帳）': 'bonus',
+    '賃金台帳の作成': 'wage_ledger_creation',
     '両方（申請書 + 給与計算）': 'all',
 }
 
@@ -268,6 +270,28 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+
+def _find_wage_ledger_template(base_dir: Path) -> Path | None:
+    """賃金台帳テンプレート（ツール/賃金台帳テンプレート.xlsx）を解決する。
+
+    探索順:
+      1. base_dir / 'ツール' / '賃金台帳テンプレート.xlsx'
+      2. base_dir / '賃金台帳テンプレート.xlsx'
+      3. プロジェクトルート（このファイルの親） / 'ツール' / '賃金台帳テンプレート.xlsx'
+
+    存在するファイルを最初にヒットした順で返す。見つからなければ None。
+    """
+    target_name = '賃金台帳テンプレート.xlsx'
+    candidates = [
+        base_dir / 'ツール' / target_name,
+        base_dir / target_name,
+        Path(__file__).parent / 'ツール' / target_name,
+    ]
+    for p in candidates:
+        if p.exists() and not p.name.startswith('~$'):
+            return p
+    return None
 
 
 def find_template(base_dir: Path, template_type: str) -> Path | None:
@@ -455,6 +479,40 @@ def run_processing(
             selection_override=selection_override,
         )
 
+    if task_type == 'wage_ledger_creation':
+        if progress_callback:
+            progress_callback('賃金台帳を Document AI で読み取り中...')
+
+        # 賃金台帳テンプレートを解決（ツール/ または template_dir 直下）
+        wage_template_path = _find_wage_ledger_template(template_dir)
+        if wage_template_path is None:
+            results['wage_ledger_creation'] = {
+                'status': 'エラー',
+                'message': (
+                    '賃金台帳テンプレートが見つかりません。'
+                    '`ツール/賃金台帳テンプレート.xlsx` を配置してください。'
+                ),
+            }
+        else:
+            # 個人事業主テンプレ選択時の雇用形態正規化を切り替え
+            is_kojin = (template_type == 'インボイス枠_個人_2026')
+            output_path = work_dir / f'{company_name}_賃金台帳一覧.xlsx'
+            status = run_wage_ledger_conversion(
+                resource_folder=work_dir,
+                company_name=company_name,
+                template_path=wage_template_path,
+                output_path=output_path,
+                extractor=extractor,
+                fiscal_month_override=fiscal_month_override,
+                is_kojin=is_kojin,
+                selection_override=selection_override,
+            )
+            results['wage_ledger_creation'] = {
+                'status': status.status,
+                'message': status.message,
+                'output_path': output_path if status.status == '完了' else None,
+            }
+
     return results
 
 
@@ -588,7 +646,9 @@ with st.sidebar:
         help='申請書作成：ヒアリングシート+各種PDFから申請書を自動作成。'
              '給与計算：損益計算書+賃金データから給与支給総額を計算。'
              '一人当たり給与支給総額：賃金台帳のみで計算（決算書PDFは参照しない／決算書由来の項目シートも削除）。'
-             '加点判定：賃金台帳から加点措置の対象かを判定。',
+             '加点判定：賃金台帳から加点措置の対象かを判定。'
+             '賃金台帳の作成：賃金台帳PDFをツール規格のExcelに自動変換'
+             '（Document AI使用、手書きPDF以外はそのままお任せ可）。',
     )
     task_type = TASK_OPTIONS[task_label]
 
@@ -606,8 +666,8 @@ with st.sidebar:
         fiscal_month_override = int(fiscal_month_label.replace('月', ''))
 
     # 製造原価ありフラグ — 製造業向け。チェック時、AI に「製造原価報告書が存在する」ヒントを注入
-    # 決算書PDFを参照しないタスク（per_employee_wage / bonus）では意味を持たないため非表示
-    if task_type in ('per_employee_wage', 'bonus'):
+    # 決算書PDFを参照しないタスク（per_employee_wage / bonus / wage_ledger_creation）では非表示
+    if task_type in ('per_employee_wage', 'bonus', 'wage_ledger_creation'):
         has_cost_report_hint = False
     else:
         has_cost_report_hint = st.checkbox(
@@ -687,11 +747,12 @@ _FILE_CATEGORIES = [
 ]
 
 _REQUIRED_CATS_BY_TASK = {
-    'application':       {'hearing', 'registry', 'pl'},
-    'wage':              {'wage_ledger'},
-    'per_employee_wage': {'wage_ledger'},
-    'bonus':             {'wage_ledger'},
-    'all':               {'hearing', 'registry', 'pl'},
+    'application':           {'hearing', 'registry', 'pl'},
+    'wage':                  {'wage_ledger'},
+    'per_employee_wage':     {'wage_ledger'},
+    'bonus':                 {'wage_ledger'},
+    'wage_ledger_creation':  {'wage_ledger'},
+    'all':                   {'hearing', 'registry', 'pl'},
 }
 
 # カテゴリ別の許可拡張子（pipeline.FileDetector.ALLOWED_EXTS と整合）。
@@ -708,10 +769,28 @@ _UI_ALLOWED_EXTS = {
     'wage_ledger': {'.xlsx', '.xlsm', '.csv'},  # 2026-05 方針: PDF/.xls 除外
 }
 
+# 「賃金台帳の作成」タスク専用: 賃金台帳PDF も受け付ける
+_UI_ALLOWED_EXTS_WAGE_LEDGER_CREATION = {
+    **_UI_ALLOWED_EXTS,
+    'wage_ledger': {'.xlsx', '.xlsm', '.csv', '.pdf'},
+}
+
+
+def _get_ui_allowed_exts(task: str | None) -> dict:
+    """タスクに応じた UI 許可拡張子テーブルを返す。
+
+    「賃金台帳の作成」タスクのみ賃金台帳カテゴリで PDF を許可する。
+    他タスクは PDF 賃金台帳を弾く（ローカル変換運用のまま）。
+    """
+    if task == 'wage_ledger_creation':
+        return _UI_ALLOWED_EXTS_WAGE_LEDGER_CREATION
+    return _UI_ALLOWED_EXTS
+
 
 def _analyze_files(file_names, task):
     """ファイル名リストからタスク別の判別結果を計算"""
     required_cats = _REQUIRED_CATS_BY_TASK.get(task, set())
+    allowed_table = _get_ui_allowed_exts(task)
 
     detected = {cat: [] for cat, _, _ in _FILE_CATEGORIES}
     unmatched = []
@@ -724,7 +803,7 @@ def _analyze_files(file_names, task):
             if any(kw in name_nfc for kw in keywords):
                 # 拡張子が許可外なら検出に加えず unmatched 行きにする
                 # （後段で「必須あり」判定が誤って通るのを防ぐ）
-                allowed = _UI_ALLOWED_EXTS.get(cat)
+                allowed = allowed_table.get(cat)
                 if allowed is not None and ext not in allowed:
                     unmatched.append(name)
                     matched = True
@@ -1017,7 +1096,10 @@ _OVERRIDE_UI_CATS = {'pl', 'wage_ledger'}
 _MULTI_SELECT_CATS = {'wage_ledger'}
 
 
-def _categorize_for_ui(file_names: list[str]) -> dict[str, dict[str, list[str]]]:
+def _categorize_for_ui(
+    file_names: list[str],
+    task: str | None = None,
+) -> dict[str, dict[str, list[str]]]:
     """ファイル名をカテゴリ別に「推奨候補」「その他候補」「全候補」に分類する。
 
     - recommended: ファイル名キーワード一致 + 拡張子許可 → 自動検出と同じ判定
@@ -1026,7 +1108,10 @@ def _categorize_for_ui(file_names: list[str]) -> dict[str, dict[str, list[str]]]
 
     例: PL カテゴリで「PL_R7.pdf」はキーワード（決算書/損益計算書）を含まないが
     `_UI_ALLOWED_EXTS['pl'] = {'.pdf'}` を満たすので others に入る。
+
+    task='wage_ledger_creation' のときは賃金台帳PDFも許可される。
     """
+    allowed_table = _get_ui_allowed_exts(task)
     result: dict[str, dict[str, list[str]]] = {
         cat: {'recommended': [], 'others': [], 'all': []}
         for cat, _, _ in _FILE_CATEGORIES
@@ -1038,7 +1123,7 @@ def _categorize_for_ui(file_names: list[str]) -> dict[str, dict[str, list[str]]]
         ext = Path(name_nfc).suffix.lower()
         for cat, _, keywords in _FILE_CATEGORIES:
             if any(kw in name_nfc for kw in keywords):
-                allowed = _UI_ALLOWED_EXTS.get(cat)
+                allowed = allowed_table.get(cat)
                 if allowed is not None and ext not in allowed:
                     break  # 拡張子NG → 他カテゴリも試さない（_analyze_files と整合）
                 result[cat]['recommended'].append(name)
@@ -1051,7 +1136,7 @@ def _categorize_for_ui(file_names: list[str]) -> dict[str, dict[str, list[str]]]
         name_nfc = unicodedata.normalize('NFC', name)
         ext = Path(name_nfc).suffix.lower()
         for cat, _, _kw in _FILE_CATEGORIES:
-            allowed = _UI_ALLOWED_EXTS.get(cat)
+            allowed = allowed_table.get(cat)
             if allowed is not None and ext not in allowed:
                 continue
             if name in result[cat]['recommended']:
@@ -1096,7 +1181,7 @@ def _auto_selected_for_display(category: str, recommended: list[str]) -> str | N
 
 
 def _render_file_selection_override(
-    file_names: list[str], case_key: str,
+    file_names: list[str], case_key: str, task: str | None = None,
 ) -> dict[str, list[str] | None]:
     """検出カテゴリ別の候補ファイルを差し替え可能な UI で表示し、選択結果を返す。
 
@@ -1109,7 +1194,7 @@ def _render_file_selection_override(
             - None: 自動検出に従う（override なし）
             - list[str]: ユーザー指定（[] は「対象外」）
     """
-    cat_info = _categorize_for_ui(file_names)
+    cat_info = _categorize_for_ui(file_names, task=task)
     # 差し替え UI 表示対象は _OVERRIDE_UI_CATS に絞る（pl と wage_ledger のみ）。
     # 候補（推奨 or その他）が 1 件以上あるカテゴリだけ実際に描画。
     visible = [
@@ -1245,13 +1330,14 @@ def _check_required_by_names(file_names, task, name_override=None):
     # NFD（macOS の濁点分離形式）でも比較が通るよう NFC 化してから判定
     names_nfc = [unicodedata.normalize('NFC', n) for n in file_names]
     required_cats = _REQUIRED_CATS_BY_TASK.get(task, set())
+    allowed_table = _get_ui_allowed_exts(task)
     name_override = name_override or {}
 
     _SENTINEL = object()  # 「override に key が存在しない」を None と区別するための番兵
     for cat, _, keywords in _FILE_CATEGORIES:
         if cat not in required_cats:
             continue
-        allowed = _UI_ALLOWED_EXTS.get(cat)
+        allowed = allowed_table.get(cat)
 
         # 1) ユーザー override に明示エントリがあれば優先
         override_val = name_override.get(cat, _SENTINEL)
@@ -1438,6 +1524,7 @@ if data_source == 'Google Drive':
             selection_override_names = _render_file_selection_override(
                 [f['name'] for f in all_files],
                 case_key=f'drive_{drive_folder_id}',
+                task=task_type,
             )
             # 容量・件数の事前警告（Drive ファイルのサイズは f['size'] が文字列の場合があるので int 変換）
             size_pairs = []
@@ -1566,6 +1653,7 @@ else:
         selection_override_names = _render_file_selection_override(
             [f.name for f in uploaded_files],
             case_key=_upload_case_key,
+            task=task_type,
         )
         # 案件規模・処理時間・APIコスト予想
         size_pairs_upload = [(f.name, f.size) for f in uploaded_files]
@@ -1653,6 +1741,14 @@ else:
             f'（{source_label}）— 準備OKです\n\n'
             '※決算書PDFは参照されません。決算書由来の8項目は出力Excelから自動削除されます。'
         )
+    elif task_type == 'wage_ledger_creation':
+        st.info(
+            f'**{company_name}** の賃金台帳 PDF/Excel/CSV をツール規格の Excel に変換します'
+            f'（{source_label}）— 準備OKです\n\n'
+            '※ Document AI で抽出します（Sonnet 画像直送のフォールバックは無効）。'
+            '手書きPDF は処理を続行しつつ警告を出します。'
+            '出力ファイルはこのまま給与計算/加点判定の入力にも使えます。'
+        )
     else:
         st.info(f'**{company_name}** の書類を **{template_label}** で作成します（{source_label}）— 準備OKです')
 
@@ -1715,11 +1811,12 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
         detector = FileDetector(work_dir, selection_override=selection_override)
 
         # 処理実行
-        spinner_msg = (
-            '賃金台帳を分析中...'
-            if task_type in ('bonus', 'per_employee_wage')
-            else 'AIが資料を読み取り中...（1〜3分かかります）'
-        )
+        if task_type == 'wage_ledger_creation':
+            spinner_msg = '賃金台帳PDFを Document AI で抽出中...（1〜3分かかります）'
+        elif task_type in ('bonus', 'per_employee_wage'):
+            spinner_msg = '賃金台帳を分析中...'
+        else:
+            spinner_msg = 'AIが資料を読み取り中...（1〜3分かかります）'
         with st.spinner(spinner_msg):
             results = run_processing(
                 company_name=company_name,
@@ -1856,6 +1953,7 @@ if 'last_results' in st.session_state:
             'wage': '💰 給与支給総額計算',
             'per_employee_wage': '👤 一人当たり給与支給総額（賃金台帳のみ）',
             'bonus': '📊 加点判定',
+            'wage_ledger_creation': '📑 賃金台帳の作成（PDF→ツール規格Excel）',
         }
         task_display = task_display_map.get(task_name, task_name)
 
@@ -2030,4 +2128,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.8 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.10 | カラフルボックス株式会社')

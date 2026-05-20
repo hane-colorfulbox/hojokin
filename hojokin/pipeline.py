@@ -355,6 +355,7 @@ class FileDetector:
         self,
         folder: Path,
         selection_override: dict[str, list[Path]] | None = None,
+        extra_allowed_exts: dict[str, set[str]] | None = None,
     ):
         """フォルダをスキャンしてファイルを自動分類する。
 
@@ -365,6 +366,10 @@ class FileDetector:
                 自動選定ロジックもバイパスする（手動指定 = ユーザーの責任で確定）。
                 値が None または欠落のカテゴリは自動検出を維持。
                 値が `[]` のカテゴリは「対象外」として明示的に空にする。
+            extra_allowed_exts: カテゴリ別の許可拡張子を一時的に追加する。
+                例: 「賃金台帳の作成」タスクで `{'wage_ledger': {'.pdf'}}` を渡せば
+                通常は除外される賃金台帳PDFも検出対象になる。
+                クラス属性 ALLOWED_EXTS の合集合で評価。
         """
         self.folder = folder
         self.files: dict[str, list[Path]] = {k: [] for k in self.PATTERNS}
@@ -373,6 +378,16 @@ class FileDetector:
         self.pl_selection_warnings: list[str] = []
         # ユーザーが UI で明示指定したカテゴリ集合（get_pl_latest のバイパス判定で使う）
         self._manual_categories: set[str] = set()
+        # インスタンス別の許可拡張子テーブル（クラス属性の複製 + 追加分のマージ）
+        self.allowed_exts: dict[str, set[str]] = {
+            k: set(v) for k, v in self.ALLOWED_EXTS.items()
+        }
+        if extra_allowed_exts:
+            for cat, exts in extra_allowed_exts.items():
+                if cat in self.allowed_exts:
+                    self.allowed_exts[cat] |= set(exts)
+                else:
+                    self.allowed_exts[cat] = set(exts)
         self._scan()
         if selection_override:
             self._apply_override(selection_override)
@@ -419,7 +434,7 @@ class FileDetector:
                 continue
             for category, keywords in self.PATTERNS.items():
                 if any(kw in name_nfc for kw in keywords):
-                    allowed = self.ALLOWED_EXTS.get(category)
+                    allowed = self.allowed_exts.get(category)
                     if allowed is not None and p.suffix.lower() not in allowed:
                         self.skipped.append((category, p.name, f'拡張子{p.suffix}は{category}では非対応'))
                         logger.info(f'除外: [{category}] {p.name} (許可拡張子: {sorted(allowed)})')
@@ -1828,6 +1843,221 @@ def _read_wage_report(path: Path) -> tuple[list[dict], int, int, int]:
     seishain = [e for e in employees if e['type'] == '正社員']
     part = [e for e in employees if e['type'] != '正社員']
     return employees, len(seishain), len(part), yakuin_hoshu_3m
+
+
+def run_wage_ledger_conversion(
+    resource_folder: Path,
+    company_name: str,
+    template_path: Path,
+    output_path: Path,
+    extractor: BaseExtractor | None = None,
+    fiscal_month_override: int | None = None,
+    is_kojin: bool = False,
+    selection_override: dict[str, list[Path]] | None = None,
+) -> ProcessingStatus:
+    """タスク「賃金台帳の作成」: PDF/Excel/CSV → ツール規格 Excel 賃金台帳一覧。
+
+    Document AI + Sonnet 4.6 一本で抽出する（Sonnet 画像経路フォールバックは無効）。
+    Document AI が失敗した場合は明示エラーで停止し、
+    ローカル（Claude Code）での手動変換を案内する。
+
+    Args:
+        resource_folder: 入力ファイルの置き場（FileDetector で wage_ledger を取得）
+        company_name: 出力ファイル名・タイトルに使用
+        template_path: 賃金台帳テンプレートExcel (`ツール/賃金台帳テンプレート.xlsx`)
+        output_path: 出力 xlsx のパス（通常 `{会社名}_賃金台帳一覧.xlsx`）
+        extractor: AI 抽出器（None なら新規作成）
+        fiscal_month_override: 決算月（1〜12）。AI への事業年度フィルタ用
+        is_kojin: 個人事業主テンプレ選択時に True（雇用形態正規化が変わる）
+        selection_override: ファイル手動選択
+
+    Returns:
+        ProcessingStatus（status: '完了' / 'エラー'）
+    """
+    from .ai_extractor import APICreditExhaustedError, ImageFallbackBlockedError
+    from .wage_ledger_writer import (
+        detect_handwritten_pdf,
+        write_wage_ledger_to_template,
+    )
+    from .models import FinancialData
+
+    status = ProcessingStatus(
+        company_name=company_name,
+        template_type='賃金台帳の作成',
+        status='処理中',
+    )
+
+    try:
+        if extractor is None:
+            extractor = create_extractor(CLAUDE_API_KEY)
+
+        # 賃金台帳の作成タスクでは PDF も賃金台帳カテゴリで受け付ける（拡張子追加）
+        # 履歴事項PDF（registry）も役員照合のために検出対象に含める
+        detector = FileDetector(
+            resource_folder,
+            selection_override=selection_override,
+            extra_allowed_exts={'wage_ledger': {'.pdf'}},
+        )
+        logger.info(detector.summary())
+
+        wage_files = detector.get_all('wage_ledger')
+        registry_path = detector.get('registry')
+        if not wage_files:
+            status.status = 'エラー'
+            status.message = (
+                '賃金台帳ファイルが見つかりません。'
+                'PDF/Excel/CSV のいずれかをアップロードしてください'
+                '（ファイル名に「賃金台帳」または「給与台帳」を含めてください）。'
+            )
+            return status
+
+        # 決算月から事業年度ヒント文字列を組み立てる（決算書 PDF は読まない）
+        fiscal_hint, _ = _resolve_fiscal_period(FinancialData(), fiscal_month_override)
+        logger.info(
+            f'賃金台帳作成: 対象期間ヒント={fiscal_hint or "(指定なし)"} / '
+            f'対象ファイル={len(wage_files)}件'
+        )
+
+        # PDF ファイルだけ手書き判定（テキスト層が薄ければ警告対象に乗せる）
+        handwritten_files: list[str] = []
+        for f in wage_files:
+            if f.suffix.lower() == '.pdf':
+                is_handwritten, reason = detect_handwritten_pdf(f)
+                if is_handwritten:
+                    handwritten_files.append(f.name)
+                    logger.warning(
+                        f'手書きPDF判定: {f.name} ({reason}) — 抽出は継続、精度低下警告を出力'
+                    )
+
+        # ── 履歴事項PDFがあれば役員リストを取得（A 改善: 役員自動判定の最優先経路） ──
+        officer_names: list[str] = []
+        if registry_path:
+            try:
+                from .pdf_reader import pdf_to_images
+                images = pdf_to_images(registry_path)
+                company_info = extractor.extract_registry(images)
+                if company_info:
+                    if company_info.representative_name:
+                        officer_names.append(company_info.representative_name)
+                    for o in company_info.officers or []:
+                        n = (o.get('name') if isinstance(o, dict) else getattr(o, 'name', '')) or ''
+                        if n:
+                            officer_names.append(n)
+                    logger.info(
+                        f'履歴事項PDF: {registry_path.name} → 役員{len(officer_names)}名 '
+                        f'({officer_names})'
+                    )
+            except APICreditExhaustedError:
+                # 残高切れは賃金台帳抽出にも失敗するので即停止せず、後段の挙動に任せる
+                logger.warning('履歴事項PDF抽出で残高切れ — 役員自動判定はスキップして続行')
+            except Exception as e:
+                logger.warning(
+                    f'履歴事項PDF抽出失敗: {e} — 役員自動判定はスキップして続行'
+                )
+
+        # AI抽出（Document AI 一本、Sonnet 画像フォールバック無効）
+        try:
+            employees = read_wage_ledgers(
+                wage_files,
+                extractor=extractor,
+                fiscal_period_hint=fiscal_hint,
+                disable_image_fallback=True,
+            )
+        except ImageFallbackBlockedError as e:
+            status.status = 'エラー'
+            status.message = (
+                f'⛔ Document AI で賃金台帳を抽出できませんでした（{str(e).split("。")[0]}）。'
+                'PDF が画像品質的に Document AI で読めない可能性があります。'
+                'ローカル（Claude Code）で手動変換してください — '
+                'docs/賃金台帳変換手順_CC向け.md 参照。'
+            )
+            logger.error(f'画像フォールバック禁止のため停止: {e}')
+            return status
+        except APICreditExhaustedError as e:
+            status.status = 'エラー'
+            status.message = (
+                f'⛔ API残高切れで抽出を継続できませんでした（{e}）。'
+                'API残高をチャージしてから再実行してください。'
+            )
+            return status
+
+        if not employees:
+            status.status = 'エラー'
+            status.message = (
+                '⛔ 賃金台帳から従業員データを抽出できませんでした。'
+                'PDF原本を確認し、レイアウトが極端に崩れていないか、'
+                '手書きでないかをチェックしてください。'
+            )
+            return status
+
+        # 抽出経路ラベルをログから推定（直近の API 送信ログに記録される path=... を拾えないため、
+        # ここではフラグ状態から推測する）
+        from .config import (
+            USE_DOCUMENT_AI_SONNET_EXTRACTION,
+            USE_OCR_HAIKU_EXTRACTION,
+            USE_DOCUMENT_AI_OCR,
+        )
+        if USE_DOCUMENT_AI_SONNET_EXTRACTION:
+            extraction_path = 'C(DocAI+Sonnet)'
+        elif USE_OCR_HAIKU_EXTRACTION:
+            extraction_path = 'B(DocAI+Haiku)'
+        elif USE_DOCUMENT_AI_OCR:
+            extraction_path = 'C-implicit(DocAI+Sonnet)'
+        else:
+            extraction_path = 'TextOnly(Sonnet)'
+
+        # データソースファイル名一覧（変換メモシート用）
+        data_source_files = [f.name for f in wage_files]
+        if registry_path:
+            data_source_files.append(f'{registry_path.name}（履歴事項 — 役員照合用）')
+
+        # テンプレートに書込
+        write_result = write_wage_ledger_to_template(
+            employees,
+            template_path=template_path,
+            output_path=output_path,
+            company_name=company_name,
+            fiscal_month=fiscal_month_override,
+            is_kojin=is_kojin,
+            extraction_path=extraction_path,
+            handwritten_files=handwritten_files,
+            officer_names=officer_names,
+            data_source_files=data_source_files,
+        )
+
+        # ステータスメッセージ
+        msg_parts = [f'完了。検出 {write_result.employee_count}名']
+        if write_result.officer_count > 0:
+            msg_parts.append(f'役員{write_result.officer_count}名')
+        if write_result.officer_matches:
+            msg_parts.append(f'履歴事項照合 {len(write_result.officer_matches)}名 → 役員上書き')
+        if write_result.officer_suspects:
+            msg_parts.append(
+                f'⚠ 役員疑い {len(write_result.officer_suspects)}名 — 変換メモシートで確認'
+            )
+        if write_result.part_time_missing:
+            msg_parts.append(
+                f'⚠ パート時間欠落 {len(write_result.part_time_missing)}名 — '
+                f'所定労働時間の手入力が必要'
+            )
+        if write_result.midyear_count > 0:
+            msg_parts.append(f'中途入退社{write_result.midyear_count}名')
+        if handwritten_files:
+            msg_parts.append(
+                f'⚠ 手書きPDF {len(handwritten_files)}件 — 精度低下の可能性あり、原本照合必須'
+            )
+
+        status.status = '完了'
+        status.message = ' / '.join(msg_parts)
+        status.output_files = [output_path.name]
+        status.ledger_employees = employees
+        return status
+
+    except Exception as e:
+        logger.exception(f'賃金台帳作成タスクで予期しないエラー: {e}')
+        status.status = 'エラー'
+        status.message = f'予期しないエラーが発生しました: {e}'
+        return status
 
 
 def run_full_pipeline(

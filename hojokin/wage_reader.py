@@ -77,6 +77,10 @@ class WageEmployee:
     )
     # データソース（抽出根拠の元ファイル名）。複数ファイル統合時は '統合(Nファイル)'
     source_file: str = ''
+    # 年間通勤手当（非課税分のみ、円）。AI が抽出できた場合のみ > 0。
+    # R216 算定対象から除外するため、ツール側で在籍月数で均等割して各月から減算する。
+    # 既存呼出は 0.0（未設定）で動作、賃金台帳の作成タスクで S列に書き出す用途に使う。
+    annual_transport_allowance: float = 0.0
 
     @property
     def is_full_year(self) -> bool:
@@ -1068,6 +1072,15 @@ def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
         valid_hourly = [h for h in monthly_hourly_rates if h is not None and h > 0]
         avg_hourly = sum(valid_hourly) / len(valid_hourly) if valid_hourly else 0.0
 
+        # 年間通勤手当（AI が抽出できた場合のみ取得、なければ 0）
+        atransport = emp.get('annual_transport_allowance', 0)
+        try:
+            atransport_val = float(atransport) if atransport is not None else 0.0
+        except (TypeError, ValueError):
+            atransport_val = 0.0
+        if atransport_val < 0:
+            atransport_val = 0.0  # 負値は無視
+
         employees.append(WageEmployee(
             no=i + 1,
             name=emp_name,
@@ -1077,6 +1090,7 @@ def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
             monthly_wages=monthly_wages,
             monthly_hourly_rates=monthly_hourly_rates,
             monthly_hours=monthly_hours,
+            annual_transport_allowance=atransport_val,
         ))
     return employees
 
@@ -1085,11 +1099,18 @@ def read_wage_ledgers_with_ai(
     file_paths: list[Path],
     extractor,
     fiscal_period_hint: str | None = None,
+    *,
+    disable_image_fallback: bool = False,
 ) -> list[WageEmployee]:
     """
     AI による賃金台帳読み取り。
     Excel(.xlsx/.xlsm)・CSV は TSV に変換、PDF はそのまま添付して1回の API 呼出しで抽出する。
     各フォーマット混在も可。バリデーション失敗時は空リストを返す（呼出し側で fallback 判断）。
+
+    Args:
+        disable_image_fallback: True の場合、Document AI 失敗時に Sonnet 画像経路へ
+            落ちる前に ImageFallbackBlockedError が送出される（伝播してくる）。
+            「賃金台帳の作成」タスク向け。
     """
     if not file_paths:
         return []
@@ -1151,11 +1172,12 @@ def read_wage_ledgers_with_ai(
             combined_tsv,
             fiscal_period_hint,
             pdf_files=pdf_files if pdf_files else None,
+            disable_image_fallback=disable_image_fallback,
         )
     except Exception as e:
-        # API残高切れは pipeline で全体停止する必要があるので再 raise
-        from .ai_extractor import APICreditExhaustedError
-        if isinstance(e, APICreditExhaustedError):
+        # API残高切れ・画像フォールバック禁止例外は pipeline で全体停止する必要があるので再 raise
+        from .ai_extractor import APICreditExhaustedError, ImageFallbackBlockedError
+        if isinstance(e, (APICreditExhaustedError, ImageFallbackBlockedError)):
             raise
         logger.error(f'AI抽出例外: {e}', exc_info=True)
         return []
@@ -1468,6 +1490,8 @@ def read_wage_ledgers(
     file_paths: list[Path],
     extractor=None,
     fiscal_period_hint: str | None = None,
+    *,
+    disable_image_fallback: bool = False,
 ) -> list[WageEmployee]:
     """
     複数の賃金台帳ファイルを読み、同名の従業員をマージして返す。
@@ -1478,6 +1502,11 @@ def read_wage_ledgers(
 
     最終結果は NFKC 正規化キー（全空白除去）で同一人物の重複を統合する。
     'A' / 'A ' / 'A　' / 'Ａ' のような表記揺れを 1 人として扱う。
+
+    Args:
+        disable_image_fallback: True の場合、Document AI 失敗時に Sonnet 画像経路への
+            フォールバックを禁止する（ImageFallbackBlockedError を送出）。
+            「賃金台帳の作成」タスクで Document AI 一本に絞る用途。
     """
     if not file_paths:
         return []
@@ -1487,7 +1516,8 @@ def read_wage_ledgers(
         from .config import USE_AI_WAGE_EXTRACTION
         if USE_AI_WAGE_EXTRACTION:
             ai_employees = read_wage_ledgers_with_ai(
-                file_paths, extractor, fiscal_period_hint
+                file_paths, extractor, fiscal_period_hint,
+                disable_image_fallback=disable_image_fallback,
             )
             if ai_employees:
                 ai_employees = _dedupe_employees_by_normalized_name(ai_employees)

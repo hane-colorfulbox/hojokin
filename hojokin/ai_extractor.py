@@ -53,6 +53,17 @@ class APICreditExhaustedError(RuntimeError):
     pass
 
 
+class ImageFallbackBlockedError(RuntimeError):
+    """Document AI / ローカルテキスト抽出が失敗した状態で、
+    画像経路（Sonnet 画像直送）フォールバックが明示的に禁止されているときの例外。
+
+    「賃金台帳の作成」タスクで Document AI 一本に絞る用途で使用される
+    （extract_wage_ledger(disable_image_fallback=True)）。
+    呼出側は本例外を捕捉して、ユーザーに「ローカルで手動変換してください」を案内する。
+    """
+    pass
+
+
 # ============================================================
 # 賃金台帳PDF分割・マージ ヘルパ
 # ============================================================
@@ -765,12 +776,17 @@ PROMPT_WAGE_LEDGER_STATIC = """**最優先指示: 出力は ```json コードブ
 
 【抽出ルール】
 1. 全シート・全テーブルを横断して、登場するすべての従業員を抽出してください。
-2. monthly_wages: 月別の課税支給合計（または支給合計、税込支給額、給与+賞与の合算）。
+2. monthly_wages: 月別の **課税支給合計**（最優先）。明示列がなければ「支給合計」「税込支給額」「給与+賞与の合算」。
    - **★ 配列の Index は必ず西暦/和暦カレンダーの月で固定**: Index 0=1月, Index 1=2月, ..., Index 11=12月
    - **★ 台帳の列の物理的順序とは無関係**: 例えば「R6.12月, R7.1月, R7.2月, ..., R7.11月」の順で並んでいても、
      R7.1月→Index 0, R7.2月→Index 1, ..., R7.11月→Index 10, **R6.12月→Index 11** に格納する
    - **★ 24ヶ月以上ある台帳**: 同じ月（例: R6.5月とR7.5月）は重複しないため、対象期間（後述の【期間フィルタ】参照）の月だけ抽出する
    - データがない月は null
+2-b. annual_transport_allowance（**任意・取れる場合のみ**）: 年間の **非課税通勤手当** 合計（円、整数）。
+   - 賃金台帳に「通勤手当」「通勤費」列があり、かつ非課税扱い（通常は月15万円以下なら全額非課税）の場合に、その12ヶ月合計を返す。
+   - monthly_wages に「課税支給合計」を入れた場合は **通勤費は既に除外済み** なので、annual_transport_allowance は 0 または省略してよい。
+   - monthly_wages に「支給合計（通勤費込み）」しか入れられなかった場合は、ここで年間通勤手当の合計を返す（補助金ツールが在籍月数で均等割減算するため）。
+   - 不明・該当列なしなら 0 または省略可。
 3. monthly_hours: 月別の **総労働時間 / 実労働時間 / 所定労働時間**。Index は monthly_wages と同じ規則（Index 0=1月固定）。
    - **重要**: 「残業時間」「所定時間外」「時間外労働」は労働時間ではありません。混同しないでください。
    - 賃金台帳に労働時間の欄が存在しない（労働日数のみ等）場合は **必ず null** にしてください。推測値は禁止。
@@ -804,7 +820,8 @@ PROMPT_WAGE_LEDGER_STATIC = """**最優先指示: 出力は ```json コードブ
     "employment_type": "正社員",
     "monthly_wages": [430000, 316000, null, null, null, null, null, null, null, null, null, null],
     "monthly_hours": [160, 160, null, null, null, null, null, null, null, null, null, null],
-    "monthly_work_days": [20, 21, null, null, null, null, null, null, null, null, null, null]
+    "monthly_work_days": [20, 21, null, null, null, null, null, null, null, null, null, null],
+    "annual_transport_allowance": 0
   }
 ]
 ```
@@ -838,12 +855,16 @@ PROMPT_WAGE_LEDGER = """**最優先指示: 出力は ```json コードブロッ�
 
 【抽出ルール】
 1. 全シート・全テーブルを横断して、登場するすべての従業員を抽出してください。
-2. monthly_wages: 月別の課税支給合計（または支給合計、税込支給額、給与+賞与の合算）。
+2. monthly_wages: 月別の **課税支給合計**（最優先）。明示列がなければ「支給合計」「税込支給額」「給与+賞与の合算」。
    - **★ 配列の Index は必ず西暦/和暦カレンダーの月で固定**: Index 0=1月, Index 1=2月, ..., Index 11=12月
    - **★ 台帳の列の物理的順序とは無関係**: 例えば「R6.12月, R7.1月, R7.2月, ..., R7.11月」の順で並んでいても、
      R7.1月→Index 0, R7.2月→Index 1, ..., R7.11月→Index 10, **R6.12月→Index 11** に格納する
    - **★ 24ヶ月以上ある台帳**: 同じ月（例: R6.5月とR7.5月）は重複しないため、対象期間（{fiscal_period_section}参照）の月だけ抽出する
    - データがない月は null
+2-b. annual_transport_allowance（**任意・取れる場合のみ**）: 年間の **非課税通勤手当** 合計（円、整数）。
+   - monthly_wages が「課税支給合計」なら通勤費は既に除外済み → 0 または省略でよい。
+   - monthly_wages が「支給合計（通勤費込み）」なら、ここで年間通勤手当の合計を返すこと（後段ツールが減算する）。
+   - 不明なら 0 または省略可。
 3. monthly_hours: 月別の **総労働時間 / 実労働時間 / 所定労働時間**。Index は monthly_wages と同じ規則（Index 0=1月固定）。
    - **重要**: 「残業時間」「所定時間外」「時間外労働」は労働時間ではありません。混同しないでください。
    - 賃金台帳に労働時間の欄が存在しない（労働日数のみ等）場合は **必ず null** にしてください。推測値は禁止。
@@ -877,7 +898,8 @@ PROMPT_WAGE_LEDGER = """**最優先指示: 出力は ```json コードブロッ�
     "employment_type": "正社員",
     "monthly_wages": [430000, 316000, null, null, null, null, null, null, null, null, null, null],
     "monthly_hours": [160, 160, null, null, null, null, null, null, null, null, null, null],
-    "monthly_work_days": [20, 21, null, null, null, null, null, null, null, null, null, null]
+    "monthly_work_days": [20, 21, null, null, null, null, null, null, null, null, null, null],
+    "annual_transport_allowance": 0
   }}
 ]
 ```
@@ -957,6 +979,7 @@ class BaseExtractor(ABC):
         tsv_data: str,
         fiscal_period_hint: str | None = None,
         pdf_files: list[tuple[str, bytes]] | None = None,
+        disable_image_fallback: bool = False,
     ) -> list[dict]:
         """賃金台帳のTSV/PDFから従業員データを抽出。
 
@@ -964,6 +987,9 @@ class BaseExtractor(ABC):
             tsv_data: 全シートをTSV形式で結合したテキスト（PDFのみのときは空文字でも可）
             fiscal_period_hint: 前事業年度の決算期（例: 'R6.5-R7.4' または '2024-05〜2025-04'）
             pdf_files: (ファイル名, PDF bytes) のリスト。Excelとの混在もOK
+            disable_image_fallback: True なら画像経路（Sonnet 直送）への
+                フォールバックを禁止し、テキスト化失敗時に
+                ImageFallbackBlockedError を送出する。
 
         Returns:
             従業員データのリスト。各要素は {name, employment_type, monthly_wages[12], monthly_hours[12]}
@@ -1042,6 +1068,7 @@ class StubExtractor(BaseExtractor):
         tsv_data: str,
         fiscal_period_hint: str | None = None,
         pdf_files: list[tuple[str, bytes]] | None = None,
+        disable_image_fallback: bool = False,
     ) -> list[dict]:
         logger.warning(f'{self.STUB_MARKER} 賃金台帳のAI抽出にはClaude APIが必要です')
         return []
@@ -1527,11 +1554,17 @@ class ClaudeExtractor(BaseExtractor):
         fiscal_period_hint: str | None = None,
         pdf_files: list[tuple[str, bytes]] | None = None,
         _retry_depth: int = 0,
+        disable_image_fallback: bool = False,
     ) -> list[dict]:
         """賃金台帳のTSV/PDFから従業員データを抽出。
 
         Args:
             _retry_depth: 内部用。0=初回、1=分割中（再々分割しないためのカウンタ）
+            disable_image_fallback: True の場合、Document AI / ローカルテキスト抽出に
+                失敗して画像経路（Sonnet 直送）に落ちる前に
+                ImageFallbackBlockedError を送出する。
+                「賃金台帳の作成」タスクで Document AI 一本に絞るために使用。
+                既存タスク（申請書作成・給与計算）は False のまま（フォールバックを許可）。
 
         事前分割（API呼出 +1回）:
             初回のみ、PDF が WAGE_LEDGER_SPLIT_PAGE_THRESHOLD ページ超または
@@ -1598,6 +1631,18 @@ class ClaudeExtractor(BaseExtractor):
                 )
                 # pdf_files はそのまま、既存経路へ（pdf_text_source=None のまま）
 
+        # ── 画像経路フォールバック禁止チェック ──
+        # 「賃金台帳の作成」タスクは Document AI 一本に絞る方針のため、
+        # テキスト化失敗 → 画像経路に落ちる前に明示エラーで停止する。
+        # 既存タスク（disable_image_fallback=False）はこのチェックを通過してフォールバック継続。
+        if disable_image_fallback and pdf_files and pdf_text_source is None:
+            raise ImageFallbackBlockedError(
+                'Document AI / ローカルテキスト抽出に失敗しました。'
+                '画像経路（Sonnet 直送）へのフォールバックは「賃金台帳の作成」タスクでは無効化されています。'
+                'ローカル（Claude Code）で手動変換してください — '
+                'docs/賃金台帳変換手順_CC向け.md 参照。'
+            )
+
         # ── 事前分割判定（初回のみ） ──
         if _retry_depth == 0 and pdf_files:
             should_pre_split = any(
@@ -1613,6 +1658,7 @@ class ClaudeExtractor(BaseExtractor):
                 )
                 return self._extract_with_pre_split(
                     tsv_data, fiscal_period_hint, pdf_files,
+                    disable_image_fallback=disable_image_fallback,
                 )
 
         if fiscal_period_hint:
@@ -1772,7 +1818,8 @@ class ClaudeExtractor(BaseExtractor):
             if truncated and pdf_files and _retry_depth == 0:
                 logger.warning('[extract_wage_ledger] JSON parse失敗 + max_tokens打ち切り → PDF分割再抽出')
                 return self._retry_extract_with_split_pdf(
-                    tsv_data, fiscal_period_hint, pdf_files, partial_data=[]
+                    tsv_data, fiscal_period_hint, pdf_files, partial_data=[],
+                    disable_image_fallback=disable_image_fallback,
                 )
             return []
 
@@ -1788,7 +1835,8 @@ class ClaudeExtractor(BaseExtractor):
                 f'→ {len(data)}名の取得後、PDF分割再抽出で残りを補完'
             )
             return self._retry_extract_with_split_pdf(
-                tsv_data, fiscal_period_hint, pdf_files, partial_data=data
+                tsv_data, fiscal_period_hint, pdf_files, partial_data=data,
+                disable_image_fallback=disable_image_fallback,
             )
 
         # PDF 不在で max_tokens 検出時は分割救済が走らない（_retry_extract_with_split_pdf が PDF 必須）。
@@ -2170,6 +2218,7 @@ class ClaudeExtractor(BaseExtractor):
         tsv_data: str,
         fiscal_period_hint: str | None,
         pdf_files: list[tuple[str, bytes]],
+        disable_image_fallback: bool = False,
     ) -> list[dict]:
         """大型PDFを最初から半分に分割して送信し、月単位補完マージで統合。
 
@@ -2191,9 +2240,14 @@ class ClaudeExtractor(BaseExtractor):
                     fiscal_period_hint=fiscal_period_hint,
                     pdf_files=part_pdfs,
                     _retry_depth=1,  # 事後分割を禁止（無限再帰防止 + コスト上限）
+                    disable_image_fallback=disable_image_fallback,
                 )
                 logger.info(f'事前分割 {label}: {len(partial)}名')
                 chunks.append(partial)
+            except ImageFallbackBlockedError:
+                # 画像フォールバック禁止モードで分割中にテキスト化失敗 → 即座に上位へ伝播
+                # （部分結果で続行せず、明示エラーで停止する方が安全）
+                raise
             except Exception as e:
                 logger.warning(f'事前分割 {label} 失敗（{type(e).__name__}: {e}）→ skip')
 
@@ -2210,6 +2264,7 @@ class ClaudeExtractor(BaseExtractor):
         fiscal_period_hint: str | None,
         pdf_files: list[tuple[str, bytes]],
         partial_data: list[dict],
+        disable_image_fallback: bool = False,
     ) -> list[dict]:
         """事後分割: max_tokens 打ち切り検出時のみ呼ばれる。
 
@@ -2231,9 +2286,13 @@ class ClaudeExtractor(BaseExtractor):
                     fiscal_period_hint=fiscal_period_hint,
                     pdf_files=split_pdfs,
                     _retry_depth=1,
+                    disable_image_fallback=disable_image_fallback,
                 )
                 logger.info(f'分割再抽出 {label}: {len(partial)}名')
                 retry_chunks.append(partial)
+            except ImageFallbackBlockedError:
+                # 画像フォールバック禁止モード中の分割で失敗 → 上位へ伝播して明示停止
+                raise
             except Exception as e:
                 logger.warning(f'分割再抽出 {label} 失敗: {e}')
 
