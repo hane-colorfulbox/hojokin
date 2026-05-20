@@ -1266,6 +1266,25 @@ with st.expander(
     '📘 賃金台帳の作成手順（CC向けマニュアル） — 賃金台帳を作る/直すときは必ずここを確認',
     expanded=False,
 ):
+    # 人向けの使い方（CCへの依頼テンプレ）
+    st.info(
+        '**このマニュアルは Claude Code（CC）に作業させるためのものです。**\n\n'
+        '人がやる作業は「CC にこのマニュアルを参照させて、賃金台帳の変換を依頼する」だけ。\n'
+        '具体的な変換手順は CC が下のマニュアルを読んで実行します。\n\n'
+        '---\n\n'
+        '**👤 CC への依頼文テンプレ**（コピーして使ってください）:\n\n'
+        '```\n'
+        'docs/賃金台帳変換手順_CC向け.md を参照して、\n'
+        '○○社の賃金台帳を変換してください。\n\n'
+        '- 元データ: （PDFのパス or Drive リンク）\n'
+        '- 決算月: ○月\n'
+        '- 出力先: Downloads/○○社_賃金台帳一覧.xlsx\n'
+        '```\n\n'
+        '依頼後、CC は決算月から事業年度を計算し、テンプレ通りに変換した Excel を作成します。'
+        '出来上がったら Drive の案件フォルダにアップロードしてください。'
+    )
+    st.divider()
+    st.caption('▼ 以下は CC が参照するマニュアル本文')
     if _WAGE_MANUAL_PATH.exists():
         st.markdown(_WAGE_MANUAL_PATH.read_text(encoding='utf-8'))
     else:
@@ -1939,4 +1958,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.1.9 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.0 | カラフルボックス株式会社')
