@@ -27,9 +27,9 @@ import logging
 import re
 import shutil
 import unicodedata
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
