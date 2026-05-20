@@ -1270,27 +1270,53 @@ with st.expander(
     st.info(
         '**このマニュアルは Claude Code（CC）に作業させるためのものです。**\n\n'
         '人がやる作業は「CC にこのマニュアルを参照させて、賃金台帳の変換を依頼する」だけ。\n'
-        '具体的な変換手順は CC が下のマニュアルを読んで実行します。\n\n'
-        '**マニュアル本文の置き場所**:\n'
-        '- 自分のPC内（CCが自動で参照）：`補助金/docs/賃金台帳変換手順_CC向け.md`\n'
-        '- GitHub で閲覧（社内メンバー向け）：'
-        '[hane-colorfulbox/hojokin/docs/賃金台帳変換手順_CC向け.md]'
-        '(https://github.com/hane-colorfulbox/hojokin/blob/main/docs/%E8%B3%83%E9%87%91%E5%8F%B0%E5%B8%B3%E5%A4%89%E6%8F%9B%E6%89%8B%E9%A0%86_CC%E5%90%91%E3%81%91.md)\n'
-        '- このExpander内（下にスクロール）でも全文を表示しています\n\n'
-        '---\n\n'
-        '**👤 CC への依頼文テンプレ**（コピーして使ってください）:\n\n'
-        '```\n'
-        'docs/賃金台帳変換手順_CC向け.md を参照して、\n'
-        '○○社の賃金台帳を変換してください。\n\n'
-        '- 元データ: （PDFのパス or Drive リンク）\n'
-        '- 決算月: ○月\n'
-        '- 出力先: Downloads/○○社_賃金台帳一覧.xlsx\n'
-        '```\n\n'
-        '依頼後、CC は決算月から事業年度を計算し、テンプレ通りに変換した Excel を作成します。'
-        '出来上がったら Drive の案件フォルダにアップロードしてください。'
+        '具体的な変換手順は CC が下のマニュアルを読んで実行します。'
     )
+
+    st.markdown('### 👤 CC への依頼方法（2パターン）')
+    _tab_short, _tab_full = st.tabs([
+        'A. パス参照版（補助金リポジトリでCCを起動している人向け／推奨）',
+        'B. 全文コピペ版（別環境のCC・claude.ai 等に渡す人向け）',
+    ])
+
+    with _tab_short:
+        st.markdown(
+            '**補助金リポジトリのフォルダで `claude` を起動している場合**は、'
+            'パスだけ伝えれば CC が自動でマニュアルを読みます。\n\n'
+            '下の依頼文をコピーして、案件情報を埋めて CC に渡してください：'
+        )
+        st.code(
+            'docs/賃金台帳変換手順_CC向け.md を参照して、\n'
+            '○○社の賃金台帳を変換してください。\n\n'
+            '- 元データ: （PDFのパス or Drive リンク）\n'
+            '- 決算月: ○月\n'
+            '- 出力先: Downloads/○○社_賃金台帳一覧.xlsx',
+            language='text',
+        )
+
+    with _tab_full:
+        st.markdown(
+            '**別環境の CC（他フォルダで起動・claude.ai のチャット等）に依頼する場合**は、'
+            'マニュアル全文を含めて渡してください。下のブロックを丸ごとコピー（右上のコピーボタン）→'
+            '案件情報の `○○` を埋めて CC に貼り付け。'
+        )
+        if _WAGE_MANUAL_PATH.exists():
+            _manual_text = _WAGE_MANUAL_PATH.read_text(encoding='utf-8')
+            _full_request = (
+                '以下のマニュアルを参照して、○○社の賃金台帳を変換してください。\n\n'
+                '【案件情報】\n'
+                '- 元データ: （PDFのパス or Drive リンク）\n'
+                '- 決算月: ○月\n'
+                '- 出力先: Downloads/○○社_賃金台帳一覧.xlsx\n\n'
+                '===== マニュアル本文（賃金台帳変換手順_CC向け.md） =====\n\n'
+                + _manual_text
+            )
+            st.code(_full_request, language='markdown')
+        else:
+            st.warning(f'マニュアルファイルが見つかりません: {_WAGE_MANUAL_PATH}')
+
     st.divider()
-    st.caption('▼ 以下は CC が参照するマニュアル本文')
+    st.caption('▼ 以下は人が事前に内容を確認したいとき用のマニュアル全文表示')
     if _WAGE_MANUAL_PATH.exists():
         st.markdown(_WAGE_MANUAL_PATH.read_text(encoding='utf-8'))
     else:
@@ -1964,4 +1990,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.1 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.2 | カラフルボックス株式会社')
