@@ -1271,6 +1271,12 @@ with st.expander(
         '**このマニュアルは Claude Code（CC）に作業させるためのものです。**\n\n'
         '人がやる作業は「CC にこのマニュアルを参照させて、賃金台帳の変換を依頼する」だけ。\n'
         '具体的な変換手順は CC が下のマニュアルを読んで実行します。\n\n'
+        '**マニュアル本文の置き場所**:\n'
+        '- 自分のPC内（CCが自動で参照）：`補助金/docs/賃金台帳変換手順_CC向け.md`\n'
+        '- GitHub で閲覧（社内メンバー向け）：'
+        '[hane-colorfulbox/hojokin/docs/賃金台帳変換手順_CC向け.md]'
+        '(https://github.com/hane-colorfulbox/hojokin/blob/main/docs/%E8%B3%83%E9%87%91%E5%8F%B0%E5%B8%B3%E5%A4%89%E6%8F%9B%E6%89%8B%E9%A0%86_CC%E5%90%91%E3%81%91.md)\n'
+        '- このExpander内（下にスクロール）でも全文を表示しています\n\n'
         '---\n\n'
         '**👤 CC への依頼文テンプレ**（コピーして使ってください）:\n\n'
         '```\n'
@@ -1958,4 +1964,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.0 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.1 | カラフルボックス株式会社')
