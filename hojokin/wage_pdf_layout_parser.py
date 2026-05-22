@@ -379,6 +379,35 @@ def parse_wage_ledger_layout(pdf_text: str) -> list[PdfEmployee]:
     return _merge_employees(per_page)
 
 
+def parse_wage_ledger_layout_from_pdf(pdf_bytes: bytes) -> list[PdfEmployee]:
+    """PDFバイトから直接ページ別テキストを取得してレイアウト解析する。
+
+    本関数は `pdf_text_extractor.extract_pdf_as_text_with_source` には依存しない。
+    後者は Document AI 経由のテキストを返す経路があり、その場合ページマーカー無し・
+    タブ区切りなしのフラットなテキストになるため、本パーサーが氏名・月分列を
+    抽出できない（テーブル構造に依存しているため）。
+
+    代わりに `pdf_text_extractor.extract_pdf_text_table_aware` を呼び、
+    pdfplumber.extract_tables() ベースでテーブル構造を保ったまま取得する。
+    画像PDF（テキスト層なし）の場合は空リスト。その場合は既存のマクロチェック
+    （PL 突合・人数妥当性）に検証を委ねる。
+
+    Args:
+        pdf_bytes: PDFのバイト列
+
+    Returns:
+        PdfEmployee のリスト。テキスト抽出に失敗した場合は空リスト。
+    """
+    if not pdf_bytes:
+        return []
+
+    from .pdf_text_extractor import extract_pdf_text_table_aware
+    text = extract_pdf_text_table_aware(pdf_bytes)
+    if not text or not text.strip():
+        return []
+    return parse_wage_ledger_layout(text)
+
+
 def summarize_layout(employees: list[PdfEmployee]) -> str:
     """ログ・デバッグ用のサマリ文字列。"""
     lines = [f'PDF レイアウト解析: {len(employees)}名']

@@ -89,6 +89,41 @@ def _extract_with_pymupdf(pdf_bytes: bytes) -> str:
     return '\n'.join(parts)
 
 
+def extract_pdf_text_table_aware(pdf_bytes: bytes) -> str:
+    """PDF をテーブル構造を保ったテキストに変換する（Document AI は使わない）。
+
+    layout parser 用の専用経路。
+    extract_pdf_as_text_with_source() は本番フラグ次第で Document AI 経由の
+    フラットなテキストを返すが、それでは月給ページと賞与ページの列構造が
+    崩れて月分列・賞与列の特定が困難になる。
+    本関数は pdfplumber.extract_tables() で各セルを2次元配列として取得し、
+    `--- table N ---` マーカー付きの TSV に変換する（賃金台帳の物理レイアウトを
+    そのまま保持できる）。
+
+    pdfplumber 優先、失敗時 PyMuPDF にフォールバック。画像PDF（テキスト層なし）
+    の場合は両方が空文字を返すため、空文字を返す（呼び出し側で「検証スキップ」扱い）。
+
+    Returns:
+        `===== page N =====` と `--- table N ---` マーカー付きのテキスト。
+        取得できなかった場合は空文字。
+    """
+    try:
+        result = _extract_with_pdfplumber(pdf_bytes)
+        if result and result.strip():
+            return result
+    except Exception as e:
+        logger.debug(f'[pdf_text_table_aware] pdfplumber 失敗: {e}')
+
+    try:
+        result = _extract_with_pymupdf(pdf_bytes)
+        if result and result.strip():
+            return result
+    except Exception as e:
+        logger.debug(f'[pdf_text_table_aware] PyMuPDF 失敗: {e}')
+
+    return ''
+
+
 def _try_document_ai(pdf_bytes: bytes) -> Optional[str]:
     """Document AI を試す。設定不足/失敗時は None を返して次経路に。"""
     from .config import (

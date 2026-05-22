@@ -2015,11 +2015,15 @@ def run_wage_ledger_conversion(
         # PDF テキストを別途取得して、AI 抽出結果と物理列構造を突合する。
         # 月給漏れ・賞与漏れ・月配置ズレを書き込み前に検知し、変換メモシートに警告を載せる。
         # PDF 以外（Excel/CSV）が混在する場合は、PDF ファイルだけに対して実施。
+        #
+        # 注意: pdf_text_extractor.extract_pdf_as_text_with_source は本番フラグ次第で
+        # Document AI 経由のフラットなテキストを返す。本パーサーはテーブル形式
+        # （pdfplumber/PyMuPDF のページ別テキスト）に依存しているため、
+        # parse_wage_ledger_layout_from_pdf でテキスト取得経路を独自に確保する。
         cell_consistency_warnings: list[str] = []
         try:
-            from .pdf_text_extractor import extract_pdf_as_text_with_source
             from .wage_pdf_layout_parser import (
-                parse_wage_ledger_layout, summarize_layout,
+                parse_wage_ledger_layout_from_pdf, summarize_layout,
             )
             from .wage_validator import check_cell_level_consistency
 
@@ -2029,15 +2033,18 @@ def run_wage_ledger_conversion(
                     continue
                 try:
                     with open(wf, 'rb') as fp:
-                        text, src = extract_pdf_as_text_with_source(fp.read())
-                    layout = parse_wage_ledger_layout(text)
+                        layout = parse_wage_ledger_layout_from_pdf(fp.read())
                     if layout:
                         pdf_layout_all.extend(layout)
                         logger.info(
-                            f'PDFレイアウト解析: {wf.name} (source={src}) '
-                            f'→ {len(layout)}名'
+                            f'PDFレイアウト解析: {wf.name} → {len(layout)}名'
                         )
                         logger.debug(summarize_layout(layout))
+                    else:
+                        logger.info(
+                            f'PDFレイアウト解析: {wf.name} → 0名 '
+                            f'(画像PDF or 未対応レイアウト、検証スキップ)'
+                        )
                 except Exception as inner:
                     logger.warning(
                         f'PDFレイアウト解析失敗（スキップ）: {wf.name} - {inner}'
