@@ -598,6 +598,7 @@ def _write_memo_sheet(
     part_time_missing: list[PartTimeHoursMissing],
     data_source_files: list[str],
     additional_warnings: list[str],
+    cell_consistency_warnings: list[str] | None = None,
 ) -> None:
     """「変換メモ」シートを新規追加して、人間チェック用のメタ情報を書き込む。
 
@@ -784,7 +785,40 @@ def _write_memo_sheet(
         r += 1
     r += 1
 
-    # 6. その他の警告
+    # 6. セル単位整合性チェック（PDFレイアウト ↔ AI出力 の突合）
+    cell_consistency_warnings = cell_consistency_warnings or []
+    _set(r, 1, '【セル単位整合性チェック】', font=header_font, fill=header_fill)
+    r += 1
+    if cell_consistency_warnings:
+        _set(
+            r, 1,
+            '⚠ PDFテキストとAI出力の突合で、漏れ・誤配置の可能性を検出しました。'
+            'PDF原本で該当箇所を再確認し、必要に応じて該当セルを手動で補正してください。',
+            font=note_font, wrap=True,
+        )
+        r += 1
+        for warning in cell_consistency_warnings:
+            for line in warning.split('\n'):
+                if not line.strip():
+                    continue
+                # 警告ヘッダ行（「 ⚠ セル単位整合性: ...」）は太字、明細は通常
+                is_header = line.lstrip().startswith('⚠') or '⚠' in line[:5]
+                _set(
+                    r, 1, line,
+                    font=Font(bold=True, size=10, color='C00000') if is_header else note_font,
+                    wrap=True,
+                )
+                r += 1
+        r += 1
+    else:
+        _set(
+            r, 1,
+            'PDFレイアウトとAI出力の整合性: 漏れ・誤配置の検知なし',
+            font=note_font,
+        )
+        r += 2
+
+    # 7. その他の警告
     if additional_warnings:
         _set(r, 1, '【追加警告】', font=header_font, fill=header_fill)
         r += 1
@@ -814,6 +848,7 @@ def write_wage_ledger_to_template(
     officer_names: list[str] | None = None,
     data_source_files: list[str] | None = None,
     detect_suspects: bool = True,
+    cell_consistency_warnings: list[str] | None = None,
 ) -> WriteResult:
     """`WageEmployee` リストを賃金台帳テンプレートに転記して保存する。
 
@@ -956,6 +991,7 @@ def write_wage_ledger_to_template(
         part_time_missing=part_time_missing,
         data_source_files=data_source_files,
         additional_warnings=additional_warnings,
+        cell_consistency_warnings=cell_consistency_warnings,
     )
 
     wb.save(str(output_path))

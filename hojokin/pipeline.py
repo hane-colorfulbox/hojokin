@@ -2011,6 +2011,62 @@ def run_wage_ledger_conversion(
         if registry_path:
             data_source_files.append(f'{registry_path.name}（履歴事項 — 役員照合用）')
 
+        # ── セル単位整合性チェック ──
+        # PDF テキストを別途取得して、AI 抽出結果と物理列構造を突合する。
+        # 月給漏れ・賞与漏れ・月配置ズレを書き込み前に検知し、変換メモシートに警告を載せる。
+        # PDF 以外（Excel/CSV）が混在する場合は、PDF ファイルだけに対して実施。
+        cell_consistency_warnings: list[str] = []
+        try:
+            from .pdf_text_extractor import extract_pdf_as_text_with_source
+            from .wage_pdf_layout_parser import (
+                parse_wage_ledger_layout, summarize_layout,
+            )
+            from .wage_validator import check_cell_level_consistency
+
+            pdf_layout_all = []
+            for wf in wage_files:
+                if wf.suffix.lower() != '.pdf':
+                    continue
+                try:
+                    with open(wf, 'rb') as fp:
+                        text, src = extract_pdf_as_text_with_source(fp.read())
+                    layout = parse_wage_ledger_layout(text)
+                    if layout:
+                        pdf_layout_all.extend(layout)
+                        logger.info(
+                            f'PDFレイアウト解析: {wf.name} (source={src}) '
+                            f'→ {len(layout)}名'
+                        )
+                        logger.debug(summarize_layout(layout))
+                except Exception as inner:
+                    logger.warning(
+                        f'PDFレイアウト解析失敗（スキップ）: {wf.name} - {inner}'
+                    )
+
+            if pdf_layout_all:
+                # AI 抽出結果（WageEmployee dataclass）を validator が読める dict 列に正規化
+                emp_dicts = [
+                    {
+                        'name': getattr(e, 'name', '') or '',
+                        'employment_type': getattr(e, 'employment_type', '') or '',
+                        'monthly_wages': list(getattr(e, 'monthly_wages', []) or []),
+                    }
+                    for e in employees
+                ]
+                cell_consistency_warnings = check_cell_level_consistency(
+                    emp_dicts, pdf_layout_all,
+                )
+                if cell_consistency_warnings:
+                    logger.warning(
+                        f'セル単位整合性チェック: {len(cell_consistency_warnings)}件の警告\n'
+                        + '\n'.join(cell_consistency_warnings)
+                    )
+                else:
+                    logger.info('セル単位整合性チェック: 漏れ・誤配置の検知なし')
+        except Exception as e:
+            # 検証側のエラーで本体処理を止めない
+            logger.warning(f'セル単位整合性チェックでエラー（処理続行）: {e}')
+
         # テンプレートに書込
         write_result = write_wage_ledger_to_template(
             employees,
@@ -2023,6 +2079,7 @@ def run_wage_ledger_conversion(
             handwritten_files=handwritten_files,
             officer_names=officer_names,
             data_source_files=data_source_files,
+            cell_consistency_warnings=cell_consistency_warnings,
         )
 
         # ステータスメッセージ
@@ -2045,6 +2102,11 @@ def run_wage_ledger_conversion(
         if handwritten_files:
             msg_parts.append(
                 f'⚠ 手書きPDF {len(handwritten_files)}件 — 精度低下の可能性あり、原本照合必須'
+            )
+        if cell_consistency_warnings:
+            msg_parts.append(
+                f'⚠ セル単位整合性 {len(cell_consistency_warnings)}件 — '
+                f'変換メモシートで確認のうえ原本照合'
             )
 
         status.status = '完了'

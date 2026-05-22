@@ -379,10 +379,225 @@ def check_employment_type_missing(ledger_employees: list[dict] | None) -> str:
     return ''
 
 
+# ── セル単位整合性チェック ─────────────────────────────────────
+# PDFテキストから決定論的に取得した「物理列構造」と AI 出力の monthly_wages を
+# セル単位で突合し、月給漏れ・月給誤配置・賞与漏れを検知する。
+#
+# 既存の PL 突合系チェックは「年間合計のマクロ整合」しか見えない（差 4-5% 程度
+# だと素通り）ため、セル単位の漏れは検出できない。本チェックで補う。
+
+# 賞与候補と見なすしきい値: 月給平均の何倍以上を「賞与込みの月」と推定するか。
+# 賞与は通常 1〜3 ヶ月分のため、1.5 倍超で十分。低めに取って取りこぼしを減らす。
+BONUS_DETECT_RATIO = 1.5
+
+# 「基本給とほぼ同額」の判定許容率（賞与漏れ検知に使う）。
+# 諸手当の月変動を許容して 5%。
+BONUS_OMISSION_TOLERANCE = 0.05
+
+# 「役員/正社員の定額連続性」検出: monthly_wages の (非null) 月の変動係数 (std/mean)
+# がこの値より小さければ「定額」と判定する
+DEFAULT_FLAT_CV_THRESHOLD = 0.05
+
+
+def _name_match_key(name: str) -> str:
+    """姓名の空白・記号差を吸収して比較用キーを返す。"""
+    import unicodedata
+    if not name:
+        return ''
+    s = unicodedata.normalize('NFKC', name).strip()
+    s = re.sub(r'[\s\-_·・]+', '', s)
+    return s
+
+
+# `re` を遅延 import するため、関数内で必要時に呼ぶ:
+import re  # noqa: E402
+
+
+def check_cell_level_consistency(
+    ledger_employees: list[dict] | None,
+    pdf_layout,
+) -> list[str]:
+    """PDFレイアウト情報と AI 抽出結果のセル単位整合性をチェックする。
+
+    Args:
+        ledger_employees: AI 抽出された従業員リスト（dict or WageEmployee）
+        pdf_layout: `wage_pdf_layout_parser.parse_wage_ledger_layout` の戻り値
+            （PdfEmployee のリスト）。None または空なら検証スキップ。
+
+    Returns:
+        警告メッセージのリスト。「種類別・従業員別」で複数行に分けて返す。
+
+    検証4種:
+        C1: 月給漏れ — PDF に X月分列があるのに AI 出力で該当月 null
+        C2: 月給誤配置 — PDF に X月分列がないのに AI 出力で該当月に値あり
+            （賞与の支給月は例外）
+        C3: 賞与漏れ — PDF に賞与記載があるのに、AI 出力の対応月セルに
+            賞与額が反映されていない
+        C4: 定額連続性の途切れ — 役員・正社員で「他月は同額なのに特定月だけ空白」
+            （C1のフォールバック）
+    """
+    if not ledger_employees or not pdf_layout:
+        return []
+
+    # PDFレイアウト側を氏名キーで引けるようにする
+    pdf_by_key = {}
+    for pe in pdf_layout:
+        key = _name_match_key(getattr(pe, 'name', '') or '')
+        if key:
+            pdf_by_key[key] = pe
+
+    if not pdf_by_key:
+        return []
+
+    c1_missing: list[str] = []   # 月給漏れ
+    c2_misplaced: list[str] = [] # 月給誤配置
+    c3_bonus_lost: list[str] = []  # 賞与漏れ
+    c4_flat_gap: list[str] = []  # 定額連続性の途切れ
+
+    for emp in ledger_employees:
+        name = _emp_get(emp, 'name') or ''
+        key = _name_match_key(name)
+        pe = pdf_by_key.get(key)
+        if pe is None:
+            continue  # PDF側に該当氏名が無い場合は別チェックの管轄
+
+        wages = _emp_get(emp, 'monthly_wages') or []
+        if len(wages) != 12:
+            continue  # 形式異常は別チェックで検出
+        emp_type = (_emp_get(emp, 'employment_type') or '')
+
+        source_months = list(getattr(pe, 'source_months', []) or [])
+        bonus_pays = list(getattr(pe, 'bonus_pays', []) or [])
+        bonus_months = {mon for (mon, _amt) in bonus_pays}
+        has_bonus = bool(getattr(pe, 'has_bonus_section', False))
+
+        # C1: 月給漏れ
+        # 「PDFに○月分列があるのに AI が null」のみ警告。
+        # PDFテキスト側の月別値が 0/空欄なら「実際に支給なし」なので除外する
+        # （長期欠勤など）。
+        taxable = getattr(pe, 'monthly_taxable_totals', {}) or {}
+        basic = getattr(pe, 'monthly_basic_pay', {}) or {}
+        for mon in source_months:
+            ai_val = wages[mon - 1] if 1 <= mon <= 12 else None
+            if ai_val is not None and ai_val > 0:
+                continue
+            # PDF側に金額が確認できる月だけを「漏れ」と判定する
+            pdf_val = taxable.get(mon, 0) or basic.get(mon, 0)
+            if pdf_val > 0:
+                c1_missing.append(
+                    f'  - {name}（{emp_type}）: {mon}月セルが空白。'
+                    f'PDFに「{mon}月分/月度」列があり、'
+                    f'基本給/総支給額(課税)={pdf_val:,}円が読み取れます'
+                )
+
+        # C2: 月給誤配置
+        # PDFに○月分列が無い × AI 出力に値あり × 賞与支給月でもない
+        for mon in range(1, 13):
+            ai_val = wages[mon - 1]
+            if ai_val is None or ai_val <= 0:
+                continue
+            if mon in source_months:
+                continue
+            if mon in bonus_months:
+                continue  # 賞与の支給月は許容
+            c2_misplaced.append(
+                f'  - {name}（{emp_type}）: {mon}月セルに {ai_val:,}円。'
+                f'PDFには「{mon}月分/月度」列も賞与支給日({mon}月)もありません'
+            )
+
+        # C3: 賞与漏れ
+        # bonus_pays に (mon, amount) があるのに、AI 出力の該当月セルが
+        # 「基本給とほぼ同額」(=賞与が加算されていない) なら警告
+        for (mon, amount) in bonus_pays:
+            if not (1 <= mon <= 12):
+                continue
+            ai_val = wages[mon - 1]
+            if ai_val is None:
+                # 該当月が null = 賞与どころか月給自体が空（C1 で別途検出）
+                continue
+            base_value = basic.get(mon, 0)
+            if base_value <= 0:
+                # 基本給が PDF から読めなかった月は基準値が立てられない → 警告控えめに
+                if amount and ai_val < amount * 0.5:
+                    # 賞与額の半分未満 = 明らかに加算されていない
+                    c3_bonus_lost.append(
+                        f'  - {name}（{emp_type}）: {mon}月の賞与（PDF推定 {amount:,}円）'
+                        f'が AI 出力に反映されていません（AI 出力 = {ai_val:,}円）'
+                    )
+                continue
+            # 基本給と AI 値の差が許容範囲内なら賞与は加算されていない
+            diff_ratio = abs(ai_val - base_value) / base_value
+            if diff_ratio <= BONUS_OMISSION_TOLERANCE:
+                amount_str = f'{amount:,}円' if amount else '（金額不明）'
+                c3_bonus_lost.append(
+                    f'  - {name}（{emp_type}）: {mon}月の賞与（PDF 推定 {amount_str}）'
+                    f'が AI 出力に反映されていません'
+                    f'（基本給 {base_value:,}円 ≒ AI 出力 {ai_val:,}円）'
+                )
+
+        # C4: 定額連続性の途切れ（C1のフォールバック）
+        # PDF パースで source_months が取れなかったケース向け。
+        # 役員・正社員で AI 出力の有効月が定額（変動係数 < しきい値）かつ、
+        # 「途中の月だけ空白」の場合に警告。
+        if not source_months and emp_type and ('役員' in emp_type or '正社員' in emp_type):
+            valid_indices = [i for i, w in enumerate(wages) if w is not None and w > 0]
+            if len(valid_indices) >= 6:
+                vals = [wages[i] for i in valid_indices]
+                mean = sum(vals) / len(vals)
+                if mean > 0:
+                    var = sum((v - mean) ** 2 for v in vals) / len(vals)
+                    std = var ** 0.5
+                    cv = std / mean
+                    if cv < DEFAULT_FLAT_CV_THRESHOLD:
+                        # 連続性チェック: 最初と最後の有効月の間に空白があれば異常
+                        first, last = valid_indices[0], valid_indices[-1]
+                        gaps = [
+                            i + 1 for i in range(first, last + 1)
+                            if wages[i] is None or wages[i] <= 0
+                        ]
+                        if gaps:
+                            c4_flat_gap.append(
+                                f'  - {name}（{emp_type}）: '
+                                f'{first + 1}月〜{last + 1}月の在籍中に '
+                                f'{gaps}月セルが空白。'
+                                f'他月は {int(mean):,}円前後で定額のため、漏れの可能性'
+                            )
+
+    # 結果整形
+    results: list[str] = []
+    if c1_missing:
+        results.append(
+            ' ⚠ セル単位整合性: 月給漏れの可能性 '
+            f'{len(c1_missing)}件 — PDF原本の該当月を確認してください\n'
+            + '\n'.join(c1_missing)
+        )
+    if c3_bonus_lost:
+        results.append(
+            ' ⚠ セル単位整合性: 賞与漏れの可能性 '
+            f'{len(c3_bonus_lost)}件 — PDF賞与ページの該当月を確認してください\n'
+            + '\n'.join(c3_bonus_lost)
+        )
+    if c2_misplaced:
+        results.append(
+            ' ⚠ セル単位整合性: 月給誤配置の可能性 '
+            f'{len(c2_misplaced)}件 — 月の入れ替えがないか確認してください\n'
+            + '\n'.join(c2_misplaced)
+        )
+    if c4_flat_gap and not c1_missing:
+        # C1 が出ているなら C4 はノイズになるので抑制
+        results.append(
+            ' ⚠ セル単位整合性: 定額連続性の途切れ '
+            f'{len(c4_flat_gap)}件 — PDF未パース時のフォールバック検知\n'
+            + '\n'.join(c4_flat_gap)
+        )
+    return results
+
+
 def run_all_validations(
     hearing_data: dict | None,
     ledger_employees: list[dict] | None,
     financial=None,
+    pdf_layout=None,
 ) -> list[str]:
     """全検証を実行し、警告文字列のリストを返す（空は除外）。
 
@@ -390,6 +605,8 @@ def run_all_validations(
         hearing_data: ヒアリングシート読込結果（{行番号: {label, value}}）
         ledger_employees: 賃金台帳から抽出された従業員リスト
         financial: PL 抽出結果（FinancialData）。賞与未参照検出に使用
+        pdf_layout: `wage_pdf_layout_parser.parse_wage_ledger_layout` の戻り値。
+            渡された場合、セル単位整合性チェック (C1〜C4) も実行する。
     """
     warnings = [
         check_employee_count_mismatch(hearing_data, ledger_employees),
@@ -400,4 +617,6 @@ def run_all_validations(
         check_employment_type_missing(ledger_employees),
         check_extraction_size_vs_pl(ledger_employees, financial),
     ]
+    if pdf_layout:
+        warnings.extend(check_cell_level_consistency(ledger_employees, pdf_layout))
     return [w for w in warnings if w]
