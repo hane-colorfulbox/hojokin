@@ -675,6 +675,13 @@ def run_application_transfer(
         # 製造原価報告書の自動検出フラグは Phase 2 内で例外発生しても参照されるため
         # try ブロック前に初期化しておく（UnboundLocalError 回避）
         cost_report_detected: bool = False
+        # データソースシート用に検出済みファイルパスを保持（API 残高切れで Phase 2 が
+        # 中断しても、データソースシートには「ファイルは検出されたが AI 抽出失敗」と
+        # 出せるよう、try ブロック外で参照可能にする）
+        registry_path: Path | None = None
+        pl_path: Path | None = None
+        cost_report_path: Path | None = None
+        tax_path: Path | None = None
         try:
             # 履歴事項PDF → CompanyInfo
             registry_path = detector.get('registry')
@@ -688,10 +695,10 @@ def run_application_transfer(
             pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
             _record_pl_selection(status, detector, pl_path, fiscal_month_override)
             pl_period_warning = ''
+            cost_report_path = detector.get('cost_report')
             if pl_path:
                 logger.info(f'直近期決算書として採用: {pl_path.name}')
                 images = pdf_to_images(pl_path)
-                cost_report_path = detector.get('cost_report')
                 if cost_report_path:
                     images += pdf_to_images(cost_report_path)
                     logger.info(f'製造原価報告書も読取: {cost_report_path.name}')
@@ -734,30 +741,24 @@ def run_application_transfer(
             )
 
         # 賃金台帳 → 1人当たり給与支給総額の計画値 + 一覧Excel出力
-        # 賃金台帳処理: AI 経路（PDF）が残高切れになっても Phase 1 結果は維持
-        wage_extraction_method = (
-            'AI抽出（Claude Sonnet 4.6）' if extractor is not None
-            else '決定論パーサー（USE_AI_WAGE_EXTRACTION=false）'
-        )
+        # 申請書作成タスクでは賃金台帳を AI で再抽出しない（決定論パーサー一本）。
+        # 運用上、賃金台帳は事前に「賃金台帳の作成」タスクで標準テンプレ形式に整え、
+        # 「一人当たり給与支給総額」タスクで人間が数値を承認している前提で動く。
+        # AI を使わないことで:
+        #   - per_employee_wage と完全に同じ結果になる（再現性・突合可能）
+        #   - API コストゼロ・処理時間短縮
+        #   - API 残高切れの影響を受けない
+        # 非標準フォーマットの Excel が渡されて決定論で読めない場合は
+        # wage_status='no_data' で警告し、R215/R216 等は空欄で続行する。
+        wage_extraction_method = '決定論パーサー（賃金台帳Excel直読）'
         try:
             wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
-                detector, extraction.financial, extractor=extractor,
+                detector, extraction.financial, extractor=None,
                 fiscal_month_override=fiscal_month_override,
             )
-        except APICreditExhaustedError as e:
-            api_skipped_reason = api_skipped_reason or str(e)
-            logger.warning(f'[Phase 2] 賃金台帳AI抽出で残高切れ: {e}')
-            # フォールバック: extractor=None で決定論パーサーのみで再試行
-            try:
-                wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
-                    detector, extraction.financial, extractor=None,
-                    fiscal_month_override=fiscal_month_override,
-                )
-                wage_extraction_method = '決定論パーサー（AI残高切れフォールバック）'
-            except Exception as e2:
-                logger.warning(f'決定論パーサーも失敗: {e2}')
-                wage_plan, ledger_employees, wage_status = None, [], 'error'
-                wage_extraction_method = '抽出失敗（AI残高切れ＋決定論パーサーも失敗）'
+        except Exception as e:
+            logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}', exc_info=True)
+            wage_plan, ledger_employees, wage_status = None, [], 'error'
 
         # ユーザー指定の決算月 vs AI 推定の照合（警告のみ。処理は続行）
         _, fiscal_month_warning = _resolve_fiscal_period(
@@ -821,7 +822,8 @@ def run_application_transfer(
         status.status = '完了' if not api_skipped_reason else '部分完了'
         status.output_files = [output_path.name]
         status.empty_cells = empty_cells
-        # 後続タスク（給与計算/加点判定）で再利用するためAI抽出結果をstatusに保持
+        # 後続タスク（給与計算/加点判定）で再利用するため抽出結果を status に保持
+        # （financial=PL の AI 抽出結果、ledger_employees=賃金台帳の決定論パーサー結果）
         status.financial = extraction.financial
         status.ledger_employees = ledger_employees or []
         # Phase 4: 低信頼項目を「確認キュー」として集約
@@ -829,11 +831,18 @@ def run_application_transfer(
         # 賃金台帳の読み取り状況に応じて完了メッセージに警告を追記（処理は続行）
         wage_warning = ''
         if wage_status == 'no_data':
-            wage_warning = ' ⚠ 賃金台帳が読み取れませんでした（給与支給総額は空欄）'
+            wage_warning = (
+                ' ⚠ 賃金台帳が読み取れませんでした（給与支給総額は空欄）。'
+                '推奨フロー: ①「賃金台帳の作成」タスクで標準テンプレ形式に変換 → '
+                '②「一人当たり給与支給総額」タスクで数値を確認 → ③ 申請書作成'
+            )
         elif wage_status == 'zero_total':
             wage_warning = ' ⚠ 賃金台帳の給与支給総額が0でした'
         elif wage_status == 'error':
-            wage_warning = ' ⚠ 賃金台帳処理中にエラーが発生しました'
+            wage_warning = (
+                ' ⚠ 賃金台帳処理中にエラーが発生しました。'
+                '「賃金台帳の作成」タスクで標準テンプレ形式に変換してから再実行してください'
+            )
         elif wage_status == 'fiscal_year_mismatch':
             wage_warning = (
                 ' ⛔ 強警告: 賃金台帳の記録期間と直近事業年度がズレており、'
@@ -876,7 +885,11 @@ def run_application_transfer(
         )
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件{wage_warning})')
 
-        # 賃金台帳AI集計Excel出力（チェック用）— AI抽出結果をそのまま再利用してAPI呼出しの2重化を防ぐ
+        # 賃金台帳集計Excel出力（チェック用）— 決定論パーサーで読み取った賃金台帳を集計。
+        # 「一人当たり給与支給総額」タスクの出力と数値が完全一致する想定なので、
+        # 申請書作成時のクロスチェックに使う。
+        # NOTE: ファイル名の `_AI集計` 表記は過去 AI 抽出経路だった名残（既存ファイル名
+        # 互換のため維持）。中身は決定論パーサー由来で、誤読リスクは無い。
         if ledger_employees:
             company = output_path.stem.split('_')[0]
             ledger_output = output_path.parent / f'{company}_賃金台帳_AI集計.xlsx'
@@ -885,6 +898,35 @@ def run_application_transfer(
                 extraction_method=wage_extraction_method,
             )
             status.output_files.append(ledger_output.name)
+
+        # データソースシート追加（申請書出力 Excel の末尾に追記）。
+        # 1次振り返り MTG（2026-05-14）の要望:
+        #   「抽出した数値の根拠となるデータソースを記録し、出力資料に含める」
+        # PDF はテキスト層が取れればページ番号を、Excel/CSV はファイル名のみを記録。
+        # 失敗してもログ警告のみで申請書本体は維持（補助情報のため）。
+        from .template_filler import add_data_source_sheet
+        # PL値→ページ逆引きは PL.pdf + 製造原価報告書.pdf 両方を探索する。
+        # extract_pl が両方の画像をまとめて AI に渡しているため、
+        # 製造原価部由来の値（労務費等）も逆引き可能にしないと出所が出ない。
+        pl_value_pages = _compute_pl_value_pages(
+            pl_path, extraction.financial, cost_report_path=cost_report_path,
+        )
+        wage_ledger_paths_list = detector.get_all('wage_ledger') or []
+        add_data_source_sheet(
+            output_path,
+            hearing_path=hearing_path,
+            registry_path=registry_path,
+            pl_path=pl_path,
+            cost_report_path=cost_report_path,
+            tax_path=tax_path,
+            # estimate_path は Phase 1 で Excel/PDF 両対応に解決済（None 含む）
+            estimate_path=estimate_path,
+            wage_ledger_paths=wage_ledger_paths_list,
+            extraction=extraction,
+            pl_value_pages=pl_value_pages,
+            wage_plan=wage_plan,
+            wage_extraction_method=wage_extraction_method,
+        )
 
     except Exception as e:
         # 通常の例外（ファイル不在等）: ステータスをエラーに
@@ -1537,6 +1579,67 @@ def _build_confidence_warnings(financial) -> list[dict]:
             'reason': getattr(c, 'reason', '') or '抽出失敗',
         })
     return warnings
+
+
+def _compute_pl_value_pages(
+    pl_path: Path | None,
+    financial,
+    cost_report_path: Path | None = None,
+) -> dict[str, dict]:
+    """損益計算書PDF（+ 製造原価報告書）のテキスト層を解析し、各 PL 値が
+    現れるファイル / ページ番号を逆引きする。
+
+    申請書作成タスクの「データソース」シートで「売上高=決算書PDF p.3」
+    「給料手当=決算書PDF p.4 + 製造原価報告書 p.2」のような出所表示を
+    出すために使う。
+
+    extract_pl は pl_path + cost_report_path の画像を一括で AI に渡すため、
+    両方の PDF を検索対象にしないと製造原価部由来の値（労務費等）が
+    「PL.pdf に無い」扱いになって出所表示が空白になる。
+
+    Returns:
+        {key: {'pl': [pages], 'cost': [pages]}} 形式。
+        ファイルが無い / テキスト層が無い場合は対応キーが空リスト。
+    """
+    pl_value_pages: dict[str, dict] = {}
+    if financial is None:
+        return pl_value_pages
+    try:
+        from .pdf_text_extractor import get_pdf_pages_text, find_value_pages
+
+        # 各 PDF のテキスト層を取得（取れなければ空リスト）
+        def _pages_for(path: Path | None) -> list[str]:
+            if path is None:
+                return []
+            try:
+                pages = get_pdf_pages_text(path)
+                if pages and any(p.strip() for p in pages):
+                    return pages
+            except Exception as e:
+                logger.warning(f'PDFテキスト抽出失敗 {path.name}: {e}')
+            return []
+
+        pl_pages_text = _pages_for(pl_path)
+        cost_pages_text = _pages_for(cost_report_path)
+
+        if not pl_pages_text and not cost_pages_text:
+            # どちらも画像PDF or 失敗 → ページ特定不能
+            return pl_value_pages
+
+        for key in ('salary', 'misc_wages', 'bonus', 'legal_welfare',
+                    'welfare', 'officer_compensation', 'revenue',
+                    'gross_profit', 'operating_profit', 'ordinary_profit',
+                    'depreciation', 'cost_of_sales', 'net_profit'):
+            val = getattr(financial, key, 0)
+            if not val:
+                continue
+            pl_value_pages[key] = {
+                'pl':   find_value_pages(pl_pages_text, val) if pl_pages_text else [],
+                'cost': find_value_pages(cost_pages_text, val) if cost_pages_text else [],
+            }
+    except Exception as e:
+        logger.warning(f'PL値→ページ逆引きに失敗（データソースシート出力はスキップ可）: {e}')
+    return pl_value_pages
 
 
 def _check_industry_code_format(ai_judgment) -> str:

@@ -174,11 +174,16 @@ TEMPLATE_OPTIONS = {
 }
 
 TASK_OPTIONS = {
-    '申請書作成のみ': 'application',
-    '給与計算のみ': 'wage',
-    '一人当たり給与支給総額': 'per_employee_wage',
-    '加点判定（賃金台帳）': 'bonus',
+    # 推奨フロー順:
+    #   ① 賃金台帳の作成 → ② 一人当たり給与支給総額 → ③ 申請書作成のみ
+    # 賃金台帳が標準テンプレ形式 + 人間チェック済の状態を作ってから申請書を作る。
+    # 申請書作成タスクは賃金台帳を AI 再抽出しない（決定論パーサー一本）ため、
+    # ②の結果と申請書 R215/R216 は完全一致する。
     '賃金台帳の作成': 'wage_ledger_creation',
+    '一人当たり給与支給総額': 'per_employee_wage',
+    '申請書作成のみ': 'application',
+    '加点判定（賃金台帳）': 'bonus',
+    '給与計算のみ': 'wage',
     '両方（申請書 + 給与計算）': 'all',
 }
 
@@ -643,12 +648,16 @@ with st.sidebar:
     task_label = st.selectbox(
         '実行タスク',
         list(TASK_OPTIONS.keys()),
-        help='申請書作成：ヒアリングシート+各種PDFから申請書を自動作成。'
-             '給与計算：損益計算書+賃金データから給与支給総額を計算。'
-             '一人当たり給与支給総額：賃金台帳のみで計算（決算書PDFは参照しない／決算書由来の項目シートも削除）。'
-             '加点判定：賃金台帳から加点措置の対象かを判定。'
+        help='【推奨フロー】① 賃金台帳の作成 → ② 一人当たり給与支給総額 → ③ 申請書作成のみ。'
              '賃金台帳の作成：賃金台帳PDFをツール規格のExcelに自動変換'
-             '（Document AI使用、手書きPDF以外はそのままお任せ可）。',
+             '（Document AI使用、手書きPDF以外はそのままお任せ可）。'
+             '一人当たり給与支給総額：賃金台帳のみで計算（決算書PDFは参照しない／決算書由来の項目シートも削除）。'
+             '出力Excelを人間がチェックして数値を確定する工程。'
+             '申請書作成：ヒアリングシート+各種PDFから申請書を自動作成。'
+             '賃金台帳は AI で再抽出せず決定論パーサーで直読するため、'
+             '上記②と R215/R216 の数値は完全一致する。'
+             '加点判定：賃金台帳から加点措置の対象かを判定。'
+             '給与計算：損益計算書+賃金データから給与支給総額を計算（本番運用は申請書作成で代替可）。',
     )
     task_type = TASK_OPTIONS[task_label]
 
@@ -889,12 +898,17 @@ def _check_size_warnings(
 
     if wage_files:
         total_size = sum(s for _, s in wage_files)
-        if total_size > WAGE_TOTAL_LIMIT:
+        # 申請書作成（application）は賃金台帳を AI で再抽出しない（決定論パーサー一本）
+        # ため、サイズ/件数の AI 関連警告は不要。
+        # 「両方（all）」は application 側で決定論パーサーが0件返した場合、
+        # wage 側で AI フォールバックが発動する可能性があるため警告は出す（保守的）。
+        wage_uses_ai = task != 'application'
+        if wage_uses_ai and total_size > WAGE_TOTAL_LIMIT:
             warnings.append(
                 f'📦 賃金台帳合計サイズが大きいです（{total_size/1024/1024:.1f}MB, '
                 f'{len(wage_files)}ファイル） — AI 抽出が長時間化する可能性'
             )
-        if len(wage_files) > WAGE_COUNT_LIMIT:
+        if wage_uses_ai and len(wage_files) > WAGE_COUNT_LIMIT:
             warnings.append(
                 f'📂 賃金台帳ファイルが多数あります（{len(wage_files)}件） — '
                 f'従業員数が多い場合は AI 出力が途中で切れる可能性があります（max_tokens 16384）'
@@ -991,11 +1005,21 @@ def _estimate_case_scale(
     #   PDF 抽出: 1MB あたり 2〜5円
     #   共通固定費（AI 判断・後処理）: 約 10〜15円
     #   賃金台帳 Excel/CSV AI 抽出: 1ファイルあたり 3〜8円
+    # 申請書作成タスク（application）は賃金台帳を AI で再抽出しない
+    # （決定論パーサー一本）ため、wage AI コストは 0。
     common_cost = 10
     pdf_cost_min = pdf_total_mb * 2
     pdf_cost_max = pdf_total_mb * 5
-    wage_cost_min = wage_excel_count * 3
-    wage_cost_max = wage_excel_count * 8
+    if task == 'application':
+        # application: 賃金台帳は決定論パーサー一本（AI 不使用）
+        wage_cost_min = 0
+        wage_cost_max = 0
+    else:
+        # all: application が決定論パーサーで成功すれば wage 側もキャッシュ経由で AI 不使用、
+        #      ただし application で 0 件返ると wage 側で AI フォールバックが走る。
+        #      コスト目安は保守的に AI 使用前提で出しておく（過大評価でも実害は小）。
+        wage_cost_min = wage_excel_count * 3
+        wage_cost_max = wage_excel_count * 8
     total_cost_min = common_cost + pdf_cost_min + wage_cost_min
     total_cost_max = common_cost + pdf_cost_max + wage_cost_max
 
@@ -2155,4 +2179,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.17 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.18 | カラフルボックス株式会社')

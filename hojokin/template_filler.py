@@ -463,6 +463,374 @@ def fill_template(
     logger.info(f'保存完了: {output_path}')
 
 
+# ============================================================
+# データソースシート（申請書作成タスク用）
+# ============================================================
+# 申請書作成タスクの出力 Excel に「データソース」シートを追加し、
+# 各抽出値の出所（ファイル名 / PDFページ番号 / 抽出経路 / 信頼度）を
+# 一覧化する。1次振り返り MTG（2026-05-14）の要望
+# 「抽出した数値の根拠となるデータソースを記録し、出力資料に含める」
+# への対応。
+#
+# 設計方針:
+#   - 既存テンプレートには触らず、新規シートを末尾に追加するだけ
+#   - 値の取得元別にセクション分け（履歴事項/PL/賃金台帳/AI判断…）
+#   - PDF はテキスト層が取れればページ番号、取れなければ「ファイル全体」
+#   - 信頼度は high/medium/low をそのまま表示（financial.confidence 由来）
+
+_DATA_SOURCE_SHEET_NAME = 'データソース'
+
+# (label, financial 属性名, confidence キー) の対応表
+_PL_FIELDS_FOR_SOURCE = [
+    ('売上高',         'revenue',              'revenue'),
+    ('売上原価',       'cost_of_sales',        'cost_of_sales'),
+    ('売上総利益',     'gross_profit',         'gross_profit'),
+    ('営業利益',       'operating_profit',     'operating_profit'),
+    ('経常利益',       'ordinary_profit',      'ordinary_profit'),
+    ('当期純利益',     'net_profit',           'net_profit'),
+    ('給料手当',       'salary',               'salary'),
+    ('雑給',           'misc_wages',           'misc_wages'),
+    ('賞与',           'bonus',                'bonus'),
+    ('役員報酬',       'officer_compensation', 'officer_compensation'),
+    ('法定福利費',     'legal_welfare',        'legal_welfare'),
+    ('福利厚生費',     'welfare',              'welfare'),
+    ('減価償却費',     'depreciation',         'depreciation'),
+]
+
+
+def _fmt_pages(pages: list[int] | None) -> str:
+    """[1,3,5] → 'p.1,3,5'  / 空 → '（PDF全体）'"""
+    if not pages:
+        return '（PDF全体）'
+    return 'p.' + ','.join(str(p) for p in pages)
+
+
+def _fmt_pl_source(
+    pages_entry: dict | None,
+    pl_path: 'Path | None',
+    cost_report_path: 'Path | None',
+) -> tuple[str, str]:
+    """PL値の出所表示を組み立てる（製造原価報告書とのマージケースに対応）。
+
+    pages_entry: _compute_pl_value_pages の戻り値の1エントリ
+                 {'pl': [pages], 'cost': [pages]} 形式 / None
+    Returns:
+        (出所ファイル名表示, ページ番号表示)
+        - PL のみで見つかった: ('決算書.pdf', 'p.3,5')
+        - 製造原価のみで見つかった: ('原価.pdf', 'p.2')
+        - 両方で見つかった: ('決算書.pdf + 原価.pdf', 'PL p.3 / 原価 p.2')
+        - 見つからなかった: (pl_path.name or '-', '（PDF全体）')
+    """
+    pl_name = pl_path.name if pl_path else '-'
+    cost_name = cost_report_path.name if cost_report_path else ''
+    if not pages_entry:
+        return pl_name, '（PDF全体）'
+    pl_pages = pages_entry.get('pl') or []
+    cost_pages = pages_entry.get('cost') or []
+    if pl_pages and cost_pages:
+        return (
+            f'{pl_name} + {cost_name}' if cost_name else pl_name,
+            f'PL p.{",".join(map(str, pl_pages))} / 原価 p.{",".join(map(str, cost_pages))}',
+        )
+    if pl_pages:
+        return pl_name, 'p.' + ','.join(map(str, pl_pages))
+    if cost_pages:
+        return cost_name or pl_name, 'p.' + ','.join(map(str, cost_pages))
+    # どちらも空（テキスト層無し or 値見つからず）
+    return pl_name, '（PDF全体）'
+
+
+def _confidence_label(conf_obj) -> str:
+    """FieldConfidence → '高'/'中'/'低'/'-' に変換"""
+    if conf_obj is None:
+        return '-'
+    level = getattr(conf_obj, 'level', 'high')
+    return {'high': '高', 'medium': '中', 'low': '低'}.get(level, level)
+
+
+def add_data_source_sheet(
+    output_path: Path,
+    *,
+    hearing_path: Path | None,
+    registry_path: Path | None,
+    pl_path: Path | None,
+    cost_report_path: Path | None,
+    tax_path: Path | None,
+    estimate_path: Path | None,
+    wage_ledger_paths: list[Path],
+    extraction,  # ExtractionResult
+    pl_value_pages: dict[str, list[int]],
+    wage_plan: dict | None,
+    wage_extraction_method: str,
+) -> None:
+    """申請書出力 Excel に「データソース」シートを追加して保存し直す。
+
+    既存シートには一切手を触れず、末尾に新規シートを追加するだけ。
+    シートが既に存在する場合は中身を作り直す（再実行時の上書き対応）。
+    """
+    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+    from openpyxl.utils import get_column_letter
+
+    if not output_path.exists():
+        logger.warning(f'add_data_source_sheet: 出力ファイル不在 {output_path}')
+        return
+
+    try:
+        wb = openpyxl.load_workbook(output_path)
+        # 既存シートがあれば削除して作り直し
+        if _DATA_SOURCE_SHEET_NAME in wb.sheetnames:
+            del wb[_DATA_SOURCE_SHEET_NAME]
+        ws = wb.create_sheet(_DATA_SOURCE_SHEET_NAME)
+
+        # スタイル
+        TITLE = Font(name='游ゴシック', size=14, bold=True)
+        SECTION = Font(name='游ゴシック', size=11, bold=True, color='FFFFFF')
+        HEADER = Font(name='游ゴシック', size=10, bold=True)
+        NORMAL = Font(name='游ゴシック', size=10)
+        SMALL = Font(name='游ゴシック', size=9, color='666666')
+        SECTION_FILL = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+        HEADER_FILL = PatternFill(start_color='D9E1F2', end_color='D9E1F2', fill_type='solid')
+        ALT_FILL = PatternFill(start_color='F8F9FA', end_color='F8F9FA', fill_type='solid')
+        THIN = Side(style='thin', color='BFBFBF')
+        BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+
+        # タイトル
+        ws.cell(1, 1, '申請書 — データソース一覧').font = TITLE
+        ws.cell(2, 1, (
+            '各抽出値が「どのファイル／どのページ」から来ているかの一覧。'
+            '提出前の人間チェック時にこのシートを見て原本と突合してください。'
+            'PDFのページ番号は機械的に逆引きしているため、複数ページに同値があれば全て列挙されます。'
+        )).font = SMALL
+        ws.cell(3, 1, (
+            '※ ページ番号「（PDF全体）」= PDFのテキスト層が取れなかった（画像PDFなど）ため'
+            '機械的にページ特定できなかったケース。原本を目視で確認してください。'
+        )).font = SMALL
+
+        # ヘッダー行（行5）
+        headers = ['カテゴリ', '項目', '抽出値', '出所ファイル', 'ページ/位置', '抽出経路', '信頼度']
+        for col, h in enumerate(headers, 1):
+            c = ws.cell(5, col, h)
+            c.font = HEADER
+            c.fill = HEADER_FILL
+            c.border = BORDER
+            c.alignment = Alignment(horizontal='center', vertical='center')
+
+        row = 6
+
+        def _section(title: str):
+            """セクション見出し行を1行書く"""
+            nonlocal row
+            c = ws.cell(row, 1, title)
+            c.font = SECTION
+            c.fill = SECTION_FILL
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=7)
+            row += 1
+
+        def _row(category: str, label: str, value, source_file: str,
+                 pages: str, method: str, confidence: str = '-'):
+            """データ行を1行書く"""
+            nonlocal row
+            fill = ALT_FILL if row % 2 == 0 else None
+            cells = [category, label, value, source_file, pages, method, confidence]
+            for col, v in enumerate(cells, 1):
+                c = ws.cell(row, col, v)
+                c.font = NORMAL
+                c.border = BORDER
+                if fill:
+                    c.fill = fill
+                # 値は右寄せ（数値が多いため）、それ以外は左寄せ
+                if col == 3 and isinstance(v, (int, float)):
+                    c.alignment = Alignment(horizontal='right', vertical='top')
+                    c.number_format = '#,##0'
+                else:
+                    c.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+            row += 1
+
+        # ── ヒアリングシート ──
+        _section('① ヒアリングシート（Excel直接読取）')
+        if hearing_path:
+            _row('ヒアリング', '（全項目）', '転記シートに反映', hearing_path.name,
+                 '（Excel全体）', '直接読取（API不要）', '高')
+        else:
+            _row('ヒアリング', '-', '（未提供）', '-', '-', '-', '-')
+
+        # ── 履歴事項全部証明書 ──
+        # 注意: ExtractionResult はデフォルトで CompanyInfo() を持つので、
+        # `extraction.company` のtruthinessだけ見ると API 残高切れで実抽出
+        # スキップされたケースでも True になる。実値（name 等）が入って
+        # いるかで判定する。
+        _section('② 履歴事項全部証明書（AI抽出 — Claude Sonnet 4.6）')
+        _company = getattr(extraction, 'company', None)
+        _company_extracted = bool(_company and (getattr(_company, 'name', '') or
+                                                getattr(_company, 'representative_name', '')))
+        if registry_path and _company_extracted:
+            co = extraction.company
+            _row('履歴事項', '会社名',           getattr(co, 'name', '') or '-',
+                 registry_path.name, '（PDF全体）', 'AI抽出', '高')
+            _row('履歴事項', '代表者氏名',       getattr(co, 'representative_name', '') or '-',
+                 registry_path.name, '（PDF全体）', 'AI抽出', '高')
+            _row('履歴事項', '代表者役職',       getattr(co, 'representative_title', '') or '-',
+                 registry_path.name, '（PDF全体）', 'AI抽出', '高')
+            _row('履歴事項', '本店所在地',       getattr(co, 'address', '') or '-',
+                 registry_path.name, '（PDF全体）', 'AI抽出', '高')
+            _row('履歴事項', '設立年月日',       getattr(co, 'established_date', '') or '-',
+                 registry_path.name, '（PDF全体）', 'AI抽出', '高')
+            _row('履歴事項', '資本金',           getattr(co, 'capital', 0) or 0,
+                 registry_path.name, '（PDF全体）', 'AI抽出', '高')
+            officers = getattr(co, 'officers', None) or []
+            _row('履歴事項', '役員数（代表者除く）', len(officers),
+                 registry_path.name, '（PDF全体）', 'AI抽出',
+                 '高' if officers else '低')
+        elif registry_path:
+            _row('履歴事項', '-', '（API残高切れ等で AI 抽出スキップ）',
+                 registry_path.name, '-', '-', '低')
+        else:
+            _row('履歴事項', '-', '（未提供）', '-', '-', '-', '-')
+
+        # ── 損益計算書 ──
+        # 同様にデフォルト FinancialData() のtruthiness判定を避け、
+        # 実数値（revenue 等の主要項目）が入っているかで判定する。
+        _section('③ 損益計算書（AI抽出 — 値→ページ逆引き）')
+        _fin = getattr(extraction, 'financial', None)
+        _fin_extracted = bool(_fin and (
+            getattr(_fin, 'revenue', 0) or getattr(_fin, 'cost_of_sales', 0) or
+            getattr(_fin, 'gross_profit', 0) or getattr(_fin, 'operating_profit', 0) or
+            getattr(_fin, 'salary', 0) or getattr(_fin, 'fiscal_year_end', '')
+        ))
+        if pl_path and _fin_extracted:
+            fin = extraction.financial
+            confidence_map = getattr(fin, 'confidence', {}) or {}
+            # 事業年度
+            _row('決算書', '事業年度開始日', getattr(fin, 'fiscal_year_start', '') or '-',
+                 pl_path.name, '（PDF全体）', 'AI抽出',
+                 _confidence_label(confidence_map.get('fiscal_year_start')))
+            _row('決算書', '事業年度終了日', getattr(fin, 'fiscal_year_end', '') or '-',
+                 pl_path.name, '（PDF全体）', 'AI抽出',
+                 _confidence_label(confidence_map.get('fiscal_year_end')))
+            # PL各項目（値→ページ逆引きで PL.pdf / 製造原価.pdf 両方を探索）
+            for label, attr, conf_key in _PL_FIELDS_FOR_SOURCE:
+                val = getattr(fin, attr, 0) or 0
+                if val == 0:
+                    # 0円科目は決算書に該当行が無いことが多いのでスキップ
+                    continue
+                src_file, pages_str = _fmt_pl_source(
+                    pl_value_pages.get(attr), pl_path, cost_report_path,
+                )
+                _row('決算書', label, val, src_file, pages_str, 'AI抽出',
+                     _confidence_label(confidence_map.get(conf_key)))
+            # 製造原価報告書がマージされている場合の注記（値はPLとマージ済）
+            if cost_report_path:
+                _row('決算書', '製造原価報告書', '（人件費等をPLとマージ済）',
+                     cost_report_path.name, '（PDF全体）', 'AI抽出（マージ）', '高')
+        elif pl_path:
+            _row('決算書', '-', '（API残高切れ等で AI 抽出スキップ）',
+                 pl_path.name, '-', '-', '低')
+        else:
+            _row('決算書', '-', '（未提供）', '-', '-', '-', '-')
+
+        # ── 納税証明書 ──
+        # 同様: TaxCertificate() のデフォルト値は tax_type='' / tax_amount=0
+        _section('④ 納税証明書（AI抽出）')
+        _tx = getattr(extraction, 'tax', None)
+        _tx_extracted = bool(_tx and (getattr(_tx, 'tax_type', '') or
+                                      getattr(_tx, 'tax_amount', 0)))
+        if tax_path and _tx_extracted:
+            tx = extraction.tax
+            _row('納税証明', '税目', getattr(tx, 'tax_type', '') or '-',
+                 tax_path.name, '（PDF全体）', 'AI抽出', '高')
+            _row('納税証明', '税額', getattr(tx, 'tax_amount', 0) or 0,
+                 tax_path.name, '（PDF全体）', 'AI抽出', '高')
+        elif tax_path:
+            _row('納税証明', '-', '（API残高切れ等で AI 抽出スキップ）',
+                 tax_path.name, '-', '-', '低')
+        else:
+            _row('納税証明', '-', '（未提供）', '-', '-', '-', '-')
+
+        # ── 見積書 ──
+        # EstimateData() のデフォルトは tool_name=''。Excel直読は API 不要なので
+        # 残高切れの影響を受けない（Phase 1 で処理済み）。
+        _section('⑤ 見積書')
+        _est = getattr(extraction, 'estimate', None)
+        _est_extracted = bool(_est and getattr(_est, 'tool_name', ''))
+        if estimate_path and _est_extracted:
+            est = extraction.estimate
+            method = 'AI抽出' if estimate_path.suffix.lower() == '.pdf' else '直接読取（API不要）'
+            _row('見積書', 'ツール名', getattr(est, 'tool_name', '') or '-',
+                 estimate_path.name, '（全体）', method, '高')
+        elif estimate_path:
+            _row('見積書', '-', '（抽出失敗 — ファイル名や記載項目を確認）',
+                 estimate_path.name, '-', '-', '低')
+        else:
+            _row('見積書', '-', '（未提供）', '-', '-', '-', '-')
+
+        # ── 賃金台帳 ──
+        _section('⑥ 賃金台帳（決定論パーサー直読 — AI不使用）')
+        if wage_ledger_paths and wage_plan:
+            ledger_summary = (
+                wage_ledger_paths[0].name if len(wage_ledger_paths) == 1
+                else f'{wage_ledger_paths[0].name} 他 {len(wage_ledger_paths) - 1} 件'
+            )
+            _row('賃金台帳', '一人当たり給与支給総額(基準年)',
+                 int(round(wage_plan.get('wage_total_base', 0) /
+                           max(wage_plan.get('employee_count_fte', 1), 1))),
+                 ledger_summary, '（Excel全体）', wage_extraction_method, '高')
+            _row('賃金台帳', '給与支給総額(基準年)', int(round(wage_plan.get('wage_total_base', 0))),
+                 ledger_summary, '（Excel全体）', wage_extraction_method, '高')
+            _row('賃金台帳', '給与支給総額(1年目計画)', int(round(wage_plan.get('wage_total_y1', 0))),
+                 '（基準年×1.03 自動計算）', '-', '機械計算', '高')
+            _row('賃金台帳', '給与支給総額(2年目計画)', int(round(wage_plan.get('wage_total_y2', 0))),
+                 '（基準年×1.03² 自動計算）', '-', '機械計算', '高')
+            _row('賃金台帳', '給与支給総額(3年目計画)', int(round(wage_plan.get('wage_total_y3', 0))),
+                 '（基準年×1.03³ 自動計算）', '-', '機械計算', '高')
+            _row('賃金台帳', '従業員数（FTE換算）',
+                 round(wage_plan.get('employee_count_fte', 0), 1),
+                 ledger_summary, '（Excel全体）', wage_extraction_method, '高')
+            if 'total_annual_hours' in wage_plan:
+                _row('賃金台帳', '年間総労働時間（役員除く）',
+                     round(wage_plan['total_annual_hours'], 1),
+                     ledger_summary, '（Excel全体）', wage_extraction_method, '高')
+        elif wage_ledger_paths:
+            _row('賃金台帳', '-', '（読取失敗 — 「賃金台帳の作成」タスクで再整形を推奨）',
+                 wage_ledger_paths[0].name, '-', wage_extraction_method, '低')
+        else:
+            _row('賃金台帳', '-', '（未提供）', '-', '-', '-', '-')
+
+        # ── AI判断 ──
+        # AIJudgment() のデフォルトは industry_code='' / business_description=''
+        _section('⑦ AI判断（履歴事項 + ヒアリング + 見積書から Claude が生成）')
+        _aj = getattr(extraction, 'ai_judgment', None)
+        _aj_extracted = bool(_aj and (getattr(_aj, 'industry_code', '') or
+                                       getattr(_aj, 'business_description', '')))
+        if _aj_extracted:
+            aj = extraction.ai_judgment
+            biz = getattr(aj, 'business_description', '') or ''
+            _row('AI判断', '業種コード（4桁）', getattr(aj, 'industry_code', '') or '-',
+                 'AI生成（履歴事項+ヒアリング+見積参照）', '-', 'AI生成', '中')
+            _row('AI判断', f'事業内容（{len(biz)}文字）',
+                 biz if len(biz) <= 80 else biz[:80] + '…',
+                 'AI生成（履歴事項+ヒアリング+見積参照）', '-', 'AI生成', '中')
+        else:
+            _row('AI判断', '-', '（API残高切れ等で生成スキップ／失敗）',
+                 '-', '-', '-', '低')
+
+        # 列幅
+        widths = {1: 12, 2: 26, 3: 28, 4: 32, 5: 14, 6: 22, 7: 8}
+        for col, w in widths.items():
+            ws.column_dimensions[get_column_letter(col)].width = w
+
+        # 行高（タイトル・説明）
+        ws.row_dimensions[1].height = 22
+        ws.row_dimensions[2].height = 30
+        ws.row_dimensions[3].height = 22
+
+        wb.save(output_path)
+        wb.close()
+        logger.info(f'データソースシート追加完了: {output_path.name}')
+    except Exception as e:
+        # データソースシートは補助情報なので、書込失敗しても申請書本体は維持
+        logger.warning(f'データソースシート追加に失敗（申請書本体は保存済み）: {e}', exc_info=True)
+
+
 # 「一人当たり給与支給総額」タスク向けに、給与支給総額計算シートから
 # 決算書PDF由来のセクション（【2026テンプレート転記用】＋見出し注記＋給料手当/雑給/賞与手当/
 # 売上高/粗利益/営業利益/経常利益/減価償却費）を機械的に削除する。
