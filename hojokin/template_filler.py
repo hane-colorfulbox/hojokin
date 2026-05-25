@@ -462,6 +462,8 @@ def fill_template(
     wb.close()
     logger.info(f'保存完了: {output_path}')
 
+    return empty
+
 
 # ============================================================
 # データソースシート（申請書作成タスク用）
@@ -904,5 +906,3 @@ def strip_pl_section_from_wage_sheet(output_path: Path) -> int:
         return amount
     finally:
         wb.close()
-
-    return empty
