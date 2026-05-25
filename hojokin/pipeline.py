@@ -777,15 +777,35 @@ def run_application_transfer(
             )
 
         # AI 生成の事業内容の文字数チェック（240〜255文字が望ましい）
+        # 255超は申請書セルで切り詰められるため、API 1回で自動短縮を試みる。
+        # 失敗（API残高切れ・短縮後も255超等）した場合は原文を残して警告のみ。
         biz_desc_warning = ''
         biz_desc = (extraction.ai_judgment.business_description or '').strip()
         if biz_desc:
             n = len(biz_desc)
             if n > 255:
-                biz_desc_warning = (
-                    f' ⚠ 事業内容が文字数制限超過（{n}文字 / 上限255文字）。'
-                    f'申請書セルで切り詰められるおそれがあるため、原稿を手動短縮してください。'
-                )
+                shortened = None
+                if extractor is not None:
+                    try:
+                        shortened = extractor.shorten_business_description(biz_desc, max_len=250)
+                    except Exception as e:
+                        logger.warning(f'事業内容の自動短縮に失敗（警告にフォールバック）: {e}', exc_info=True)
+                        shortened = None
+
+                if shortened and len(shortened) <= 255:
+                    extraction.ai_judgment.business_description = shortened
+                    biz_desc_warning = (
+                        f' ℹ 事業内容が文字数制限超過（{n}文字）だったため、自動で'
+                        f'{len(shortened)}文字に短縮しました。提出前に内容を必ず目視確認してください。'
+                    )
+                    logger.warning(
+                        f'事業内容を自動短縮: {n}文字 → {len(shortened)}文字'
+                    )
+                else:
+                    biz_desc_warning = (
+                        f' ⚠ 事業内容が文字数制限超過（{n}文字 / 上限255文字）。'
+                        f'自動短縮を試みましたが収まりませんでした。原稿を手動短縮してください。'
+                    )
             elif n < 240:
                 biz_desc_warning = (
                     f' ⚠ 事業内容が短すぎます（{n}文字 / 推奨240〜255文字）。'

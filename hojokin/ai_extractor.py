@@ -690,7 +690,7 @@ PROMPT_AI_JUDGMENT = """以下の会社情報に基づいて、補助金申請�
 {{
   "industry_code": "日本標準産業分類（令和5年6月改定・第14回改定）の細分類コード（4桁）。古い体系の3桁コードは不可。総務省統計局・e-Stat の最新分類（https://www.e-stat.go.jp/classifications/terms/10）に従うこと。具体的コードは推定せず、業態から該当する細分類を引くこと",
   "industry_text": "日本標準産業分類（令和5年6月改定）に基づき '大分類 X xxx / 中分類 xx xxx / 小分類 xxx xxx / 細分類 xxxx xxx' 形式で返す。コード番号と名称は一致させること",
-  "business_description": "事業内容の説明文。**必ず240文字以上255文字以内**（句読点・記号も1文字、改行は含めない）。255文字を超えると申請書のセルで切られるので絶対に超えない。以下4要素を順番に必ず含めること: (1)現状の事業概要（業種・主要サービス・顧客層を1〜2文） (2)直面している課題・非効率（具体的な業務名・所要時間） (3)導入するITツールによる解決策（どの業務をどう変えるか） (4)期待される効果（時間削減・売上向上・新規事業展開の見込みを具体的に）。一般論ではなく、ヒアリング回答に含まれる固有の業務名・数値を必ず織り込むこと。語尾は『〜である』調で統一",
+  "business_description": "事業内容の説明文。**必ず240文字以上252文字以内**（句読点・記号も1文字、改行は含めない）。255文字を超えると申請書のセルで切られるので絶対に超えない。バッファとして252文字までに収めること。以下4要素を順番に必ず含めること: (1)現状の事業概要（業種・主要サービス・顧客層を1〜2文） (2)直面している課題・非効率（具体的な業務名・所要時間） (3)導入するITツールによる解決策（どの業務をどう変えるか） (4)期待される効果（時間削減・売上向上・新規事業展開の見込みを具体的に）。一般論ではなく、ヒアリング回答に含まれる固有の業務名・数値を必ず織り込むこと。語尾は『〜である』調で統一",
   "management_intent": "営業利益がプラスなら '事業の拡大に積極的'、マイナスなら '事業の維持に注力'",
   "future_goals": "営業利益がプラスなら '事業の拡大'、マイナスなら '利益の確保'",
   "security_status": "パソコンやサーバなどには、IDやパスワードを設け情報セキュリティ管理を行っている",
@@ -1059,6 +1059,22 @@ class BaseExtractor(ABC):
             従業員データのリスト。各要素は {name, employment_type, monthly_wages[12], monthly_hours[12]}
         """
         ...
+
+    def shorten_business_description(self, text: str, max_len: int = 250) -> str | None:
+        """事業内容（business_description）が255文字制限を超えた場合の救済短縮。
+
+        生成済み本文を Claude に渡し、4要素（現状/課題/解決策/効果）を維持しつつ
+        max_len 文字以内に書き直してもらう。リトライは1回のみ（呼び出し側で実施）。
+
+        Args:
+            text: 短縮対象の事業内容本文
+            max_len: 目標上限文字数（既定250。255までのバッファを含めた値を渡す）
+
+        Returns:
+            短縮後の本文（max_len 以内）。短縮できなかった場合や API 不可の場合は None。
+            既定実装は None を返す（API 非利用環境向けの no-op）。
+        """
+        return None
 
 
 class StubExtractor(BaseExtractor):
@@ -1611,6 +1627,67 @@ class ClaudeExtractor(BaseExtractor):
             expected_effect_dept=d.get('expected_effect_dept', ''),
             expected_effect=d.get('expected_effect', ''),
         )
+
+    def shorten_business_description(self, text: str, max_len: int = 250) -> str | None:
+        """事業内容が255文字超のとき、Claude に1回だけ短縮を依頼する。
+
+        4要素（現状/課題/解決策/効果）を維持しつつ max_len 文字以内に圧縮。
+        API 残高切れ・通信エラー・想定外の応答は None を返し、呼び出し側で警告にフォールバック。
+        """
+        if not text:
+            return None
+
+        target = max(200, min(max_len, 252))  # 200〜252の範囲にクランプ
+        prompt = (
+            '以下の事業内容を、意味と4要素（現状/課題/解決策/期待効果）を維持しつつ'
+            f'**{target}文字以内**に短縮してください。\n'
+            '制約:\n'
+            f'・本文のみを返す（前置き・説明・引用符・コードブロック・改行を入れない）\n'
+            f'・句読点・記号も1文字としてカウントし、必ず{target}文字以内に収める\n'
+            '・語尾は「〜である」調を維持\n'
+            '・固有の業務名・数値（時間・%・金額等）は削らない\n\n'
+            f'【原文（{len(text)}文字）】\n{text}'
+        )
+
+        stats = f'images=0枚 prompt={len(prompt)}chars max_tokens=1024'
+        logger.warning(f'[API送信] caller=shorten_business_description {stats} 原文={len(text)}文字 目標={target}文字')
+        try:
+            response = self._messages_create_with_retry(
+                caller='shorten_business_description',
+                stats=stats,
+                model=self.model,
+                max_tokens=1024,
+                messages=[{'role': 'user', 'content': prompt}],
+            )
+        except APICreditExhaustedError as e:
+            logger.warning(f'[API失敗] caller=shorten_business_description APIクレジット切れ: {e}')
+            return None
+        except Exception as e:
+            logger.warning(f'[API失敗] caller=shorten_business_description {type(e).__name__}: {e}')
+            return None
+
+        try:
+            shortened = (response.content[0].text or '').strip()
+        except (IndexError, AttributeError) as e:
+            logger.warning(f'[API失敗] caller=shorten_business_description 応答パース失敗: {e}')
+            return None
+
+        # 引用符・コードフェンス・改行で囲まれて返ってきた場合の保険処理
+        for fence in ('```', '"""', "'''"):
+            if shortened.startswith(fence) and shortened.endswith(fence):
+                shortened = shortened[len(fence):-len(fence)].strip()
+        shortened = shortened.strip('「」"\'').replace('\n', '').strip()
+
+        logger.warning(
+            f'[API成功] caller=shorten_business_description '
+            f'短縮結果={len(shortened)}文字 '
+            f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
+        )
+
+        # 255超のままなら採用しない（呼び出し側で警告フォールバック）
+        if not shortened or len(shortened) > 255:
+            return None
+        return shortened
 
     def extract_wage_ledger(
         self,
