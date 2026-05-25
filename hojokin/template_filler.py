@@ -478,13 +478,19 @@ def fill_template(
 def _restore_squashed_text_rows(
     ws,
     threshold: float = 10.0,
-    default_height: float = 15.75,
+    base_height: float = 15.75,
 ) -> int:
-    """テキスト or 式があるのに行高が threshold 以下に潰れた行を default_height に復元。
+    """テキスト or 式があるのに行高が threshold 以下に潰れた行を復元。
 
     テンプレ原本のバグ（法人テンプレで一部行の height=6.0/9.0 のまま保存）への
-    動的ワークアラウンド。空行（B/C 両方とも None）は意図的な区切り行とみなして
-    触らない。
+    動的ワークアラウンド。
+
+    - 空行（B/C 両方とも None）は意図的な区切り行とみなして触らない
+    - 改行を含む長文セルは「改行数 + 1」行分の高さに復元（R183 の5行プルダウン
+      候補や R203 の4行手順説明のような複数行テキストが切れないように）
+    - Excel の wrap_text 折り返し由来の見かけの複数行は openpyxl 側で行数を
+      決定できないため、base_height のまま（Excel 開いて手で auto-fit するか
+      余白で吸収される範囲を想定）
     """
     fixed = 0
     for r in range(1, ws.max_row + 1):
@@ -496,7 +502,11 @@ def _restore_squashed_text_rows(
         c = ws.cell(r, 3).value
         if b is None and c is None:
             continue
-        ws.row_dimensions[r].height = default_height
+        lines = 1
+        for v in (b, c):
+            if isinstance(v, str) and '\n' in v:
+                lines = max(lines, v.count('\n') + 1)
+        ws.row_dimensions[r].height = base_height * lines
         fixed += 1
     return fixed
 
