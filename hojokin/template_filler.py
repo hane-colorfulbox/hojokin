@@ -457,12 +457,48 @@ def fill_template(
     empty = check_empty_cells(wb)
     logger.info(f'STEP 4: 空セル {len(empty)}件')
 
+    # STEP 5: テンプレ原本の行高バグを修正
+    # 法人通常枠/インボイス枠テンプレで申請内容シートの 20+ 行が height=6.0/9.0
+    # に潰れたまま保存されており、『次へ』ボタン・期待効果・データ連携・履歴事項
+    # 添付など重要項目が画面に見えない状態だったため、出力 xlsx 側で復元する。
+    # テンプレ原本は触らない（条件付き書式・データ検証等の openpyxl 再保存リスク回避）。
+    if '申請内容' in wb.sheetnames:
+        fixed = _restore_squashed_text_rows(wb['申請内容'])
+        if fixed > 0:
+            logger.info(f'STEP 5: テンプレ原本の行高バグを修正 {fixed}行')
+
     # 保存
     wb.save(output_path)
     wb.close()
     logger.info(f'保存完了: {output_path}')
 
     return empty
+
+
+def _restore_squashed_text_rows(
+    ws,
+    threshold: float = 10.0,
+    default_height: float = 15.75,
+) -> int:
+    """テキスト or 式があるのに行高が threshold 以下に潰れた行を default_height に復元。
+
+    テンプレ原本のバグ（法人テンプレで一部行の height=6.0/9.0 のまま保存）への
+    動的ワークアラウンド。空行（B/C 両方とも None）は意図的な区切り行とみなして
+    触らない。
+    """
+    fixed = 0
+    for r in range(1, ws.max_row + 1):
+        rd = ws.row_dimensions.get(r)
+        h = rd.height if rd else None
+        if h is None or h > threshold:
+            continue
+        b = ws.cell(r, 2).value
+        c = ws.cell(r, 3).value
+        if b is None and c is None:
+            continue
+        ws.row_dimensions[r].height = default_height
+        fixed += 1
+    return fixed
 
 
 # ============================================================
