@@ -845,12 +845,20 @@ def run_application_transfer(
             )
         elif wage_status == 'fiscal_year_mismatch':
             wage_warning = (
-                ' ⛔ 強警告: 賃金台帳の記録期間と直近事業年度がズレており、'
-                '「直近決算期の全月在籍者」から給与支給総額を自動算出できません。'
+                ' ⛔ 強警告: 賃金台帳の全月在籍者が0名でした。'
+                '賃金台帳の記録期間が直近事業年度12ヶ月と一致していない可能性が高いため、'
                 '申請書 R215（従業員数）・R216（給与支給総額）・R217〜R219（賃上げ計画）は '
                 '空欄のままです。【確認事項】まず賃金台帳の提出期間が直近決算期12ヶ月を'
                 '含んでいるかご確認ください。含んでいなければ顧客に正しい期間の賃金台帳を'
                 '再提出してもらえないか相談のうえ、手動で値を入力してください'
+            )
+        elif wage_status == 'low_full_year_ratio':
+            wage_warning = (
+                ' ⚠ 注意: 賃金台帳の全月在籍者が会社規模に対して少なめです'
+                '（中途入退社が多い案件）。公募要領通り「全月分の給与支給を受けた従業員」'
+                'のみで R215/R216 を自動算出・転記しました。「一人当たり給与支給総額」'
+                'タスクの出力と数値が一致しているかと、賃金台帳期間が直近決算期と'
+                '揃っているかを念のためご確認ください'
             )
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
         consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
@@ -1475,30 +1483,36 @@ def _calc_wage_plan_from_ledger(
             logger.warning('給与支給総額が0以下 → 計画値転記をスキップ')
             return None, employees_raw, 'zero_total'
 
-        # ── 直近事業年度との整合性チェック (hard stop) ─────────────────
+        # ── 直近事業年度との整合性チェック ──────────────────────────────
         # 賃金台帳に複数名の記録があるのに、12スロット全埋まり (full_year=True) と
-        # 判定される従業員が極端に少ない場合は、賃金台帳の記録期間と直近事業年度が
-        # ズレている疑いが濃い (例: 賃金台帳が決算期より新しい月だけ記録、または
-        # 決算期内に在籍した人が事実上いないなど)。
+        # 判定される従業員が極端に少ないケースのハンドリング:
         #
-        # 公募要領上、給与支給総額は「直近事業年度に全月分の給与支給を受けた従業員」
-        # を分子・分母とも算出対象とする。賃金台帳の任意12ヶ月で full_year を判定する
-        # 現行ロジックは決算期との整合を保証できないため、対象人数が会社規模と乖離した
-        # ケースでは自動転記をスキップし、ユーザに手動入力を促す方が安全。
-        # (将来対応: WageEmployee に YYYY-MM 情報を保持して決算期フィルタを
-        #  かけてから full_year 判定する根本修正が必要)
+        #   (A) included_count == 0 かつ non_officer_count >= 2
+        #       → 賃金台帳の記録期間が直近事業年度を完全に外している疑い
+        #         (過去事例: Yellow Link Japan 案件)。
+        #         hard stop して手動入力を促す ('fiscal_year_mismatch')。
+        #
+        #   (B) 0 < included_count < non_officer_count * 0.5
+        #       → 中途入退社者が多い案件 (例: 森開発)。公募要領上「全月分の給与支給を
+        #         受けた従業員のみ算出対象」なので、対象が1名でも算出値は正しい。
+        #         自動転記は実行し、注意喚起だけ出す ('low_full_year_ratio')。
+        #         ※ ②「一人当たり給与支給総額」タスクと結果を一致させる目的。
         non_officer_count = sum(1 for p in payroll_list if not p.is_officer)
         included_count = len(result.included)
-        FISCAL_MISMATCH_RATIO = 0.5  # 全月在籍者が非役員数の50%未満なら乖離扱い
-        if non_officer_count >= 2 and included_count < non_officer_count * FISCAL_MISMATCH_RATIO:
-            excluded_n = non_officer_count - included_count
+        FISCAL_MISMATCH_RATIO = 0.5  # 全月在籍者が非役員数の50%未満は要確認
+
+        if non_officer_count >= 2 and included_count == 0:
             logger.warning(
-                f'賃金台帳の全月在籍者({included_count}名)が会社規模({non_officer_count}名)と乖離。'
-                f'{excluded_n}名が中途入退社扱いで除外されました。'
-                f'賃金台帳の記録期間と直近事業年度がズレている疑いがあるため、'
+                f'賃金台帳の全月在籍者が0名（非役員{non_officer_count}名中）。'
+                f'賃金台帳の記録期間が直近決算期12ヶ月と一致していない疑いがあるため、'
                 f'R215/R216 の自動転記をスキップします（手動入力が必要）'
             )
             return None, employees_raw, 'fiscal_year_mismatch'
+
+        low_full_year_ratio = (
+            non_officer_count >= 2
+            and included_count < non_officer_count * FISCAL_MISMATCH_RATIO
+        )
 
         # 給与支給総額ベースで年3%成長の計画値を算出
         base = result.total_salary
@@ -1517,6 +1531,15 @@ def _calc_wage_plan_from_ledger(
             f'(従業員FTE: {result.employee_count_fte:.1f}人, 年3%成長, '
             f'総労働時間: {total_annual_hours:,.0f}時間)'
         )
+        if low_full_year_ratio:
+            excluded_n = non_officer_count - included_count
+            logger.warning(
+                f'全月在籍者({included_count}名)が非役員数({non_officer_count}名)の'
+                f'{FISCAL_MISMATCH_RATIO*100:.0f}%未満。中途入退社{excluded_n}名は'
+                f'公募要領通り算出対象から除外。R215/R216 は自動転記しますが、'
+                f'対象者と賃金台帳期間を念のためご確認ください'
+            )
+            return plan, employees_raw, 'low_full_year_ratio'
         return plan, employees_raw, ''
 
     except Exception as e:
