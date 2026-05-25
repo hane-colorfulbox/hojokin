@@ -956,6 +956,30 @@ def run_application_transfer(
             wage_extraction_method=wage_extraction_method,
         )
 
+        # 一人当たり給与支給総額シートを AI 版に統合（API 追加コスト 0）。
+        # 申請書作成タスクで既に取得済みの financial / ledger_employees / company を
+        # cached_* として渡して per_employee_only 経路を実行 → 内部で API 呼出スキップ。
+        # 賃金台帳が読めなかったケース（ledger_employees 空）はそもそも給与計算できないので
+        # スキップ。失敗してもログ警告のみで申請書本体は維持する（補助情報のため）。
+        if ledger_employees:
+            try:
+                _attach_per_employee_wage_sheet(
+                    output_path=output_path,
+                    resource_folder=resource_folder,
+                    company_name=resource_folder.name,
+                    extractor=extractor,
+                    cached_financial=extraction.financial,
+                    cached_ledger_employees=ledger_employees,
+                    cached_company=extraction.company,
+                    fiscal_month_override=fiscal_month_override,
+                    selection_override=selection_override,
+                )
+            except Exception as e:
+                logger.warning(
+                    f'一人当たり給与支給総額シートの統合に失敗（申請書本体は維持）: {e}',
+                    exc_info=True,
+                )
+
     except Exception as e:
         # 通常の例外（ファイル不在等）: ステータスをエラーに
         # API残高切れは Phase 2 内で個別ハンドル済みなのでここには到達しない
@@ -964,6 +988,75 @@ def run_application_transfer(
         logger.error(f'エラー: {e}', exc_info=True)
 
     return status
+
+
+def _attach_per_employee_wage_sheet(
+    output_path: Path,
+    resource_folder: Path,
+    company_name: str,
+    extractor: BaseExtractor | None,
+    cached_financial: 'FinancialData | None',
+    cached_ledger_employees: list,
+    cached_company: 'CompanyInfo | None',
+    fiscal_month_override: int | None,
+    selection_override: dict[str, list[Path]] | None,
+) -> None:
+    """申請書作成タスクの出力 Excel に「一人当たり給与支給総額」シートを統合する。
+
+    動作概要:
+      1. 一時ファイルパスで run_wage_calculation(per_employee_only=True) を実行
+         （cached_* を渡すことで履歴事項・PL・賃金台帳の AI 抽出を全てスキップ → API 追加コスト 0）
+      2. 一時ファイルから「給与支給総額計算」「従業員別明細」シートを copy_sheet_to_workbook で
+         AI 版.xlsx 末尾にコピー
+      3. 一時ファイル削除
+
+    失敗時は呼び出し側で warning ログを出して申請書本体は維持する設計。
+    """
+    import tempfile
+    from .template_filler import copy_sheet_to_workbook
+
+    with tempfile.TemporaryDirectory(prefix='hojokin_wage_') as tmpdir:
+        tmp_path = Path(tmpdir) / f'{company_name}_一人当たり給与支給総額.xlsx'
+        wage_status = run_wage_calculation(
+            resource_folder=resource_folder,
+            company_name=company_name,
+            output_path=tmp_path,
+            extractor=extractor,
+            cached_financial=cached_financial,
+            cached_ledger_employees=cached_ledger_employees,
+            cached_company=cached_company,
+            fiscal_month_override=fiscal_month_override,
+            selection_override=selection_override,
+            per_employee_only=True,
+        )
+
+        if wage_status.status not in ('完了', '部分完了') or not tmp_path.exists():
+            logger.warning(
+                f'一人当たり給与支給総額シート: 生成失敗 (status={wage_status.status}) — '
+                f'統合をスキップ'
+            )
+            return
+
+        # 一時 Excel を開いてシートを抽出 → AI版.xlsx に追記
+        import openpyxl
+        src_wb = openpyxl.load_workbook(tmp_path)
+        dest_wb = openpyxl.load_workbook(output_path)
+        try:
+            copied = 0
+            # 給与計算 Excel のシート構成は create_wage_calculation 仕様:
+            #   1. 給与支給総額計算（メイン）
+            #   2. 従業員別明細（任意。賃金台帳に12ヶ月明細がある場合のみ生成）
+            for sheet_name in ('給与支給総額計算', '従業員別明細'):
+                if sheet_name in src_wb.sheetnames:
+                    copy_sheet_to_workbook(src_wb[sheet_name], dest_wb)
+                    copied += 1
+            dest_wb.save(output_path)
+            logger.info(
+                f'一人当たり給与支給総額シート: {copied}シートを AI 版に統合（API追加 0回）'
+            )
+        finally:
+            src_wb.close()
+            dest_wb.close()
 
 
 def run_wage_calculation(

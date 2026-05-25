@@ -14,6 +14,11 @@ from .config import TemplateMapping, get_min_wage
 
 logger = logging.getLogger(__name__)
 
+# 申請内容シート先頭の社内チェックリスト（GビズID/添付資料/フォーマット作成者チェック/
+# ダブルチェック）の行範囲。AI 転記対象外なので出力 xlsx では非表示化して縮小する。
+SHINSEI_CHECKLIST_HIDE_START = 5
+SHINSEI_CHECKLIST_HIDE_END = 26
+
 
 def _safe_write_cell(ws, row: int, col: int, value):
     """結合セルに対応した安全な書き込み。
@@ -467,6 +472,20 @@ def fill_template(
         if fixed > 0:
             logger.info(f'STEP 5: テンプレ原本の行高バグを修正 {fixed}行')
 
+    # STEP 5.5: 申請内容シート先頭の社内チェックリスト（行5〜26）を非表示化
+    # テンプレ原本のチェック項目（GビズID/申請時添付資料/フォーマット作成者チェック/
+    # ダブルチェック）は AI 転記対象外（AI 書き込みは行54以降）。出力 xlsx では
+    # 視認性向上のため非表示にして縮小表示する（物理削除すると数式参照や条件付き書式の
+    # 範囲が openpyxl 上で完全に追従しないため hidden=True を採用）。
+    if '申請内容' in wb.sheetnames:
+        ws_s = wb['申請内容']
+        for r in range(SHINSEI_CHECKLIST_HIDE_START, SHINSEI_CHECKLIST_HIDE_END + 1):
+            ws_s.row_dimensions[r].hidden = True
+        logger.info(
+            f'STEP 5.5: 申請内容シート 行{SHINSEI_CHECKLIST_HIDE_START}〜'
+            f'{SHINSEI_CHECKLIST_HIDE_END} を非表示化'
+        )
+
     # 保存
     wb.save(output_path)
     wb.close()
@@ -509,6 +528,70 @@ def _restore_squashed_text_rows(
         ws.row_dimensions[r].height = base_height * lines
         fixed += 1
     return fixed
+
+
+def copy_sheet_to_workbook(
+    src_ws,
+    dest_wb: openpyxl.Workbook,
+    new_title: str | None = None,
+) -> 'openpyxl.worksheet.worksheet.Worksheet':
+    """openpyxl のワークシートを別ワークブックに丸ごとコピーする。
+
+    申請書作成タスクで「給与支給総額計算」「従業員別明細」シートを
+    AI版.xlsx 末尾に取り込むためのヘルパー。openpyxl は同一ワークブック内の
+    copy_worksheet しか持たないため、別ブック間コピーをここで実装する。
+
+    コピーする要素: セル値（数式含む）/ フォント・塗り・罫線・配置・数値書式 /
+    列幅 / 行高 / マージセル / 印刷設定（タイトル行など触らない）。
+    条件付き書式・データ検証・ピボットなど高度な要素は対象外（給与計算シート側で
+    使われていないため）。
+
+    同名シートが dest_wb に既存なら削除してから新規作成する。
+    """
+    from copy import copy as _copy
+
+    title = new_title or src_ws.title
+    if title in dest_wb.sheetnames:
+        del dest_wb[title]
+    dest_ws = dest_wb.create_sheet(title)
+
+    # セル値+スタイル（MergedCell は値書き込み不可なので skip。マージは下で別途処理）
+    for row in src_ws.iter_rows():
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            new_cell = dest_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            if cell.has_style:
+                new_cell.font = _copy(cell.font)
+                new_cell.border = _copy(cell.border)
+                new_cell.fill = _copy(cell.fill)
+                new_cell.alignment = _copy(cell.alignment)
+                new_cell.protection = _copy(cell.protection)
+                new_cell.number_format = cell.number_format
+
+    # 列幅
+    for col_letter, dim in src_ws.column_dimensions.items():
+        new_dim = dest_ws.column_dimensions[col_letter]
+        if dim.width is not None:
+            new_dim.width = dim.width
+        new_dim.hidden = dim.hidden
+
+    # 行高
+    for row_num, dim in src_ws.row_dimensions.items():
+        new_dim = dest_ws.row_dimensions[row_num]
+        if dim.height is not None:
+            new_dim.height = dim.height
+        new_dim.hidden = dim.hidden
+
+    # マージセル
+    for mr in list(src_ws.merged_cells.ranges):
+        dest_ws.merge_cells(str(mr))
+
+    # シート表示（フリーズペイン等）
+    if src_ws.freeze_panes:
+        dest_ws.freeze_panes = src_ws.freeze_panes
+
+    return dest_ws
 
 
 # ============================================================
