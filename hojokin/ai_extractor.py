@@ -10,6 +10,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .models import (
@@ -18,6 +19,47 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ShortenResult:
+    """事業内容短縮処理の結果。
+
+    source の意味:
+      - 'ai':         AI 生成候補（255 以内）をそのまま採用
+      - 'mechanical': 候補が全て 255 超だったため、機械的に末尾を削って 255 以内に収めた
+                      （4要素の「期待効果」等が失われている可能性あり）
+      - 'failed':     候補生成も機械削除も失敗（API 不可・句点なし極小入力など）。
+                      pipeline 側は原文を残して強警告を出す
+    """
+    text: str | None
+    source: str  # 'ai' | 'mechanical' | 'failed'
+
+    @property
+    def length(self) -> int:
+        return len(self.text) if self.text else 0
+
+
+def _trim_to_period_limit(text: str, limit: int) -> str | None:
+    """末尾の文を句点単位で削って limit 以内に収める。
+
+    句点（「。」）で分割し、末尾から1文ずつ落としていく。
+    句点が無い・1文しかなく句点削除では収まらないケースは None を返す。
+    """
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    parts = text.split('。')
+    # 末尾が空文字（text が「...である。」で終わっている場合）はリストから除外
+    if parts and parts[-1] == '':
+        parts.pop()
+    while parts:
+        candidate = '。'.join(parts) + '。'
+        if len(candidate) <= limit:
+            return candidate
+        parts.pop()
+    return None
 
 
 # ── リトライ設定 ──
@@ -1060,21 +1102,18 @@ class BaseExtractor(ABC):
         """
         ...
 
-    def shorten_business_description(self, text: str, max_len: int = 250) -> str | None:
+    def shorten_business_description(
+        self,
+        text: str,
+        max_len: int = 250,
+        n_candidates: int = 3,
+    ) -> 'ShortenResult':
         """事業内容（business_description）が255文字制限を超えた場合の救済短縮。
 
-        生成済み本文を Claude に渡し、4要素（現状/課題/解決策/効果）を維持しつつ
-        max_len 文字以内に書き直してもらう。リトライは1回のみ（呼び出し側で実施）。
-
-        Args:
-            text: 短縮対象の事業内容本文
-            max_len: 目標上限文字数（既定250。255までのバッファを含めた値を渡す）
-
-        Returns:
-            短縮後の本文（max_len 以内）。短縮できなかった場合や API 不可の場合は None。
-            既定実装は None を返す（API 非利用環境向けの no-op）。
+        実装は ClaudeExtractor で N 案生成 + 機械選択。
+        既定実装は failed を返す（API 非利用環境向けの no-op）。
         """
-        return None
+        return ShortenResult(text=None, source='failed')
 
 
 class StubExtractor(BaseExtractor):
@@ -1628,66 +1667,114 @@ class ClaudeExtractor(BaseExtractor):
             expected_effect=d.get('expected_effect', ''),
         )
 
-    def shorten_business_description(self, text: str, max_len: int = 250) -> str | None:
-        """事業内容が255文字超のとき、Claude に1回だけ短縮を依頼する。
+    def shorten_business_description(
+        self,
+        text: str,
+        max_len: int = 250,
+        n_candidates: int = 3,
+    ) -> ShortenResult:
+        """事業内容が255文字超のとき、Claude に N 案生成させて文字数で機械選択する。
 
-        4要素（現状/課題/解決策/効果）を維持しつつ max_len 文字以内に圧縮。
-        API 残高切れ・通信エラー・想定外の応答は None を返し、呼び出し側で警告にフォールバック。
+        フロー:
+          1. 同一プロンプトを n_candidates 回送って候補を集める（temperature=0.7 でばらつかせる）
+          2. 255 以内の候補があれば「最長」を採用 → source='ai'
+          3. 全候補が 255 超なら、最短の候補を句点単位で末尾削除して 255 以内に収める → 'mechanical'
+          4. 句点削除でも収まらない/候補ゼロなら 'failed'（呼び出し側で原文残し+強警告）
+
+        LLM 単体で文字数を厳守させるのは不安定なため、決定的な後処理を後段に積む構造。
         """
         if not text:
-            return None
+            return ShortenResult(text=None, source='failed')
 
         target = max(200, min(max_len, 252))  # 200〜252の範囲にクランプ
         prompt = (
             '以下の事業内容を、意味と4要素（現状/課題/解決策/期待効果）を維持しつつ'
             f'**{target}文字以内**に短縮してください。\n'
             '制約:\n'
-            f'・本文のみを返す（前置き・説明・引用符・コードブロック・改行を入れない）\n'
+            '・本文のみを返す（前置き・説明・引用符・コードブロック・改行を入れない）\n'
             f'・句読点・記号も1文字としてカウントし、必ず{target}文字以内に収める\n'
             '・語尾は「〜である」調を維持\n'
             '・固有の業務名・数値（時間・%・金額等）は削らない\n\n'
             f'【原文（{len(text)}文字）】\n{text}'
         )
 
-        stats = f'images=0枚 prompt={len(prompt)}chars max_tokens=1024'
-        logger.warning(f'[API送信] caller=shorten_business_description {stats} 原文={len(text)}文字 目標={target}文字')
-        try:
-            response = self._messages_create_with_retry(
-                caller='shorten_business_description',
-                stats=stats,
-                model=self.model,
-                max_tokens=1024,
-                messages=[{'role': 'user', 'content': prompt}],
-            )
-        except APICreditExhaustedError as e:
-            logger.warning(f'[API失敗] caller=shorten_business_description APIクレジット切れ: {e}')
-            return None
-        except Exception as e:
-            logger.warning(f'[API失敗] caller=shorten_business_description {type(e).__name__}: {e}')
-            return None
-
-        try:
-            shortened = (response.content[0].text or '').strip()
-        except (IndexError, AttributeError) as e:
-            logger.warning(f'[API失敗] caller=shorten_business_description 応答パース失敗: {e}')
-            return None
-
-        # 引用符・コードフェンス・改行で囲まれて返ってきた場合の保険処理
-        for fence in ('```', '"""', "'''"):
-            if shortened.startswith(fence) and shortened.endswith(fence):
-                shortened = shortened[len(fence):-len(fence)].strip()
-        shortened = shortened.strip('「」"\'').replace('\n', '').strip()
-
+        stats_base = f'images=0枚 prompt={len(prompt)}chars max_tokens=1024 temperature=0.7'
         logger.warning(
-            f'[API成功] caller=shorten_business_description '
-            f'短縮結果={len(shortened)}文字 '
-            f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
+            f'[API送信] caller=shorten_business_description '
+            f'{stats_base} 原文={len(text)}文字 目標={target}文字 n_candidates={n_candidates}'
         )
 
-        # 255超のままなら採用しない（呼び出し側で警告フォールバック）
-        if not shortened or len(shortened) > 255:
-            return None
-        return shortened
+        candidates: list[str] = []
+        credit_exhausted = False
+        for i in range(n_candidates):
+            caller = f'shorten_business_description_{i+1}/{n_candidates}'
+            try:
+                response = self._messages_create_with_retry(
+                    caller=caller,
+                    stats=stats_base,
+                    model=self.model,
+                    max_tokens=1024,
+                    temperature=0.7,
+                    messages=[{'role': 'user', 'content': prompt}],
+                )
+            except APICreditExhaustedError as e:
+                logger.warning(f'[API失敗] caller={caller} APIクレジット切れ: {e}')
+                credit_exhausted = True
+                break  # 残高切れなら以降の候補生成も無駄
+            except Exception as e:
+                logger.warning(f'[API失敗] caller={caller} {type(e).__name__}: {e}')
+                continue
+
+            try:
+                cand = (response.content[0].text or '').strip()
+            except (IndexError, AttributeError) as e:
+                logger.warning(f'[API失敗] caller={caller} 応答パース失敗: {e}')
+                continue
+
+            # 引用符・コードフェンス・改行で囲まれて返ってきた場合の保険処理
+            for fence in ('```', '"""', "'''"):
+                if cand.startswith(fence) and cand.endswith(fence):
+                    cand = cand[len(fence):-len(fence)].strip()
+            cand = cand.strip('「」"\'').replace('\n', '').strip()
+
+            if cand:
+                candidates.append(cand)
+                logger.warning(
+                    f'[API成功] caller={caller} 候補{i+1}={len(cand)}文字 '
+                    f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
+                )
+
+        if not candidates:
+            reason = 'APIクレジット切れ' if credit_exhausted else '全候補の生成に失敗'
+            logger.warning(f'shorten_business_description: {reason}（候補ゼロ）')
+            return ShortenResult(text=None, source='failed')
+
+        # 段1: 255以内の候補があれば「最長」を採用（情報量を最大化）
+        valid = [c for c in candidates if len(c) <= 255]
+        if valid:
+            best = max(valid, key=len)
+            logger.warning(
+                f'shorten_business_description: AI候補採用 '
+                f'候補数={len(candidates)} 255以内={len(valid)} 採用={len(best)}文字'
+            )
+            return ShortenResult(text=best, source='ai')
+
+        # 段2: 全候補が255超 → 最短候補を句点単位で末尾削除
+        base = min(candidates, key=len)
+        trimmed = _trim_to_period_limit(base, 255)
+        if trimmed and len(trimmed) <= 255:
+            logger.warning(
+                f'shorten_business_description: 機械削除フォールバック '
+                f'候補数={len(candidates)} 全候補255超 ベース={len(base)}文字 → 削除後={len(trimmed)}文字'
+            )
+            return ShortenResult(text=trimmed, source='mechanical')
+
+        # 段3: 句点削除でも収まらない（句点なし等の異常ケース）
+        logger.warning(
+            f'shorten_business_description: 機械削除も失敗 '
+            f'候補数={len(candidates)} 最短候補={len(base)}文字'
+        )
+        return ShortenResult(text=None, source='failed')
 
     def extract_wage_ledger(
         self,

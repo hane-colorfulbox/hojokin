@@ -777,38 +777,49 @@ def run_application_transfer(
             )
 
         # AI 生成の事業内容の文字数チェック（240〜255文字が望ましい）
-        # 255超は申請書セルで切り詰められるため、API 1回で自動短縮を試みる。
-        # 失敗（API残高切れ・短縮後も255超等）した場合は原文を残して警告のみ。
+        # 255超は申請書セルで切り詰められるため、Sonnet で N 案生成 → 文字数で機械選択する。
+        # フロー: AI候補採用 / 機械削除フォールバック / 失敗（原文残し）の3パターンで警告分岐。
         biz_desc_warning = ''
         biz_desc = (extraction.ai_judgment.business_description or '').strip()
         if biz_desc:
-            n = len(biz_desc)
-            if n > 255:
-                shortened = None
+            n_orig = len(biz_desc)
+            if n_orig > 255:
+                result = None
                 if extractor is not None:
                     try:
-                        shortened = extractor.shorten_business_description(biz_desc, max_len=250)
+                        result = extractor.shorten_business_description(biz_desc, max_len=250)
                     except Exception as e:
                         logger.warning(f'事業内容の自動短縮に失敗（警告にフォールバック）: {e}', exc_info=True)
-                        shortened = None
+                        result = None
 
-                if shortened and len(shortened) <= 255:
-                    extraction.ai_judgment.business_description = shortened
+                # 最終案を採用 → その案に対して1回だけ文字数判定して警告を分岐
+                if result and result.text and result.source == 'ai':
+                    extraction.ai_judgment.business_description = result.text
                     biz_desc_warning = (
-                        f' ℹ 事業内容が文字数制限超過（{n}文字）だったため、自動で'
-                        f'{len(shortened)}文字に短縮しました。提出前に内容を必ず目視確認してください。'
+                        f' ℹ 事業内容が文字数制限超過（原文{n_orig}文字）だったため、'
+                        f'AI で再生成した3案から最適なもの（{result.length}文字）を採用しました。'
+                        f'提出前に内容を必ず目視確認してください。'
                     )
-                    logger.warning(
-                        f'事業内容を自動短縮: {n}文字 → {len(shortened)}文字'
+                    logger.warning(f'事業内容を自動短縮(AI採用): {n_orig}文字 → {result.length}文字')
+                elif result and result.text and result.source == 'mechanical':
+                    extraction.ai_judgment.business_description = result.text
+                    biz_desc_warning = (
+                        f' ⚠ 事業内容が文字数制限超過（原文{n_orig}文字）。AI再生成3案がすべて'
+                        f'255文字超だったため、機械的に末尾の文を削って{result.length}文字に収めました。'
+                        f'4要素のうち「期待効果」が削られている可能性があるため、'
+                        f'必ず原文と照合して目視確認してください。'
                     )
+                    logger.warning(f'事業内容を自動短縮(機械削除): {n_orig}文字 → {result.length}文字')
                 else:
                     biz_desc_warning = (
-                        f' ⚠ 事業内容が文字数制限超過（{n}文字 / 上限255文字）。'
-                        f'自動短縮を試みましたが収まりませんでした。原稿を手動短縮してください。'
+                        f' ⚠ 事業内容が文字数制限超過（{n_orig}文字 / 上限255文字）。'
+                        f'自動短縮（AI再生成 + 機械削除）に失敗しました。'
+                        f'原稿を手動で短縮してください。'
                     )
-            elif n < 240:
+                    logger.warning(f'事業内容の自動短縮に失敗: {n_orig}文字のまま残置')
+            elif n_orig < 240:
                 biz_desc_warning = (
-                    f' ⚠ 事業内容が短すぎます（{n}文字 / 推奨240〜255文字）。'
+                    f' ⚠ 事業内容が短すぎます（{n_orig}文字 / 推奨240〜255文字）。'
                     f'4要素（現状・課題・解決策・期待効果）が十分書き切れているか、'
                     f'ヒアリング情報を追記して厚みを出してください。'
                 )
