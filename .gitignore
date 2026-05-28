@@ -28,6 +28,24 @@ output/
 # ツール/ 配下のテンプレ・ヒアリングシート原本は管理対象（Streamlit Cloud で必要）
 !ツール/*.xlsx
 
+# .claude/skills/ 配下のテンプレは管理対象（Skill 同梱、ZIP ビルドのソース）
+!.claude/skills/**/*.xlsx
+
+# Skill ZIP 配布物（生成物、Drive 経由で配布するため git 管理しない）
+_dist/
+
+# Skill テスト時の顧客データ（PDF/ヒアリング/案件メタ/テストレポート）
+# 顧客企業名・従業員氏名・金額が含まれるため絶対にコミットしない
+_test_meta/
+
+# ローカル個人バックアップ（Codex レビュー結果プロンプト等、顧客情報が混入する可能性）
+_backups/
+
+# .claude/ の個人ファイル（CC 動作中のロックやセッション情報）。Skill 配下だけはホワイトリスト
+.claude/*
+!.claude/skills/
+!.claude/skills/**
+
 # その他
 *.log
 .DS_Store

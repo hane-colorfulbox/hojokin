@@ -1867,8 +1867,8 @@ class ClaudeExtractor(BaseExtractor):
             raise ImageFallbackBlockedError(
                 'Document AI / ローカルテキスト抽出に失敗しました。'
                 '画像経路（Sonnet 直送）へのフォールバックは「賃金台帳の作成」タスクでは無効化されています。'
-                'ローカル（Claude Code）で手動変換してください — '
-                'docs/賃金台帳変換手順_CC向け.md 参照。'
+                '手元の Claude Code に wagebook-convert Skill をインストールして手動変換してください — '
+                'Streamlit アプリ上部「📘 賃金台帳の作成手順（CC向け Skill）」expander から ZIP を取得。'
             )
 
         # ── 事前分割判定（初回のみ） ──

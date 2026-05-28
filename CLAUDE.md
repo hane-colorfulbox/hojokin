@@ -46,7 +46,7 @@ IT導入補助金の申請書類を、ヒアリングシート・PDF資料・Exc
 - 顧客への依頼は **原則 Excel / CSV 形式**（フォーマット統一によりAPI節約・自動化精度向上）
 - PDF しか出ない場合の処理経路（優先順）:
   1. **ツール側「賃金台帳の作成」タスク**（v0.2.9〜、推奨）。Document AI + Sonnet 4.6 で PDF → ツール規格 Excel に自動変換。Sonnet 画像フォールバックは無効化済み（精度面で劣るため）。
-  2. Document AI が失敗した場合 or 手書きPDF で精度が落ちた場合 → ローカル（Claude Code）で手動変換。手順は `docs/賃金台帳変換手順_CC向け.md` 参照
+  2. Document AI が失敗した場合 or 手書きPDF で精度が落ちた場合 → 手元の Claude Code に `wagebook-convert` Skill をインストールして変換。Skill 本体は `.claude/skills/wagebook-convert/` で git 管理、配布は ZIP（`scripts/build_skill_zip.py` で生成 → Drive に配置 → Streamlit アプリ上のリンクから DL）
 - 変換用テンプレート: `ツール/賃金台帳テンプレート.xlsx`（B5-S5 ヘッダー、必須項目：No / 氏名 / 雇用形態 / 月平均時間 / 時給 / 1〜12月 / 年間通勤手当）
 
 ### 定例報告
@@ -100,7 +100,7 @@ IT導入補助金の申請書類を、ヒアリングシート・PDF資料・Exc
 - `docs/設計_API自動化.md` — 完全自動化バージョンの設計案
 - `docs/案件メモ/` — 個別案件の調査ログ（テンプレートのみ。実案件メモは gitignore）
 - **`docs/補助金_実務知識ベース.md`** — **R215/R216 や賃金台帳の取り扱いに迷ったらまずここを参照**。公募要領の定義（給与支給総額・役員除外・賞与の扱い）、賃金台帳の構造解釈（段1/段2/役員ブロック）、Codex 調査結果のサマリを集約。鮮度管理あり。
-- **`docs/賃金台帳変換手順_CC向け.md`** — **PDF賃金台帳をツール用 Excel に変換するときの手順**。テンプレ仕様、役員ラベル正規化（落とし穴あり）、Drive アップ手順、案件別パターン。**xlsxの月列には「直近事業年度の12ヶ月分」を入れる（暦年ではない）** ← 落とし穴（§1.1）。CC を使う他の担当者にも共有可。
+- **`.claude/skills/wagebook-convert/`** — **PDF賃金台帳をツール用 Excel に変換するための CC Skill**。`SKILL.md` 本体に手順、`reference/` に役員正規化と公募要領要点、`checklists/` に検証チェックリスト、`templates/` に賃金台帳テンプレート、`examples/` に抽象化サンプル変換例を同梱。**xlsxの月列には「直近事業年度の12ヶ月分」を入れる（暦年ではない）** ← 落とし穴。配布は ZIP（`scripts/build_skill_zip.py` で生成）→ Drive 経由で他担当者へ。CC が文脈で自動発火、または `/wagebook-convert` で明示起動。
 
 ## R215/R216 や賃金台帳に迷ったら
 

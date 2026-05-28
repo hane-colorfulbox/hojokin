@@ -1111,8 +1111,8 @@ def _render_file_check_result(result, total_count):
                 if cat == 'wage_ledger':
                     st.markdown(
                         '&ensp;💡 PDFしか無い場合は Excel に変換してアップロードしてください。'
-                        '[変換手順（CC向け）](https://github.com/hane-colorfulbox/hojokin/blob/main/docs/%E8%B3%83%E9%87%91%E5%8F%B0%E5%B8%B3%E5%A4%89%E6%8F%9B%E6%89%8B%E9%A0%86_CC%E5%90%91%E3%81%91.md) ・ '
-                        '[空テンプレート](https://github.com/hane-colorfulbox/hojokin/blob/main/%E3%83%84%E3%83%BC%E3%83%AB/%E8%B3%83%E9%87%91%E5%8F%B0%E5%B8%B3%E3%83%86%E3%83%B3%E3%83%97%E3%83%AC%E3%83%BC%E3%83%88.xlsx)'
+                        '変換は **手元の PC の Claude Code（CC）+ `wagebook-convert` Skill** で行います。'
+                        'ページ上部の「📘 賃金台帳の作成手順（CC向け Skill）」expander にセットアップ手順と依頼方法を載せています。'
                     )
             else:
                 st.markdown(f'➖ {display} — なし（任意）')
@@ -1429,18 +1429,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 賃金台帳の作成手順（CC向けマニュアル） — 賃金台帳を作る/直す前に必ず読む。
+# 賃金台帳の作成手順（CC向け Skill）— 手元の Claude Code に Skill をインストールして使う運用。
+# Skill 本体は .claude/skills/wagebook-convert/ で管理（git）、配布は ZIP 経由（Drive）。
 # 過去事故：暦年と事業年度が混在した独自フォーマットで作って R215/R216 が誤集計された
-_WAGE_MANUAL_PATH = Path(__file__).parent / 'docs' / '賃金台帳変換手順_CC向け.md'
+# Skill ZIP の更新日（build_skill_zip.py 実行後に手動更新）
+_WAGEBOOK_SKILL_VERSION = '2026-05-28'
+# Drive 共有リンク（wagebook-convert.zip を配置した Drive ファイル URL）
+# 配布先: マイドライブ/補助金ツール/wagebook-convert.zip （カラフルボックス株式会社グループ閲覧可）
+_WAGEBOOK_SKILL_ZIP_URL = 'https://drive.google.com/file/d/1VxD0y4l7DPb9qK7eDfOpWUDQvMZ9eBBF/view?usp=sharing'
 with st.expander(
-    '📘 賃金台帳の作成手順（CC向けマニュアル） — 賃金台帳を作る/直すときは必ずここを確認',
+    '📘 賃金台帳の作成手順（CC向け Skill） — 賃金台帳を作る/直すときはここを確認',
     expanded=False,
 ):
-    # 人向けの使い方（CCへの依頼テンプレ）
     st.info(
-        '**このマニュアルは Claude Code（CC）に作業させるためのものです。**\n\n'
-        '人がやる作業は「CC にこのマニュアルを参照させて、賃金台帳の変換を依頼する」だけ。\n'
-        '具体的な変換手順は CC が下のマニュアルを読んで実行します。'
+        '**この作業は手元の PC の Claude Code（CC）に行わせます。**\n\n'
+        '人がやる作業は「自分の PC の CC に `wagebook-convert` Skill をインストールして、賃金台帳の変換を依頼する」だけ。\n'
+        '具体的な変換手順・テンプレート・検証チェックリスト・サンプルは Skill 内に同梱されています。'
     )
     st.warning(
         '**📋 対応フォーマット**：Excel / CSV / テキストPDF が推奨です。\n\n'
@@ -1449,48 +1453,47 @@ with st.expander(
         '顧客には可能な限り Excel/CSV 形式での提出を依頼するのが理想です。'
     )
 
-    st.markdown('### 👤 CC への依頼方法')
+    st.markdown('### 🔧 初回セットアップ（1回だけ実施）')
     st.markdown(
-        '各自のPCで CC（claude.ai のチャット / 手元の Claude Code 等）に賃金台帳の変換を'
-        'してもらうための依頼文です。下のブロックを **丸ごとコピー**（右上のコピーボタン）'
-        '→ 案件情報の `○○` を埋めて CC に貼り付けて送信してください。'
+        f'1. [`wagebook-convert.zip` をダウンロード]({_WAGEBOOK_SKILL_ZIP_URL})\n'
+        '2. ZIP を展開し、フォルダ `wagebook-convert/` を以下に配置：\n'
+        '   - Windows: `C:\\\\Users\\\\<ユーザー名>\\\\.claude\\\\skills\\\\wagebook-convert\\\\`\n'
+        '   - macOS: `~/.claude/skills/wagebook-convert/`\n'
+        '3. Claude Code を再起動\n'
+        '4. CC に `/wagebook-convert` と打って Skill 名が候補に出れば成功\n\n'
+        f'**最新版: {_WAGEBOOK_SKILL_VERSION}**（手元の Skill が古い場合は再ダウンロードして上書き）'
     )
-    if _WAGE_MANUAL_PATH.exists():
-        _manual_text = _WAGE_MANUAL_PATH.read_text(encoding='utf-8')
-        _full_request = (
-            '以下のマニュアルを参照して、○○社の賃金台帳を変換してください。\n\n'
-            '【出力ファイルの最低仕様(マニュアル §1 のサマリ)】\n'
-            '- シート名: 「従業員別明細」\n'
-            '- ヘッダー行: 5行目(B5〜S5)\n'
-            '- B5=No, C5=氏名, D5=雇用形態, E5=月間平均時間, F5=時給,\n'
-            '  G5=1月, H5=2月, I5=3月, J5=4月, K5=5月, L5=6月,\n'
-            '  M5=7月, N5=8月, O5=9月, P5=10月, Q5=11月, R5=12月, S5=年間通勤手当\n'
-            '- データ行: B6 から\n'
-            '- 月列(G〜R)は「カレンダー月のラベル」で、値は「直近事業年度の12ヶ月分」を\n'
-            '  カレンダー月の位置に入れる(§1.1 の落とし穴と §11 の完成形サンプルを必ず確認)\n\n'
-            '【案件情報】\n'
-            '- 元データ: (PDFのパス or アップロードしたファイル名)\n'
-            '- 決算月: ○月(→ 事業年度は決算月+1 月始まり〜決算月で計算)\n'
-            '- 出力先ファイル名: ○○社_賃金台帳一覧.xlsx\n\n'
-            '【手書き／画像PDFだった場合の追加指示(マニュアル §0.1 参照)】\n'
-            '- 作業は通常通り続行する(中断しない)\n'
-            '- 出力xlsx の上部(B1〜B3 セル)に以下の警告を赤字で明記:\n'
-            '  「⚠️ 手書きPDFからの抽出のため精度が低い可能性あり。PDF原本と全数値を必ず照合してください」\n'
-            '- 不鮮明・推測で埋めたセルはセル色を黄色にして強調\n'
-            '- 「変換メモ」シートに不明瞭だったページ番号と該当セル一覧を残す\n\n'
-            '===== マニュアル本文(賃金台帳変換手順_CC向け.md) =====\n\n'
-            + _manual_text
-        )
-        st.code(_full_request, language='markdown')
-    else:
-        st.warning(f'マニュアルファイルが見つかりません: {_WAGE_MANUAL_PATH}')
 
-    st.divider()
-    st.caption('▼ 以下は人が事前に内容を確認したいとき用のマニュアル全文表示')
-    if _WAGE_MANUAL_PATH.exists():
-        st.markdown(_WAGE_MANUAL_PATH.read_text(encoding='utf-8'))
-    else:
-        st.warning(f'マニュアルファイルが見つかりません: {_WAGE_MANUAL_PATH}')
+    st.markdown('### 👤 CC への依頼方法（毎回）')
+    st.markdown(
+        'Skill インストール後は、手元の PC の Claude Code に以下のいずれかで依頼するだけ：'
+    )
+    st.code(
+        '/wagebook-convert で起動 → 案件情報を伝える\n\n'
+        'または、自然文で「○○社の賃金台帳 PDF を変換して。決算月は○月。」と頼むだけでも\n'
+        'Skill が自動発火します。',
+        language='markdown',
+    )
+
+    st.markdown('### 📋 CC に伝えるべき情報（事前指定）')
+    st.markdown(
+        '事業年度ズレ・役員判定ミス・賞与漏れ等の事故を防ぐため、依頼時に **以下を必ず指定** してください：\n\n'
+        '| # | 項目 | 必須/任意 | 補足 |\n'
+        '|---|---|---|---|\n'
+        '| 1 | 賃金台帳 PDF のパス | ◯ | アップロード済みファイル名でも可 |\n'
+        '| 2 | 会社名 | ◯ | 出力ファイル名に使用 |\n'
+        '| 3 | 決算月（1〜12 の数字）| ◯ | **未指定だと事業年度ズレ事故** |\n'
+        '| 4 | 法人 / 個人事業主の別 | ◯ | 個人事業主は「事業主」「専従者」の扱いが特殊 |\n'
+        '| 5 | 履歴事項全部証明書 PDF（あれば） | △ | 役員自動判定精度が大幅向上 |\n'
+        '| 6 | 賃金台帳が単一 PDF か複数 PDF か | ◯ | 複数の場合は事前マージ or 顧客に統合版再依頼 |\n'
+        '| 7 | 賞与の支給月（年度＋回数表記の場合のみ）| △ | 「令和7年1回」のような表記で支給月不明な場合 |\n'
+    )
+
+    st.caption(
+        '※ Skill 内に手順書（SKILL.md）・テンプレート・サンプル変換例・検証チェックリスト・実テスト 11 案件のケーススタディが同梱されています。'
+        'CC は必要に応じて参照しながら作業します。'
+        '手書き／画像PDF の場合は §4.4 のゲート判定で読み取り困難と判定したらデータ転記を停止し、代替ソース取得を打診します（低品質データを出さない設計）。'
+    )
 
 # Drive連携用の変数
 drive_folder_id = None

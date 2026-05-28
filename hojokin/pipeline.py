@@ -2218,8 +2218,8 @@ def run_wage_ledger_conversion(
             status.message = (
                 f'⛔ Document AI で賃金台帳を抽出できませんでした（{str(e).split("。")[0]}）。'
                 'PDF が画像品質的に Document AI で読めない可能性があります。'
-                'ローカル（Claude Code）で手動変換してください — '
-                'docs/賃金台帳変換手順_CC向け.md 参照。'
+                '手元の Claude Code に wagebook-convert Skill をインストールして手動変換してください — '
+                'Streamlit アプリ上部「📘 賃金台帳の作成手順（CC向け Skill）」expander から ZIP を取得。'
             )
             logger.error(f'画像フォールバック禁止のため停止: {e}')
             return status
