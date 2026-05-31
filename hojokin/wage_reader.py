@@ -130,8 +130,22 @@ _HEADER_ALIASES = {
     'base_wage':  ['基本給'],
     'hourly_wage':['基本給(時給)', '時給', '時間給'],
     'hours':      ['所定労働時間', '労働時間', '月間平均時間', '平均時間'],
-    'total':      ['支給合計額', '支給合計', '総支給額', '総支給',
-                   '課税支給合計', '差引支給合計'],
+    # 非課税額（通勤費の非課税分など）。total(gross) 採用時に差し引いて課税額へ補正。
+    # 公募要領 p.10「給与所得として課税対象」+ 国税庁 No.2585（通勤手当は限度額まで非課税）。
+    # ★宣言順を total_taxable / total より前に置く理由★: _match_alias は部分一致を許すため
+    #   「非課税支給合計」が「課税支給合計」(total_taxable) や「支給合計」(total) の別名に
+    #   部分一致してしまう。nontax を先に走査して『非課税◯◯』を確実に nontax へ確定させ、
+    #   課税列・支給合計列への誤割当（R216 過小計上）を防ぐ。
+    'nontax':     ['非課税額', '非課税合計', '非課税支給合計', '非課税分'],
+    # 課税支給合計（R216 が求める「給与所得として課税対象」の合計）。最優先で採用。
+    # 給与ソフトにより「課税分合計」「課税給与合計」等の表記揺れがあるため広めに拾う。
+    # 注: 「課税対象額」は社保控除後の所得税課税ベースを指すソフトもあり ambiguous なので含めない。
+    'total_taxable': ['課税支給合計', '課税分合計', '課税給与合計', '課税支給額'],
+    # 支給合計（非課税通勤費等を含む可能性あり）。total_taxable が無い時のフォールバック。
+    # この値を採用する場合は nontax 列があれば差し引いて課税額に補正する。
+    # 注: 「差引支給合計」は社保・税控除後の手取りであり給与支給総額ではない（R216 過小計上に
+    #     なる）ため、ここには含めない。
+    'total':      ['支給合計額', '支給合計', '総支給額', '総支給'],
     'paid_date':  ['支給日', '支払日'],
     'month_col':  ['対象年月', '給与年月', '支給年月', '年月'],
     # 年間通勤手当（非課税分）。集計表型のみ有効。在籍月数で均等割して
@@ -182,6 +196,13 @@ def _detect_field_map(ws, header_row: int) -> dict[str, int]:
             if key in fmap:
                 continue
             if _match_alias(val, aliases):
+                # 部分一致の落とし穴対策（R216 母数の取り違え防止）:
+                #   - '差引支給合計' は「支給合計」に部分一致するが手取り(控除後)なので総額系に割り当てない
+                #   - '非課税支給合計' は「課税支給合計」「支給合計」に部分一致するが非課税分なので同様
+                # nontax を先に走査しているので非課税列は通常そちらで確定するが、多重防御として弾く。
+                nval = _norm(val)
+                if key in ('total', 'total_taxable') and ('差引' in nval or '非課税' in nval):
+                    continue
                 fmap[key] = c
                 break
     if month_cols:
@@ -195,7 +216,10 @@ def _find_header_rows(ws) -> list[tuple[int, dict]]:
     for r in range(1, min(ws.max_row + 1, 40)):
         fmap = _detect_field_map(ws, r)
         has_name = 'name' in fmap
-        has_total = 'total' in fmap
+        # 課税支給合計（total_taxable）も合計列として認める。これが無いと、
+        # 課税支給合計のみ（支給合計列なし・月列なし）の行型台帳でヘッダーが
+        # 検出されず当該従業員の給与が丸ごと欠落し R216=0 になる。
+        has_total = ('total' in fmap) or ('total_taxable' in fmap)
         has_month_cols = '_month_cols' in fmap
         if has_name and (has_total or has_month_cols):
             rows.append((r, fmap))
@@ -308,7 +332,9 @@ def _parse_section_rowwise(ws, header_row: int, end_row: int,
                            fmap: dict, emp_data: dict) -> None:
     """月別行型 or YYYYMM月次型 のデータ行を処理（月=行方向）"""
     col_name = fmap['name']
+    col_total_taxable = fmap.get('total_taxable')
     col_total = fmap.get('total')
+    col_nontax = fmap.get('nontax')
     col_type = fmap.get('emp_type')
     col_month = fmap.get('month_col')
     col_base = fmap.get('base_wage')
@@ -345,12 +371,30 @@ def _parse_section_rowwise(ws, header_row: int, end_row: int,
 
         rec = emp_data[name]
 
-        if col_total:
-            t = _to_float(ws.cell(r, col_total).value)
-            if t is not None:
-                # 給与＋賞与セクション両方が来たら加算（同月の別セクション）
-                existing = rec['monthly_wages'][month_idx]
-                rec['monthly_wages'][month_idx] = (existing or 0) + t
+        # 月の給与額（課税支給合計）を決定。優先順（公募要領 p.10「課税対象となる経費」準拠）:
+        #   1) 課税支給合計/課税分合計 列をそのまま採用（最も確実）
+        #   2) 支給合計 − 非課税額（非課税通勤費等を差し引いて課税額へ補正）
+        #   3) 支給合計 のみ（非課税分を含む可能性。雇用形態欠落警告で人手確認を促す）
+        t = None
+        if col_total_taxable:
+            t = _to_float(ws.cell(r, col_total_taxable).value)
+        elif col_total:
+            gross = _to_float(ws.cell(r, col_total).value)
+            if gross is not None:
+                nontax = _to_float(ws.cell(r, col_nontax).value) if col_nontax else None
+                t = gross - (nontax or 0)
+                # 非課税額 > 支給合計（入力ミス・列誤マッピング・部分月行など）で
+                # 負値になった場合は、負の給与を R216 に混入させず gross にフォールバック。
+                if t < 0:
+                    logger.warning(
+                        f'非課税額が支給合計を超過（{name}）: 支給合計{gross:,.0f} '
+                        f'< 非課税{(nontax or 0):,.0f} → 支給合計を採用し要確認'
+                    )
+                    t = gross
+        if t is not None:
+            # 給与＋賞与セクション両方が来たら加算（同月の別セクション）
+            existing = rec['monthly_wages'][month_idx]
+            rec['monthly_wages'][month_idx] = (existing or 0) + t
 
         if col_base and col_hours:
             base = _to_float(ws.cell(r, col_base).value)
@@ -686,9 +730,11 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
     base_wage_row = row_labels.get('基本給')
     # 所定労働時間の行を特定
     hours_row = row_labels.get('所定労働時間')
-    # 支給合計の行を特定（候補順）
+    # 支給合計の行を特定（候補順）。R216 は課税支給合計を最優先（公募要領 p.10）。
     total_row = (
         row_labels.get('課税支給合計')
+        or row_labels.get('課税分合計')
+        or row_labels.get('課税給与合計')
         or row_labels.get('支給合計')
         or row_labels.get('差引支給合計')
     )
@@ -1102,6 +1148,27 @@ def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
             atransport_val = 0.0
         if atransport_val < 0:
             atransport_val = 0.0  # 負値は無視
+
+        # 非課税通勤手当が monthly_wages（支給合計＝通勤込み）に含まれている場合の課税額補正。
+        # AI プロンプトは「monthly_wages に課税支給合計を入れた場合は通勤費除外済み→atransport=0」
+        # を指示しているが、課税列が無い台帳で AI が通勤込みを入れ atransport>0 を返すことがある。
+        # その場合は在籍月数で均等割して monthly_wages から減算し、課税額（R216 母数）に揃える
+        # （決定論パーサー _parse_section_summary の S列減算と同一ロジック）。
+        # 減算後は atransport_val=0 とする（消費済み）。これにより賃金台帳作成タスクで S列に
+        # 二重計上→再読込時に二重減算、という不整合を防ぐ。不変条件「monthly_wages＝課税額」を担保。
+        if atransport_val > 0:
+            _non_null = [m for m in range(12) if monthly_wages[m] is not None]
+            if _non_null:
+                _per_month = atransport_val / len(_non_null)
+                monthly_wages = [
+                    (max(0.0, w - _per_month) if w is not None else None)
+                    for w in monthly_wages
+                ]
+                logger.info(
+                    f'AI抽出: {emp_name} の年間通勤手当{atransport_val:,.0f}円を'
+                    f'在籍{len(_non_null)}ヶ月で均等割し monthly_wages から減算（課税額補正）'
+                )
+            atransport_val = 0.0
 
         employees.append(WageEmployee(
             no=i + 1,
