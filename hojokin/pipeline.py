@@ -17,6 +17,7 @@ from .wage_calculator import (
     create_wage_calculation,
     PayrollEmployee,
     calculate_per_capita_wage,
+    is_full_time_employment,
 )
 from .wage_reader import read_wage_ledger, read_wage_ledgers, export_wage_ledger_summary
 from .pdf_reader import pdf_to_images
@@ -891,6 +892,22 @@ def run_application_transfer(
                 'タスクの出力と数値が一致しているかと、賃金台帳期間が直近決算期と'
                 '揃っているかを念のためご確認ください'
             )
+
+        # パート時間欠落で FTE=1.0 サイレント昇格があれば追加警告
+        # IT導入補助金 公募要領 p.10「パートタイム従業員については正社員の就業時間に換算」を満たすため、
+        # 時間データなしのパートが含まれると R215 が過大計上になる
+        if wage_plan and wage_plan.get('part_fte_fallback_count', 0) > 0:
+            _fb_n = wage_plan['part_fte_fallback_count']
+            _fb_names = wage_plan.get('part_fte_fallback_names', []) or []
+            _name_preview = ', '.join(_fb_names[:3])
+            if len(_fb_names) > 3:
+                _name_preview += f' ほか{len(_fb_names) - 3}名'
+            wage_warning += (
+                f' ⚠ パート・アルバイト {_fb_n}名で労働時間データなし'
+                f'({_name_preview}) → R215（FTE換算従業員数）が過大計上の可能性。'
+                f'IT導入補助金 公募要領 p.10 は「正社員の就業時間に換算」を要求。'
+                f'賃金台帳テンプレ E列「月間平均時間」を顧客確認のうえ手入力してください'
+            )
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
         consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
         # 会計式整合（売上 − 原価 = 粗利）— ()書きマイナス誤読の自動検出
@@ -1558,6 +1575,11 @@ def _calc_wage_plan_from_ledger(
         # WageEmployee → PayrollEmployee に変換
         payroll_list = []
         total_annual_hours = 0.0
+        # IT導入補助金 R215 は FTE換算（公募要領 p.10、マニュアル p.86「20÷40=0.5(人)」）。
+        # パート・アルバイトで monthly_hours が空のままだと _calc_fte で FTE=1.0 に
+        # サイレント昇格し R215 が過大計上される。そのケースをカウントしてアプリ画面で警告する。
+        part_fte_fallback_count = 0
+        part_fte_fallback_names: list[str] = []
         for emp in employees_raw:
             is_officer = '役員' in emp.employment_type
             emp_type = emp.employment_type if emp.employment_type else '正社員'
@@ -1600,6 +1622,17 @@ def _calc_wage_plan_from_ledger(
             # 役員を除く全従業員の年間総労働時間を集計
             if not is_officer and monthly_hours:
                 total_annual_hours += sum(monthly_hours)
+
+            # パートで時間データが空 → _calc_fte で FTE=1.0 サイレント昇格になる人数
+            # （IT導入補助金は本来 FTE 換算が要件。R215 過大計上の警告対象）
+            if (
+                not is_officer
+                and not is_full_time_employment(emp_type)
+                and not monthly_hours
+                and full_year
+            ):
+                part_fte_fallback_count += 1
+                part_fte_fallback_names.append(emp.name)
 
         result = calculate_per_capita_wage(payroll_list)
 
@@ -1650,11 +1683,22 @@ def _calc_wage_plan_from_ledger(
         }
         if total_annual_hours > 0:
             plan['total_annual_hours'] = round(total_annual_hours, 1)
+        if part_fte_fallback_count > 0:
+            plan['part_fte_fallback_count'] = part_fte_fallback_count
+            plan['part_fte_fallback_names'] = part_fte_fallback_names
         logger.info(
             f'給与支給総額: {base:,.0f}円 '
             f'(従業員FTE: {result.employee_count_fte:.1f}人, 年3%成長, '
             f'総労働時間: {total_annual_hours:,.0f}時間)'
         )
+        if part_fte_fallback_count > 0:
+            logger.warning(
+                f'⚠ パート・アルバイト {part_fte_fallback_count}名で労働時間データなし '
+                f'(対象: {", ".join(part_fte_fallback_names[:5])}{"..." if len(part_fte_fallback_names) > 5 else ""}) '
+                f'→ FTE=1.0 にサイレント昇格、R215（FTE換算従業員数）が過大計上の可能性。'
+                f'IT導入補助金 公募要領 p.10 / マニュアル p.86 では「正社員就業時間に換算した小数値」を要求。'
+                f'賃金台帳テンプレ E列「月間平均時間」を顧客に確認のうえ手入力してください。'
+            )
         if low_full_year_ratio:
             excluded_n = non_officer_count - included_count
             logger.warning(

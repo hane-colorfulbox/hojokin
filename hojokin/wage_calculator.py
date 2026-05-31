@@ -84,7 +84,20 @@ def is_full_time_employment(employment_type: str | None) -> bool:
 
 
 def _calc_fte(emp: PayrollEmployee, annual_hours: float) -> float:
-    """パート・アルバイトを正社員換算。フルタイム雇用は FTE 1.0。"""
+    """パート・アルバイトを正社員換算（FTE換算）。フルタイム雇用は FTE 1.0。
+
+    根拠: IT導入補助金 2026 通常枠 公募要領 p.10
+        「パートタイム従業員については、正社員の就業時間に換算して人数を算出すること」
+    交付申請マニュアル p.86 算定例
+        「週20時間勤務（正規雇用は、週40時間労働）の場合 従業員数：20÷40＝0.5(人)」
+
+    挙動:
+      - 正社員・契約社員: 1.0
+      - パート・アルバイト + monthly_hours 集計値あり: sum(monthly_hours) / annual_hours
+      - パート・アルバイト + monthly_hours 集計値なし: **1.0 にサイレント昇格**
+        （R215 過大計上のリスクあり。賃金台帳側で時間データを取り切る運用が望ましい。
+         アプリ画面で「パート時間欠落で R215 過大計上の可能性」を警告すること）
+    """
     if is_full_time_employment(emp.employment_type):
         return 1.0
     if not emp.monthly_hours:

@@ -1690,7 +1690,7 @@ def export_wage_ledger_summary(
       シート2「算定根拠」:
         - 採用列・含む経費・除外経費・役員除外ルール
         - 抽出経路（AI / 決定論）
-        - 公募要領 第6回 p.10 原文引用
+        - IT導入補助金 2026 通常枠 公募要領 p.10 原文引用
         - データソースとなった賃金台帳ファイル一覧（重複排除）
 
     集計対象外（役員 or 非全月在籍）の行は薄いグレーで塗り、目視で除外行を判別可能にする。
@@ -1752,7 +1752,7 @@ def export_wage_ledger_summary(
         value=(
             '※採用列: 賃金台帳の「課税支給合計」（給与所得として課税対象となる経費。'
             '非課税通勤手当・社保等控除前）。'
-            '出典: 中小企業省力化投資補助金 一般型 公募要領 第6回 p.10。'
+            '出典: IT導入補助金 2026 通常枠 公募要領 p.10。'
             '抽出経路と公募要領原文の引用は「算定根拠」シートを参照。'
         ),
     )
@@ -2008,10 +2008,10 @@ def _write_calculation_basis_sheet(
     note_font = Font(size=9, color='666666')
 
     ws.cell(row=1, column=1, value='給与支給総額（R216）の算定根拠').font = title_font
-    ws.cell(row=2, column=1, value='中小企業省力化投資補助金 一般型 第6回 公募要領 準拠').font = note_font
+    ws.cell(row=2, column=1, value='IT導入補助金 2026 通常枠 公募要領 準拠').font = note_font
 
     rows: list[tuple[str, str]] = [
-        ('対象補助金', '中小企業省力化投資補助金 一般型（第6回）'),
+        ('対象補助金', 'IT導入補助金 2026（デジタル化・AI導入補助金2026、通常枠／インボイス対応類型）'),
         ('採用列', '賃金台帳の「課税支給合計」（給与所得として課税対象となる経費）'),
         (
             '含む経費',
@@ -2023,7 +2023,7 @@ def _write_calculation_basis_sheet(
             '福利厚生費・法定福利費・退職金・'
             '非課税通勤手当（限度額内分、国税庁 No.2585 により給与所得に含まれない）',
         ),
-        ('役員の扱い', '集計対象外（応募申請の手引き 第6回 p.24「役員報酬・役員の人数は含めません」）'),
+        ('役員の扱い', '集計対象外（IT導入補助金 2026 通常枠 公募要領 p.10「役員報酬…は除く」）。ただし従業員0名の法人のみ役員で読み替え可'),
         (
             '中途入退社者の扱い',
             '集計対象外（基準年度に全月分の給与等の支給を受けていない従業員）',
@@ -2054,18 +2054,18 @@ def _write_calculation_basis_sheet(
         c2.alignment = Alignment(vertical='top', wrap_text=True)
         c2.border = thin_border
 
-    # 公募要領 第6回 p.10 原文
+    # IT導入補助金 2026 通常枠 公募要領 p.10 原文
     quote_row = start_row + len(rows) + 3
-    ws.cell(row=quote_row, column=1, value='公募要領 第6回 p.10 原文').font = label_font
+    ws.cell(row=quote_row, column=1, value='IT導入補助金 2026 通常枠 公募要領 p.10 原文').font = label_font
     ws.merge_cells(start_row=quote_row + 1, start_column=1,
                    end_row=quote_row + 1, end_column=2)
     quote_cell = ws.cell(
         row=quote_row + 1, column=1,
         value=(
             '算定対象となる給与等は、給料、賃金、賞与、各種手当'
-            '(残業手当、休日出勤手当、職務手当、地域手当、家族(扶養)手当、住宅手当)等、'
-            '給与所得として課税対象となる経費を指します。'
-            '福利厚生費、法定福利費や退職金は除きます。'
+            '（残業手当、休日出勤手当、職務手当、地域手当、家族（扶養）手当、住宅手当）等、'
+            '給与所得として課税対象となる経費を指す。'
+            '役員報酬、福利厚生費、法定福利費や退職金は除く。'
         ),
     )
     quote_cell.font = quote_font
@@ -2074,15 +2074,15 @@ def _write_calculation_basis_sheet(
 
     # 公式 URL
     url_row = quote_row + 3
-    ws.cell(row=url_row, column=1, value='公募要領 第6回 PDF').font = label_font
+    ws.cell(row=url_row, column=1, value='IT導入補助金 2026 通常枠 公募要領 PDF').font = label_font
     ws.cell(
         row=url_row, column=2,
-        value='https://shoryokuka.smrj.go.jp/assets/pdf/application_guidelines_ippan_06.pdf',
+        value='https://it-shien.smrj.go.jp/pdf/it2026_koubo_tsujyo.pdf',
     )
-    ws.cell(row=url_row + 1, column=1, value='応募申請の手引き 第6回 PDF').font = label_font
+    ws.cell(row=url_row + 1, column=1, value='IT導入補助金 2026 交付申請マニュアル PDF').font = label_font
     ws.cell(
         row=url_row + 1, column=2,
-        value='https://shoryokuka.smrj.go.jp/assets/pdf/oubo_manual_ippan_06.pdf',
+        value='https://it-shien.smrj.go.jp/pdf/it2026_manual_kofu.pdf',
     )
     ws.cell(row=url_row + 2, column=1, value='通勤手当 非課税限度額').font = label_font
     ws.cell(
