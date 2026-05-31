@@ -231,16 +231,32 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
     return writes
 
 
+# 生産性指標シートの人件費ブロックは E列=販管費 / F列=原価報告書 の2列構成
+# （テンプレ行4が E4='販管費'/F4='原価報告書' のヘッダー）。これらの科目は
+# breakdown の pl_section→E列・cost_section→F列 に分割して転記する。breakdown が
+# 無い科目（販管費単独・cost=0／旧抽出経路）は従来どおり合算値を E列に書く。
+# 売上高・粗利等の財務指標（B列単独）は分割対象外。
+_KYUYO_PL_SPLIT_FIELDS = frozenset(
+    {'salary', 'misc_wages', 'bonus', 'travel_expense', 'depreciation'}
+)
+
+
 def fill_kyuyo_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> list[str]:
     """給与計算シートに財務データを転記。
 
     Phase 2: financial.confidence を見て、低信頼項目は空欄+警告マーカー扱い。
     申請書側の処理タスクの empty_cells に追加されるよう writes に '⚠' マーカー付き行を返す。
+
+    人件費科目は決算書テンプレの2列構成（E列=販管費 / F列=原価報告書）に合わせ、
+    breakdown を E/F に分割転記する（合算値を E列単独に書くと『販管費』列に販管費＋
+    原価の合算が混在し出所が追えなくなるため）。
     """
     writes = []
     fi = data.financial
     conf = getattr(fi, 'confidence', None) or {}
     m = mapping.kyuyo
+    breakdown = getattr(fi, 'breakdown', None)
+    breakdown = breakdown if isinstance(breakdown, dict) else {}
 
     def write(field: str, value, label: str, conf_key: str = ''):
         if field not in m:
@@ -256,6 +272,23 @@ def fill_kyuyo_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> li
             )
             return
         row, col = m[field]
+        # 人件費科目は販管費(E列)/原価報告書(F列)に分割転記。
+        # breakdown は cost_section>0 の科目のみ保持される（_merge_pl_with_cost_report 仕様）。
+        # 分割値の和が合算値と一致するときだけ分割し、不整合時はデータ欠損を避けて
+        # 合算値を E列に書くフォールバックにする。
+        bd = breakdown.get(field) if field in _KYUYO_PL_SPLIT_FIELDS else None
+        if bd:
+            pl_v = int(bd.get('pl_section') or 0)
+            cost_v = int(bd.get('cost_section') or 0)
+            if (pl_v or cost_v) and (pl_v + cost_v) == int(value or 0):
+                _safe_write_cell(ws, row, col, pl_v)            # E列=販管費分
+                col_letter = chr(64 + col)
+                msg = f'給与計算 行{row:3d} {col_letter}列 [{label}・販管費]: {pl_v:,}'
+                if cost_v:
+                    _safe_write_cell(ws, row, col + 1, cost_v)  # F列=原価報告書分
+                    msg += f' / {chr(64 + col + 1)}列 [原価報告書]: {cost_v:,}'
+                writes.append(msg)
+                return
         _safe_write_cell(ws, row, col, value)
         col_letter = chr(64 + col)
         writes.append(f'給与計算 行{row:3d} {col_letter}列 [{label}]: {value:,}')
@@ -268,7 +301,8 @@ def fill_kyuyo_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> li
     write('salary', fi.salary, '給料手当', 'salary')
     write('misc_wages', fi.misc_wages, '雑給', 'misc_wages')
     write('bonus', fi.bonus, '賞与手当', 'bonus')
-    write('officer_comp', fi.officer_compensation, '役員報酬', 'officer_compensation')
+    # 役員報酬はこのシートに転記しない（人件費ブロックに役員報酬の行が無く、
+    # マッピングからも除外済み。config.py 通常枠 kyuyo のコメント参照）。
     write('travel_expense', fi.travel_expense, '旅費交通費', 'travel_expense')
 
     return writes
