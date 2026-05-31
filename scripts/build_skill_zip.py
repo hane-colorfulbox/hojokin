@@ -19,6 +19,7 @@
     2. ~/.claude/skills/ 配下に展開（既存があれば上書き）
     3. Claude Code を再起動して /wagebook-convert が表示されることを確認
 """
+import hashlib
 import json
 import shutil
 import sys
@@ -32,10 +33,48 @@ ROOT = Path(__file__).resolve().parent.parent
 SKILL_DIR = ROOT / '.claude' / 'skills' / 'wagebook-convert'
 DIST_DIR = ROOT / '_dist'
 
+# スキル同梱テンプレと、ツールが「賃金台帳の作成」タスクで使う原本テンプレ。
+# 両者が byte 単位で一致していないと、CC スキル出力とツール出力でフォーマットが
+# ズレ、後段の申請書作成（決定論パーサーの列読取）で不具合が出る。ビルド時に強制する。
+SKILL_TEMPLATE = SKILL_DIR / 'templates' / '賃金台帳テンプレート.xlsx'
+TOOL_TEMPLATE = ROOT / 'ツール' / '賃金台帳テンプレート.xlsx'
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _check_template_sync() -> bool:
+    """スキル同梱テンプレ == ツール原本テンプレ を検証。不一致ならビルド中止。"""
+    if not SKILL_TEMPLATE.exists():
+        print(f'❌ スキル同梱テンプレが見つかりません: {SKILL_TEMPLATE}', file=sys.stderr)
+        return False
+    if not TOOL_TEMPLATE.exists():
+        print(f'⚠ ツール原本テンプレが見つかりません（同期チェックをスキップ）: {TOOL_TEMPLATE}',
+              file=sys.stderr)
+        return True
+    skill_hash = _sha256(SKILL_TEMPLATE)
+    tool_hash = _sha256(TOOL_TEMPLATE)
+    if skill_hash != tool_hash:
+        print(
+            '❌ テンプレ不一致: スキル同梱テンプレとツール原本テンプレが異なります。\n'
+            f'   skill: {SKILL_TEMPLATE} ({skill_hash[:16]})\n'
+            f'   tool : {TOOL_TEMPLATE} ({tool_hash[:16]})\n'
+            '   → どちらかを最新に揃えてから再ビルドしてください'
+            '（CC スキル出力とツール出力のフォーマット一致を担保するため）。',
+            file=sys.stderr,
+        )
+        return False
+    print(f'✅ テンプレ同期OK（skill == tool, sha256={skill_hash[:16]}）')
+    return True
+
 
 def main() -> int:
     if not SKILL_DIR.exists():
         print(f'❌ Skill ディレクトリが見つかりません: {SKILL_DIR}', file=sys.stderr)
+        return 1
+
+    if not _check_template_sync():
         return 1
 
     DIST_DIR.mkdir(exist_ok=True)
