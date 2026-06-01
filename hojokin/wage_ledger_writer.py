@@ -35,7 +35,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .wage_reader import MONTH_NAMES, WageEmployee
+from .wage_reader import MONTH_NAMES, WageEmployee, wareki_label
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +52,31 @@ COL_NAME = 3        # C
 COL_EMP_TYPE = 4    # D
 COL_AVG_HOURS = 5   # E
 COL_HOURLY = 6      # F
-COL_MONTH_START = 7  # G = 1月
-COL_MONTH_END = 18   # R = 12月
-COL_TRANSPORT = 19   # S
+COL_MONTH_START = 7  # G = 月次の先頭列（暦年なら1月、事業年度順なら期首月）
+COL_MONTH_END = 18   # R = 月次の末尾列
+COL_TRANSPORT = 19   # S = 年間通勤手当
+COL_BONUS = 20       # T = 年間賞与（R216 に算入。月次セルには混ぜない）
+
+
+def _month_layout(
+    fiscal_window: list[tuple[int, int]] | None,
+) -> tuple[list[str], list[int]]:
+    """月列のヘッダーラベルと、各列に書き込む monthly_wages の暦月Index を返す。
+
+    fiscal_window（[(西暦年,月)]×12, 期首→期末順）があれば:
+      ヘッダー = 和暦年月（'令和6年8月'…'令和7年7月'）、列順 = 事業年度順。
+      暦年と事業年度の取り違えを防ぐため列見出しに年を明記する。
+    無ければ（決算月不明・暦年運用）暦年 '1月'…'12月'・暦月順（後方互換）。
+
+    戻り値:
+      headers[col_pos]      … その列の見出し
+      cal_indices[col_pos]  … その列に入れる monthly_wages の暦月Index(0=1月)
+    """
+    if fiscal_window and len(fiscal_window) == 12:
+        headers = [wareki_label(y, m) for (y, m) in fiscal_window]
+        cal_indices = [m - 1 for (_y, m) in fiscal_window]
+        return headers, cal_indices
+    return list(MONTH_NAMES), list(range(12))
 
 # 警告メタ書込先（B1〜B3）。B4 はテンプレ既定の注釈を残す
 META_ROW_TITLE = 1
@@ -484,7 +506,7 @@ def _clear_data_rows(ws, last_row: int) -> None:
     そのため value 属性に直接 None を代入する。
     """
     for r in range(FIRST_DATA_ROW, last_row + 1):
-        for c in range(COL_NO, COL_TRANSPORT + 1):
+        for c in range(COL_NO, COL_BONUS + 1):
             ws.cell(row=r, column=c).value = None
 
 
@@ -549,8 +571,17 @@ def _write_meta(
     )
 
 
-def _write_employee_row(ws, row: int, no: int, emp: WageEmployee, is_kojin: bool) -> None:
-    """1名分のデータをテンプレ行に書き込む。"""
+def _write_employee_row(
+    ws, row: int, no: int, emp: WageEmployee, is_kojin: bool,
+    cal_indices: list[int] | None = None,
+) -> None:
+    """1名分のデータをテンプレ行に書き込む。
+
+    cal_indices: 月列（G〜R）の各列に入れる monthly_wages の暦月Index。
+        事業年度順ヘッダー時は [期首月-1, …, 期末月-1]。None なら暦年順（0..11）。
+    """
+    if cal_indices is None:
+        cal_indices = list(range(12))
     ws.cell(row=row, column=COL_NO, value=no)
     ws.cell(row=row, column=COL_NAME, value=emp.name)
     norm_type = normalize_employment_type(emp.employment_type, is_kojin=is_kojin)
@@ -569,11 +600,12 @@ def _write_employee_row(ws, row: int, no: int, emp: WageEmployee, is_kojin: bool
     if not skip_hours_and_rate and emp.hourly_rate and emp.hourly_rate > 0:
         ws.cell(row=row, column=COL_HOURLY, value=int(round(emp.hourly_rate)))
 
-    # G〜R列: monthly_wages[0..11]（カレンダー月そのまま）
-    for i, val in enumerate(emp.monthly_wages[:12]):
+    # G〜R列: monthly_wages を月列レイアウト（事業年度順 or 暦年順）に従って書込
+    for pos, cal_idx in enumerate(cal_indices[:12]):
+        val = emp.monthly_wages[cal_idx] if cal_idx < len(emp.monthly_wages) else None
         if val is None:
             continue
-        cell = ws.cell(row=row, column=COL_MONTH_START + i, value=int(round(val)))
+        cell = ws.cell(row=row, column=COL_MONTH_START + pos, value=int(round(val)))
         cell.number_format = '#,##0'
 
     # S列: 年間通勤手当（AI が任意で抽出。> 0 のときのみ書込）
@@ -582,6 +614,14 @@ def _write_employee_row(ws, row: int, no: int, emp: WageEmployee, is_kojin: bool
     if atransport > 0:
         s_cell = ws.cell(row=row, column=COL_TRANSPORT, value=int(round(atransport)))
         s_cell.number_format = '#,##0'
+
+    # T列: 年間賞与（課税賞与の年間合計）。> 0 のときのみ書込。
+    # 月次セルには混ぜず専用列で隔離 → ツールが R216（給与支給総額）に加算する。
+    # 賞与を月次に混ぜると最低賃金判定・直近3ヶ月が歪むため。
+    abonus = getattr(emp, 'annual_bonus', 0) or 0
+    if abonus > 0:
+        t_cell = ws.cell(row=row, column=COL_BONUS, value=int(round(abonus)))
+        t_cell.number_format = '#,##0'
 
 
 def _write_memo_sheet(
@@ -599,6 +639,8 @@ def _write_memo_sheet(
     data_source_files: list[str],
     additional_warnings: list[str],
     cell_consistency_warnings: list[str] | None = None,
+    fiscal_window: list[tuple[int, int]] | None = None,
+    bonus_rows: list[tuple[str, float]] | None = None,
 ) -> None:
     """「変換メモ」シートを新規追加して、人間チェック用のメタ情報を書き込む。
 
@@ -654,6 +696,30 @@ def _write_memo_sheet(
     _set(r, 1, '抽出従業員数')
     _set(r, 2, employees_total)
     r += 2
+
+    # 1-b. 事業年度ウィンドウ・年間賞与（賞与は月次に混ぜず R216 に算入）
+    _set(r, 1, '【事業年度ウィンドウ・年間賞与】', font=header_font, fill=header_fill)
+    r += 1
+    if fiscal_window:
+        _set(r, 1, '対象期間（決算月起点）')
+        _set(r, 2, f'{wareki_label(*fiscal_window[0])} 〜 {wareki_label(*fiscal_window[-1])}')
+    else:
+        _set(r, 1, '対象期間')
+        _set(r, 2, '暦年（決算月未指定）', font=note_font)
+    r += 1
+    pos_bonus = [(n, b) for (n, b) in (bonus_rows or []) if b and b > 0]
+    if pos_bonus:
+        _set(r, 1, '年間賞与（R216に算入／月次列には非混入）', font=section_font)
+        r += 1
+        for n, b in pos_bonus:
+            _set(r, 1, n)
+            cell_b = ms.cell(row=r, column=2, value=int(round(b)))
+            cell_b.number_format = '#,##0'
+            r += 1
+    else:
+        _set(r, 1, '年間賞与: 検出なし', font=note_font)
+        r += 1
+    r += 1
 
     # 2. 役員判定の根拠
     _set(r, 1, '【役員判定の根拠】', font=header_font, fill=header_fill)
@@ -943,13 +1009,38 @@ def write_wage_ledger_to_template(
     needed_rows = max(len(employees_list), DEFAULT_LAST_DATA_ROW - FIRST_DATA_ROW + 1)
     _clear_data_rows(ws, FIRST_DATA_ROW + needed_rows - 1)
 
+    # 月列レイアウトを決定（事業年度順・和暦年月ヘッダー / 暦年フォールバック）。
+    # 事業年度ウィンドウは AI抽出時に各 WageEmployee へ付与される（決算月から決定論で確定）。
+    fiscal_window = next(
+        (e.fiscal_window for e in employees_list
+         if getattr(e, 'fiscal_window', None)), None
+    )
+    month_headers, cal_indices = _month_layout(fiscal_window)
+    # G5〜R5: 月列ヘッダー（年月スタンプ）。値だけ差し替え、既存の見出し体裁は保持。
+    for pos, label in enumerate(month_headers):
+        ws.cell(row=HEADER_ROW, column=COL_MONTH_START + pos, value=label)
+    # S5/T5: 年間通勤手当・年間賞与の見出し（T列はテンプレ未整備でも体裁を S列に合わせる）
+    from copy import copy as _copy
+    s_hdr = ws.cell(row=HEADER_ROW, column=COL_TRANSPORT, value='年間通勤手当')
+    t_hdr = ws.cell(row=HEADER_ROW, column=COL_BONUS, value='年間賞与')
+    try:
+        t_hdr.font = _copy(s_hdr.font)
+        t_hdr.fill = _copy(s_hdr.fill)
+        t_hdr.border = _copy(s_hdr.border)
+        t_hdr.alignment = _copy(s_hdr.alignment)
+    except Exception:
+        pass
+    if not ws.column_dimensions['T'].width:
+        ws.column_dimensions['T'].width = ws.column_dimensions['S'].width or 14
+
     # データ転記
     officer_count = 0
     full_year_count = 0
     midyear_count = 0
     for i, emp in enumerate(employees_list):
         row = FIRST_DATA_ROW + i
-        _write_employee_row(ws, row, no=i + 1, emp=emp, is_kojin=is_kojin)
+        _write_employee_row(ws, row, no=i + 1, emp=emp, is_kojin=is_kojin,
+                            cal_indices=cal_indices)
         norm_type = normalize_employment_type(emp.employment_type, is_kojin=is_kojin)
         if norm_type == '役員':
             officer_count += 1
@@ -992,6 +1083,8 @@ def write_wage_ledger_to_template(
         data_source_files=data_source_files,
         additional_warnings=additional_warnings,
         cell_consistency_warnings=cell_consistency_warnings,
+        fiscal_window=fiscal_window,
+        bonus_rows=[(e.name, getattr(e, 'annual_bonus', 0) or 0) for e in employees_list],
     )
 
     wb.save(str(output_path))

@@ -36,11 +36,12 @@ class PayrollEmployee:
     """賃金台帳から読み取った従業員1名のデータ"""
     name: str
     employment_type: str  # 正社員, 契約社員, パート, アルバイト, 役員
-    monthly_salary: list[float] = dc_field(default_factory=list)  # 12ヶ月分の総支給額
+    monthly_salary: list[float] = dc_field(default_factory=list)  # 12ヶ月分の総支給額（賞与除く）
     monthly_hours: list[float] = dc_field(default_factory=list)   # 12ヶ月分の労働時間
     is_officer: bool = False
     is_excluded: bool = False      # 産休・育休等で除外
     full_year: bool = True         # 全月分の給与を受けたか
+    annual_bonus: float = 0.0      # 年間賞与（R216 に算入。月次には混ぜない）
 
 
 @dataclass
@@ -120,7 +121,8 @@ def calculate_per_capita_wage(
             result.excluded_names.append(emp.name)
             continue
 
-        annual = sum(emp.monthly_salary)
+        # 給与支給総額（R216）= 月次課税給与の年計 ＋ 年間賞与（公募要領 p.10: 賞与も対象）
+        annual = sum(emp.monthly_salary) + (emp.annual_bonus or 0.0)
         result.total_salary += annual
         fte = _calc_fte(emp, regular_annual_hours)
         result.employee_count_fte += fte
@@ -963,7 +965,7 @@ def create_wage_calculation(
             headers = (
                 ['No', '氏名', '雇用形態']
                 + month_headers
-                + ['12ヶ月合計', '月間平均', '時給', '月間平均時間', 'FTE', '最低賃金判定', '備考']
+                + ['年間給与計(賞与込)', '月間平均', '時給', '月間平均時間', 'FTE', '最低賃金判定', '備考']
             )
             # 列位置インデックス（B=2 ベース）
             FIRST_MONTH_COL = 5            # E列が事業年度開始月
@@ -1045,11 +1047,15 @@ def create_wage_calculation(
                     _cell(ws2, r, col, val if has_data else '',
                           fmt=NUMBER_FMT, fill=fill_to_use)
 
-                # 12ヶ月合計（Excel 式: SUM の方が人間チェック時に分かりやすい）
+                # 年間給与計（賞与込）= 12ヶ月の月次課税給与合計 ＋ 年間賞与。
+                # 月次セル（賞与抜き）と年間賞与を分離保持し、R216 はここで合算する
+                # （公募要領 p.10: 給与支給総額に賞与を含む。月次に混ぜると最低賃金判定が歪む）。
                 col_first = get_column_letter(FIRST_MONTH_COL)
                 col_last = get_column_letter(LAST_MONTH_COL)
-                _cell(ws2, r, ANNUAL_TOTAL_COL,
-                      f'=SUM({col_first}{r}:{col_last}{r})',
+                _bonus = int(round(float(e.get('annual_bonus', 0) or 0)))
+                _sum_expr = f'SUM({col_first}{r}:{col_last}{r})'
+                _total_formula = f'={_sum_expr}+{_bonus}' if _bonus > 0 else f'={_sum_expr}'
+                _cell(ws2, r, ANNUAL_TOTAL_COL, _total_formula,
                       BOLD_FONT, fmt=NUMBER_FMT, fill=row_fill)
                 # 月間平均（在籍月のみ）
                 _cell(ws2, r, MONTHLY_AVG_COL, round(avg_per_month), fmt=NUMBER_FMT, fill=row_fill)
@@ -1076,6 +1082,9 @@ def create_wage_calculation(
                 labels = [l for l in e.get('last_three_labels', []) if l]
                 if labels:
                     note_parts.append(f'実体: {"/".join(labels)}')
+            _bonus_note = float(e.get('annual_bonus', 0) or 0)
+            if _bonus_note > 0:
+                note_parts.append(f'年間給与計に賞与{_bonus_note:,.0f}円を算入（月次列には含めない）')
             _cell(ws2, r, NOTE_COL, ' '.join(note_parts), SMALL_FONT, fill=row_fill)
 
         # ── 合計行（全員 / 12ヶ月在籍のみの2段）────────────────────────

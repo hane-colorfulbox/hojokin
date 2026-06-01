@@ -57,6 +57,87 @@ MONTH_NAMES = ['1月', '2月', '3月', '4月', '5月', '6月',
 
 
 # ============================================================
+# 事業年度ウィンドウ / 年月ヘッダー ユーティリティ
+# ============================================================
+# 賃金台帳の月列は「直近事業年度の12ヶ月」を決算月起点で時系列に並べ、列ヘッダーを
+# 和暦年月でスタンプする（暦年 1〜12月 との取り違え＝R216 期間ズレを構造的に防ぐ）。
+# 内部表現 monthly_wages[12] は **暦月Index固定**（Index 0=1月）のまま維持する。
+# 事業年度の12ヶ月は各暦月に重複なく1対1対応するため、暦月Indexで可逆に保持できる。
+# 表示順（writer のヘッダー並び）と賞与の年度判定だけが事業年度ウィンドウを使う。
+
+_REIWA_EPOCH = 2018   # 令和N年 = 2018 + N（令和元年 = 2019）
+_HEISEI_EPOCH = 1988  # 平成N年 = 1988 + N（平成元年 = 1989）
+
+
+def resolve_fiscal_window(fiscal_period_hint: str | None) -> list[tuple[int, int]] | None:
+    """fiscal_period_hint（例 '2024-08〜2025-07'）から事業年度12ヶ月の
+    (西暦年, 月) を決算期首→期末の時系列順で返す。
+
+    形式不明・None の場合は None を返す（呼び出し側で暦年フォールバック）。
+    """
+    if not fiscal_period_hint:
+        return None
+    m = re.search(r'(\d{4})-(\d{1,2})', fiscal_period_hint)
+    if not m:
+        return None
+    start_year, start_month = int(m.group(1)), int(m.group(2))
+    if not 1 <= start_month <= 12:
+        return None
+    window: list[tuple[int, int]] = []
+    for i in range(12):
+        total = (start_month - 1) + i
+        window.append((start_year + total // 12, total % 12 + 1))
+    return window
+
+
+def wareki_label(year: int, month: int) -> str:
+    """西暦 (year, month) → 和暦ラベル '令和6年8月'。令和未満は西暦表記にフォールバック。"""
+    if year >= 2019:
+        return f'令和{year - _REIWA_EPOCH}年{month}月'
+    if year >= 1989:
+        return f'平成{year - _HEISEI_EPOCH}年{month}月'
+    return f'{year}年{month}月'
+
+
+def parse_ym_header(text) -> tuple[int | None, int] | None:
+    """列ヘッダー文字列から (西暦年 or None, 月) を抽出する。
+
+    対応: '令和6年8月' / 'R6.8' / 'R6/8' / '2024年8月' / '2024/08' /
+          '2024-08' / '202408' / 素の '8月'。
+    年が判別できない素の '8月' は (None, 8)。月が取れなければ None。
+    """
+    if text is None:
+        return None
+    s = unicodedata.normalize('NFKC', str(text))
+    s = re.sub(r'[\s　]+', '', s)
+    if not s:
+        return None
+    su = s.upper()
+    m = re.search(r'令和(\d+)年(\d{1,2})月', s)
+    if m:
+        return _REIWA_EPOCH + int(m.group(1)), int(m.group(2))
+    m = re.search(r'平成(\d+)年(\d{1,2})月', s)
+    if m:
+        return _HEISEI_EPOCH + int(m.group(1)), int(m.group(2))
+    m = re.match(r'R(\d+)[./-](\d{1,2})月?$', su)
+    if m:
+        return _REIWA_EPOCH + int(m.group(1)), int(m.group(2))
+    m = re.match(r'H(\d+)[./-](\d{1,2})月?$', su)
+    if m:
+        return _HEISEI_EPOCH + int(m.group(1)), int(m.group(2))
+    m = re.search(r'(\d{4})[年/\-.](\d{1,2})月?', s)
+    if m and 1 <= int(m.group(2)) <= 12:
+        return int(m.group(1)), int(m.group(2))
+    m = re.fullmatch(r'(\d{4})(\d{2})', s)
+    if m and 1 <= int(m.group(2)) <= 12:
+        return int(m.group(1)), int(m.group(2))
+    m = re.fullmatch(r'(\d{1,2})月', s)
+    if m and 1 <= int(m.group(1)) <= 12:
+        return None, int(m.group(1))
+    return None
+
+
+# ============================================================
 # データ構造
 # ============================================================
 
@@ -81,6 +162,16 @@ class WageEmployee:
     # R216 算定対象から除外するため、ツール側で在籍月数で均等割して各月から減算する。
     # 既存呼出は 0.0（未設定）で動作、賃金台帳の作成タスクで S列に書き出す用途に使う。
     annual_transport_allowance: float = 0.0
+    # 年間賞与（課税賞与の合計、円）。R216（給与支給総額）に算入するが、月次セル
+    # （monthly_wages）には混ぜない。賞与を月次に混ぜると最低賃金判定（加点①）や
+    # 直近3ヶ月の月額が歪むため、専用フィールド＝テンプレ T列「年間賞与」で隔離する。
+    # 賞与の支給月は R216 では不問（年間合計に算入されれば月は問わない）。年度の
+    # 帰属判定（対象事業年度内か）だけが効くため、ウィンドウ外賞与は算入しない。
+    annual_bonus: float = 0.0
+    # 事業年度ウィンドウ（[(西暦年, 月)] 12件、決算期首→期末順）。AI抽出時に決算月から
+    # 決定論で確定する。writer が和暦年月ヘッダーを事業年度順に並べるために使う。
+    # None の場合（決算月不明・暦年運用）は暦年 1〜12月でフォールバックする。
+    fiscal_window: list[tuple[int, int]] | None = None
 
     @property
     def is_full_year(self) -> bool:
@@ -153,6 +244,9 @@ _HEADER_ALIASES = {
     'transport_annual': ['年間通勤手当', '年間通勤費',
                          '通勤手当(年間)', '通勤費(年間)',
                          '非課税通勤手当(年間)'],
+    # 年間賞与（課税賞与の年間合計）。集計表型のみ有効。月次セルには混ぜず R216 に加算する
+    # （賞与を月次に入れると最低賃金判定や直近3ヶ月が歪むため専用列で隔離）。
+    'bonus_annual': ['年間賞与', '賞与(年間)', '年間賞与額', '賞与年間合計', '年間賞与合計'],
 }
 
 
@@ -185,10 +279,12 @@ def _detect_field_map(ws, header_row: int) -> dict[str, int]:
         s = _norm(val)
         if not s:
             continue
-        # 1月〜12月 → 集計表型
-        m = re.fullmatch(r'(\d{1,2})月', s)
-        if m:
-            idx = int(m.group(1)) - 1
+        # 月列 → 集計表型。暦月「1月〜12月」に加え、和暦/西暦の年月スタンプ
+        # （'令和6年8月' / '2024/08' / 'R6.8' 等）も暦月Index に割り付ける。
+        # 年月は parse_ym_header が一手に解釈する（暦月Index 0=1月へ写像）。
+        ym = parse_ym_header(val)
+        if ym is not None:
+            idx = ym[1] - 1
             if 0 <= idx <= 11:
                 month_cols[idx] = c
                 continue
@@ -325,6 +421,7 @@ def _new_emp_record(name: str, emp_type: str = '') -> dict:
         'monthly_hours': [None] * 12,
         'hourly_rate_flat': 0.0,
         'avg_hours_flat': 0.0,
+        'annual_bonus': 0.0,
     }
 
 
@@ -412,6 +509,7 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
     col_hours = fmap.get('hours')
     col_hourly = fmap.get('hourly_wage')
     col_transport = fmap.get('transport_annual')
+    col_bonus = fmap.get('bonus_annual')
     month_cols: dict[int, int] = fmap['_month_cols']  # type: ignore[assignment]
 
     for r in range(header_row + 1, ws.max_row + 1):
@@ -467,6 +565,13 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
                         f'\u901a\u52e4\u624b\u5f53\u6e1b\u7b97: {name} \u5e74\u9593{ta:,.0f}\u5186 \u00f7 '
                         f'\u5728\u7c4d{len(non_null)}\u30f6\u6708 = \u6708{per_month:,.0f}\u5186\u6e1b'
                     )
+
+        # \u5e74\u9593\u8cde\u4e0e\uff08T\u5217\uff09: \u6708\u6b21\u30bb\u30eb\u306b\u306f\u6df7\u305c\u305a\u5c02\u7528\u30d5\u30a3\u30fc\u30eb\u30c9\u306b\u4fdd\u6301 \u2192 R216 \u306b\u52a0\u7b97\uff08\u516c\u52df\u8981\u9818 p.10\uff09\u3002
+        # \u8cde\u4e0e\u3092\u6708\u6b21\u306b\u6df7\u305c\u308b\u3068\u6700\u4f4e\u8cc3\u91d1\u5224\u5b9a\u30fb\u76f4\u8fd13\u30f6\u6708\u304c\u6b6a\u3080\u305f\u3081\u9694\u96e2\u3059\u308b\u3002
+        if col_bonus:
+            ba = _to_float(ws.cell(r, col_bonus).value)
+            if ba is not None and ba > 0:
+                rec['annual_bonus'] = (rec.get('annual_bonus') or 0.0) + ba
 
 
 def _read_csv(path: Path, emp_data: dict | None = None) -> None:
@@ -848,6 +953,7 @@ def _emp_dict_to_list(emp_data: dict) -> list[WageEmployee]:
             monthly_wages=data['monthly_wages'],
             monthly_hourly_rates=data['monthly_hourly_rates'],
             monthly_hours=data['monthly_hours'],
+            annual_bonus=float(data.get('annual_bonus') or 0.0),
         ))
     return employees
 
@@ -1011,6 +1117,154 @@ def _csv_to_tsv(path: Path) -> str:
     return '\n'.join(parts)
 
 
+# ============================================================
+# AI抽出データ → 事業年度ウィンドウ適用（決定論）
+# ============================================================
+# AI（賃金台帳の作成タスク）は各従業員の月次を「年月付きの生データ」で全件返す。
+# 暦年と事業年度の取り違えを AI 判断に委ねず、決算月から確定した事業年度12ヶ月を
+# **ここで決定論的に選択** する。賞与も支給年月で年度フィルタしてから合算する。
+
+def _ai_entry_ym(entry) -> tuple[int | None, int] | None:
+    if not isinstance(entry, dict):
+        return None
+    return parse_ym_header(entry.get('ym'))
+
+
+def _build_windowed_arrays(
+    monthly_entries: list, fiscal_window: list[tuple[int, int]],
+) -> tuple[list, list, list]:
+    """年月付き月次エントリ群を、事業年度12ヶ月（暦月Index 0=1月）に割り付ける。
+
+    同一 (年,月) が重複した場合は課税額の大きい方を採用（部分入力・欠損救済）。
+    年が判別できないエントリは、その月が窓内で一意のときだけ best-effort 採用。
+    """
+    by_ym: dict[tuple[int, int], tuple] = {}
+    by_month_noyear: dict[int, list[tuple]] = {}
+    for e in monthly_entries or []:
+        ym = _ai_entry_ym(e)
+        if ym is None:
+            continue
+        y, mo = ym
+        rec = (_to_float(e.get('taxable')), _to_float(e.get('hours')),
+               _to_float(e.get('work_days')))
+        if y is None:
+            by_month_noyear.setdefault(mo, []).append(rec)
+        else:
+            prev = by_ym.get((y, mo))
+            if prev is None or (rec[0] or -1) > (prev[0] or -1):
+                by_ym[(y, mo)] = rec
+    wages: list = [None] * 12
+    hours: list = [None] * 12
+    days: list = [None] * 12
+    for (y, mo) in fiscal_window:
+        rec = by_ym.get((y, mo))
+        if rec is None:
+            cand = by_month_noyear.get(mo)
+            if cand and len(cand) == 1:
+                rec = cand[0]
+        if rec is None:
+            continue
+        idx = mo - 1
+        wages[idx], hours[idx], days[idx] = rec
+    return wages, hours, days
+
+
+def _build_calendar_arrays_recent(monthly_entries: list) -> tuple[list, list, list]:
+    """決算月不明時のフォールバック: 暦月Indexに「最新年の値」を割り付ける（旧 直近12ヶ月相当）。"""
+    by_month: dict[int, tuple[int, tuple]] = {}
+    for e in monthly_entries or []:
+        ym = _ai_entry_ym(e)
+        if ym is None:
+            continue
+        y, mo = ym
+        yk = y if y is not None else -1
+        rec = (_to_float(e.get('taxable')), _to_float(e.get('hours')),
+               _to_float(e.get('work_days')))
+        prev = by_month.get(mo)
+        if prev is None or yk >= prev[0]:
+            by_month[mo] = (yk, rec)
+    wages: list = [None] * 12
+    hours: list = [None] * 12
+    days: list = [None] * 12
+    for mo, (_yk, rec) in by_month.items():
+        idx = mo - 1
+        wages[idx], hours[idx], days[idx] = rec
+    return wages, hours, days
+
+
+def _sum_window_bonuses(
+    bonus_entries: list, fiscal_window: list[tuple[int, int]] | None,
+) -> tuple[float, list[float]]:
+    """賞与を事業年度ウィンドウでフィルタして合算。(合計, 年度判定不能で算入した額) を返す。
+
+    - (年,月) が窓内 → 算入
+    - 年不明だが月が窓内 → 算入（best-effort, undated に記録して警告対象に）
+    - 支給日完全不明（ym パース不可）→ 算入（落とすと R216 過少のため）＋ undated
+    - 窓外（翌期・前期）→ 算入しない（R216 は対象事業年度の賞与のみ）
+    重複（分割PDFの重なり）は (ym, 金額) で de-dup。
+    """
+    total = 0.0
+    undated: list[float] = []
+    seen: set = set()
+    window_set = set(fiscal_window) if fiscal_window else None
+    window_months = {mo for (_y, mo) in fiscal_window} if fiscal_window else None
+    for b in bonus_entries or []:
+        if not isinstance(b, dict):
+            continue
+        amt = _to_float(b.get('amount'))
+        if amt is None or amt <= 0:
+            continue
+        ymraw = b.get('ym')
+        dedup_key = (str(ymraw), round(amt, 2))
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        ym = parse_ym_header(ymraw)
+        if window_set is None:
+            total += amt
+            continue
+        if ym is None:
+            total += amt
+            undated.append(amt)
+            continue
+        y, mo = ym
+        if y is None:
+            if mo in window_months:
+                total += amt
+                undated.append(amt)
+            continue
+        if (y, mo) in window_set:
+            total += amt
+    return total, undated
+
+
+def _normalize_ai_employee_dict(
+    emp: dict, fiscal_window: list[tuple[int, int]] | None,
+) -> dict:
+    """新スキーマ（monthly/bonuses）を旧スキーマ（monthly_wages[12] 等）に正規化する。
+
+    旧スキーマ（monthly_wages を持つ）はそのまま返す（後方互換）。
+    新スキーマは決算月ウィンドウで12ヶ月を確定し、賞与を年間合計に集約する。
+    """
+    if 'monthly' not in emp:
+        return emp
+    monthly_entries = emp.get('monthly') or []
+    bonus_entries = emp.get('bonuses') or []
+    if fiscal_window:
+        wages, hours, days = _build_windowed_arrays(monthly_entries, fiscal_window)
+    else:
+        wages, hours, days = _build_calendar_arrays_recent(monthly_entries)
+    bonus_total, undated = _sum_window_bonuses(bonus_entries, fiscal_window)
+    out = dict(emp)
+    out['monthly_wages'] = wages
+    out['monthly_hours'] = hours
+    out['monthly_work_days'] = days
+    out['annual_bonus'] = max(0.0, bonus_total)
+    if undated:
+        out['_bonus_undated'] = undated
+    return out
+
+
 def _validate_ai_employee(emp: dict) -> tuple[bool, str]:
     """AI抽出した1従業員データの妥当性チェック。(OK?, エラー理由)"""
     name = emp.get('name')
@@ -1047,8 +1301,15 @@ def _validate_ai_employee(emp: dict) -> tuple[bool, str]:
     return True, ''
 
 
-def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
+def _ai_data_to_wage_employees(
+    ai_data: list[dict], fiscal_period_hint: str | None = None,
+) -> list[WageEmployee]:
     """AI抽出データを WageEmployee リストに変換（バリデーション付き）。
+
+    新スキーマ（monthly[{ym,taxable,hours,work_days}] / bonuses[{ym,amount}]）は、
+    fiscal_period_hint から確定した事業年度12ヶ月を決定論で選択し、賞与を年間合計に
+    集約してから旧スキーマ（monthly_wages[12] 等）に正規化する。
+    旧スキーマ（monthly_wages を直接持つ）はそのまま処理（後方互換）。
 
     労働時間が「ない / 異常に少ない（残業時間と誤認の疑い）」場合は、
     労働日数×8時間で補完する。役員は労働時間補完の対象外。
@@ -1056,11 +1317,19 @@ def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
     HOURS_PER_DAY = 8.0
     SUSPICIOUS_AVG_HOURS = 50.0  # 役員/パート以外で月平均がこれ未満なら誤認の疑い
 
+    fiscal_window = resolve_fiscal_window(fiscal_period_hint)
     employees: list[WageEmployee] = []
     for i, emp in enumerate(ai_data):
         if not isinstance(emp, dict):
             logger.warning(f'AI抽出: index={i} が辞書でないためスキップ: {type(emp).__name__}')
             continue
+        # 新スキーマ → 旧スキーマ正規化（事業年度ウィンドウ適用・賞与集約）
+        emp = _normalize_ai_employee_dict(emp, fiscal_window)
+        if emp.get('_bonus_undated'):
+            logger.warning(
+                f'AI抽出: {emp.get("name", "?")} の賞与に支給日不明分があり年間賞与へ算入しました '
+                f'（{emp["_bonus_undated"]} 円）。対象事業年度内かは PDF 原本で要確認'
+            )
         ok, reason = _validate_ai_employee(emp)
         if not ok:
             logger.warning(f'AI抽出: index={i} ({emp.get("name", "?")}) バリデーション失敗: {reason}')
@@ -1180,6 +1449,8 @@ def _ai_data_to_wage_employees(ai_data: list[dict]) -> list[WageEmployee]:
             monthly_hourly_rates=monthly_hourly_rates,
             monthly_hours=monthly_hours,
             annual_transport_allowance=atransport_val,
+            annual_bonus=float(emp.get('annual_bonus') or 0.0),
+            fiscal_window=fiscal_window,
         ))
     return employees
 
@@ -1271,7 +1542,7 @@ def read_wage_ledgers_with_ai(
         logger.error(f'AI抽出例外: {e}', exc_info=True)
         return []
 
-    employees = _ai_data_to_wage_employees(ai_data)
+    employees = _ai_data_to_wage_employees(ai_data, fiscal_period_hint)
     logger.info(
         f'AI抽出結果: 入力{len(ai_data)}名 → 妥当{len(employees)}名'
     )
@@ -1409,6 +1680,12 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
         monthly_hourly_rates=new_rates,
         monthly_hours=new_hours,
         source_file=merged_source,
+        # 年間通勤手当・年間賞与は同一人物の重複（名寄せ揺れ）で二重計上しないよう max を採る
+        annual_transport_allowance=max(
+            a.annual_transport_allowance or 0.0, b.annual_transport_allowance or 0.0
+        ),
+        annual_bonus=max(a.annual_bonus or 0.0, b.annual_bonus or 0.0),
+        fiscal_window=a.fiscal_window or b.fiscal_window,
     )
 
 

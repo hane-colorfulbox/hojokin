@@ -1643,6 +1643,7 @@ def _calc_wage_plan_from_ledger(
                 monthly_hours=monthly_hours,
                 is_officer=is_officer,
                 full_year=full_year,
+                annual_bonus=getattr(emp, 'annual_bonus', 0.0) or 0.0,
             ))
 
             # 役員を除く全従業員の年間総労働時間を集計
@@ -1661,6 +1662,27 @@ def _calc_wage_plan_from_ledger(
                 part_fte_fallback_names.append(emp.name)
 
         result = calculate_per_capita_wage(payroll_list)
+
+        # 決算書P/Lとのソフト突合（事業年度ウィンドウのズレ・賞与取りこぼし/二重計上の検知補助）。
+        # ログのみ（ブロックしない）。賃金台帳R216は12ヶ月在籍者のみ（中途者除外）なので
+        # 通常は「P/L人件費 ≥ R216」。R216 が P/L を大きく超えるのは窓ズレ/賞与二重計上の兆候。
+        pl_emp_wage = (
+            (financial.salary or 0) + (financial.misc_wages or 0) + (financial.bonus or 0)
+        )
+        if pl_emp_wage > 0 and result.total_salary > 0:
+            ratio = result.total_salary / pl_emp_wage
+            if ratio > 1.15:
+                logger.warning(
+                    f'R216×P/L突合: 賃金台帳R216={result.total_salary:,.0f}円 が '
+                    f'決算書の給料手当+雑給+賞与={pl_emp_wage:,.0f}円 を大きく超過(×{ratio:.2f})。'
+                    f'事業年度ウィンドウのズレ・賞与の二重計上がないか要確認'
+                )
+            elif ratio < 0.5:
+                logger.info(
+                    f'R216×P/L突合: 賃金台帳R216={result.total_salary:,.0f}円 が '
+                    f'決算書人件費={pl_emp_wage:,.0f}円 の半分未満(×{ratio:.2f})。'
+                    f'中途者除外が多い／台帳の月欠落の可能性（要確認）'
+                )
 
         # ── 給与支給総額が0になる原因の切り分け ──────────────────────────
         # 役員除外・中途者除外の結果 total_salary=0 になるケースは、原因により
@@ -2086,6 +2108,8 @@ def _build_employees_detail_from_ledger(
             'monthly_hours_full': monthly_hours_full,
             'month_labels_full': month_labels_full,
             'month_data_mask': month_data_mask,
+            # 年間賞与（R216 に算入。月次セルには混ぜず Sheet2 の年間給与計に加算する）
+            'annual_bonus': float(getattr(emp, 'annual_bonus', 0.0) or 0.0),
         })
     return detail
 
