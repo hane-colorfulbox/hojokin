@@ -542,4 +542,4 @@ python -c "import fitz; doc=fitz.open('x.pdf'); print(len(doc[0].get_text('text'
 - 出力ファイル: {会社名}_賃金台帳一覧.xlsx（警告付き雛形、データ未転記）
 ```
 
-ユーザー側は次に「Streamlit Cloud で給与計算のみタスクを実行して R216 を逆算検証」する流れになる。
+ユーザー側は次に「Streamlit Cloud で『一人当たり給与支給総額』タスクを実行して R216 を逆算検証」する流れになる（旧『給与計算のみ』タスクは UI から廃止。賃金台帳のみで R216 を出すこのタスクが後継）。

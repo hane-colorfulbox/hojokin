@@ -1225,9 +1225,19 @@ def run_wage_calculation(
                 ledger_paths = detector.get_all('wage_ledger')
                 if ledger_paths:
                     fiscal_hint, _ = _resolve_fiscal_period(financial, fiscal_month_override)
+                    # 賃金台帳は決定論パーサーで直読する（extractor=None）。
+                    # 申請書作成タスク（run_application_transfer → _calc_wage_plan_from_ledger）が
+                    # extractor=None で読むのと完全に揃え、②「一人当たり給与支給総額」と
+                    # ③「申請書作成」で R215/R216 が一致することを担保する。
+                    # AI 抽出経路は中途者の monthly_wages 位置が実行ごとにズレ／1ヶ月丸ごと
+                    # 欠落する事例があり（wage_reader._reconcile_midyear_positions_with_deterministic
+                    # の補正は値集合一致時のみ＝丸ごと欠落は救えない）、②だけ特定月が
+                    # 除外される不整合の原因になっていた。運用上、賃金台帳は事前に
+                    # 「賃金台帳の作成」タスクで標準テンプレ形式に整っている前提なので
+                    # 決定論パーサーで確実に読める。
                     ledger_emps = read_wage_ledgers(
                         ledger_paths,
-                        extractor=extractor,
+                        extractor=None,
                         fiscal_period_hint=fiscal_hint,
                     )
             if ledger_emps:

@@ -2211,10 +2211,17 @@ def judge_bonus_points(
         logger.warning(f'最低賃金が見つかりません: {prefecture}')
         return result
 
-    mw_r6 = result.min_wage_r6
+    # 公式「賃金状況報告シート（補助率引上げ・加点措置①用）」の判定数式は
+    #   対象 = IF(AND(時間換算給与 < R7改定後, 時間換算給与 > 0), "対象", "対象外")
+    # で、下限は「> 0」のみ。R6改定前は参考表示（改定前列）で判定には用いない。
+    # かつて R6 を下限に加えていたが、それだと R6 未満に計算された従業員を取りこぼし、
+    # 公式シートより厳しく「対象外」と誤判定して補助率2/3を逃すため、公式に合わせる。
+    # （公募要領 2026 p.18 補助率2/3条件・p.26 加点項目14／賃金状況報告シート① 数式で確認）
     mw_r7 = result.min_wage_r7
 
-    # ── 加点措置① ──
+    # ── 加点措置①（公式名: 補助率引上げ・加点措置① ／ 公募要領 加点項目14・補助率2/3トリガー）──
+    # 令和6年10月〜令和7年9月の暦月のうち、R7改定後最低賃金未満の従業員が
+    # 全従業員の30%以上である月が3か月以上 → 対象。
     target_months = list(range(0, 12))
     months_meeting_criteria = []
 
@@ -2239,7 +2246,9 @@ def judge_bonus_points(
                 continue
 
             total_emps += 1
-            is_under_r7 = mw_r6 <= hourly < mw_r7
+            # 公式シート①準拠: R7改定後未満なら対象（hourly>0は上の continue で担保済み）。
+            # R6改定前の下限は設けない（公式数式は < R7改定後 のみ）。
+            is_under_r7 = hourly < mw_r7
 
             if is_under_r7:
                 under_r7_emps += 1
