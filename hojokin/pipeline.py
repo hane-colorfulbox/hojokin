@@ -869,20 +869,33 @@ def run_application_transfer(
                 '②「一人当たり給与支給総額」タスクで数値を確認 → ③ 申請書作成'
             )
         elif wage_status == 'zero_total':
-            wage_warning = ' ⚠ 賃金台帳の給与支給総額が0でした'
+            wage_warning = (
+                ' ⚠ 賃金台帳の給与支給総額が0でした（R215/R216は空欄）。'
+                '賃金台帳の内容・対象期間をご確認ください'
+            )
         elif wage_status == 'error':
             wage_warning = (
                 ' ⚠ 賃金台帳処理中にエラーが発生しました。'
                 '「賃金台帳の作成」タスクで標準テンプレ形式に変換してから再実行してください'
             )
-        elif wage_status == 'fiscal_year_mismatch':
+        elif wage_status == 'officer_only':
             wage_warning = (
-                ' ⛔ 強警告: 賃金台帳の全月在籍者が0名でした。'
-                '賃金台帳の記録期間が直近事業年度12ヶ月と一致していない可能性が高いため、'
+                ' ⛔ 強警告: 賃金台帳に非役員の従業員が0名でした（役員のみの法人）。'
+                'IT導入補助金 公募要領 p.10 では「従業員を雇用していない法人は、従業員を'
+                '役員と読み替え、役員報酬と役員数に応じて算出」と定めています。'
                 '申請書 R215（従業員数）・R216（給与支給総額）・R217〜R219（賃上げ計画）は '
-                '空欄のままです。【確認事項】まず賃金台帳の提出期間が直近決算期12ヶ月を'
-                '含んでいるかご確認ください。含んでいなければ顧客に正しい期間の賃金台帳を'
-                '再提出してもらえないか相談のうえ、手動で値を入力してください'
+                '空欄のままです。役員報酬・役員数ベースで手動入力してください'
+            )
+        elif wage_status == 'no_full_year_target':
+            wage_warning = (
+                ' ⛔ 強警告: 賃金台帳の全月在籍者が0名でした（従業員はいるが全員が直近事業年度の'
+                '全月分給与を受けていない）。考えられる原因は2つです。'
+                '【原因①】賃金台帳の対象期間が直近決算期12ヶ月とズレている（支給日ベース等）'
+                '→ まず提出期間が直近決算期12ヶ月を含むか確認し、ズレていれば正しい期間で再取得。'
+                '【原因②】設立間もない等で全員が在籍12ヶ月未満 → 役員報酬ベースでの算定が'
+                '必要か公募要領で確認（事務局確認推奨）。'
+                'いずれもR215（従業員数）・R216（給与支給総額）・R217〜R219は空欄のままです。'
+                '原因を確定のうえ手動で値を入力してください'
             )
         elif wage_status == 'low_full_year_ratio':
             wage_warning = (
@@ -1552,7 +1565,10 @@ def _calc_wage_plan_from_ledger(
           - '': 正常
           - 'no_ledger': 賃金台帳なし
           - 'no_data': 賃金台帳はあるがデータ抽出失敗
-          - 'zero_total': 給与支給総額が0以下
+          - 'low_full_year_ratio': 全月在籍者が非役員数の50%未満（自動転記はするが要確認）
+          - 'officer_only': 非役員従業員0名＝役員のみの法人（公募要領特例で役員報酬ベース算定が必要）
+          - 'no_full_year_target': 非役員はいるが全月在籍者0名（①台帳期間ズレ ②全員12ヶ月未満の可能性）
+          - 'zero_total': 上記以外で給与支給総額が0以下
           - 'error': 例外発生
     """
     from .wage_reader import read_wage_ledgers
@@ -1646,35 +1662,45 @@ def _calc_wage_plan_from_ledger(
 
         result = calculate_per_capita_wage(payroll_list)
 
-        if result.total_salary <= 0:
-            logger.warning('給与支給総額が0以下 → 計画値転記をスキップ')
-            return None, employees_raw, 'zero_total'
-
-        # ── 直近事業年度との整合性チェック ──────────────────────────────
-        # 賃金台帳に複数名の記録があるのに、12スロット全埋まり (full_year=True) と
-        # 判定される従業員が極端に少ないケースのハンドリング:
+        # ── 給与支給総額が0になる原因の切り分け ──────────────────────────
+        # 役員除外・中途者除外の結果 total_salary=0 になるケースは、原因により
+        # 担当者の取るべき対応（台帳期間の確認 / 役員報酬ベース算定）が異なるため、
+        # 簡素な 'zero_total' で潰さず具体的に案内する。
+        # 公募要領 p.10:「全月分の給与等の支給を受けた従業員」のみ算定対象。
+        #   中途採用・退職等で全月分支給を受けていない者は「除く必要がある」。
+        #   「従業員を雇用していない法人は…役員と読み替え、役員報酬と役員数に応じて算出」。
         #
-        #   (A) included_count == 0 かつ non_officer_count >= 2
-        #       → 賃金台帳の記録期間が直近事業年度を完全に外している疑い
-        #         (過去事例: Yellow Link Japan 案件)。
-        #         hard stop して手動入力を促す ('fiscal_year_mismatch')。
-        #
-        #   (B) 0 < included_count < non_officer_count * 0.5
-        #       → 中途入退社者が多い案件 (例: 森開発)。公募要領上「全月分の給与支給を
-        #         受けた従業員のみ算出対象」なので、対象が1名でも算出値は正しい。
-        #         自動転記は実行し、注意喚起だけ出す ('low_full_year_ratio')。
-        #         ※ ②「一人当たり給与支給総額」タスクと結果を一致させる目的。
+        # 分岐:
+        #   (a) non_officer_count == 0（役員のみの法人＝従業員0名）
+        #       → 公募要領特例で役員報酬・役員数ベース算定が必要 ('officer_only')。
+        #   (b) total_salary<=0 かつ included_count == 0（非役員はいるが全員が全月在籍でない）
+        #       → ①台帳期間ズレ ②設立間もない等で全員12ヶ月未満（役員報酬ベース要否を確認）
+        #         のいずれか。R215/R216は自動転記せず案内 ('no_full_year_target')。
+        #   (c) 0 < included_count < non_officer_count * 0.5（中途入退社が多い案件）
+        #       → 公募要領通り全月在籍者のみで算出は正しい。自動転記しつつ注意喚起
+        #         ('low_full_year_ratio')。②タスクと結果を一致させる目的。
         non_officer_count = sum(1 for p in payroll_list if not p.is_officer)
         included_count = len(result.included)
         FISCAL_MISMATCH_RATIO = 0.5  # 全月在籍者が非役員数の50%未満は要確認
 
-        if non_officer_count >= 2 and included_count == 0:
-            logger.warning(
-                f'賃金台帳の全月在籍者が0名（非役員{non_officer_count}名中）。'
-                f'賃金台帳の記録期間が直近決算期12ヶ月と一致していない疑いがあるため、'
-                f'R215/R216 の自動転記をスキップします（手動入力が必要）'
-            )
-            return None, employees_raw, 'fiscal_year_mismatch'
+        if result.total_salary <= 0:
+            if non_officer_count == 0:
+                logger.warning(
+                    '給与支給総額0：非役員の従業員が0名（役員のみの法人）。'
+                    '公募要領p.10特例＝役員報酬・役員数ベースで算定が必要。'
+                    'R215/R216 は自動転記せず手動入力（役員報酬ベース）が必要です'
+                )
+                return None, employees_raw, 'officer_only'
+            if included_count == 0:
+                logger.warning(
+                    f'給与支給総額0：非役員{non_officer_count}名いるが全月在籍者が0名。'
+                    f'①賃金台帳の対象期間が直近事業年度12ヶ月とズレ（支給日ベース等）、'
+                    f'②設立間もない等で全員が在籍12ヶ月未満（役員報酬ベース算定の要否を要確認）、'
+                    f'のいずれかの可能性。R215/R216 は自動転記せず手動確認が必要です'
+                )
+                return None, employees_raw, 'no_full_year_target'
+            logger.warning('給与支給総額が0以下 → 計画値転記をスキップ')
+            return None, employees_raw, 'zero_total'
 
         low_full_year_ratio = (
             non_officer_count >= 2
