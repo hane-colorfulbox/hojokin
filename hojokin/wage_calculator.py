@@ -137,6 +137,83 @@ def calculate_per_capita_wage(
     )
     return result
 
+
+def wage_employees_to_payroll(
+    employees,
+) -> tuple[list[PayrollEmployee], float, list[str]]:
+    """WageEmployee → PayrollEmployee へ変換する（pipeline と回帰テストで共有）。
+
+    R215（FTE換算従業員数）/ R216（給与支給総額）の算定前段。元は pipeline 内に
+    インライン実装されていたが、回帰テスト（_debug/test_wage_regression.py）が本番と
+    **同一の変換ロジック**を検証できるよう共有関数に切り出した。WageEmployee を直接
+    import せず属性アクセス（duck typing）で扱い、循環 import を避ける。
+
+    Returns:
+        (payroll_list, total_annual_hours, part_fte_fallback_names)
+        - total_annual_hours: 役員を除く全従業員の年間総労働時間
+        - part_fte_fallback_names: パート/アルバイトで労働時間データが無く
+          _calc_fte で FTE=1.0 にサイレント昇格した従業員名（R215 過大計上の懸念対象）
+    """
+    payroll_list: list[PayrollEmployee] = []
+    total_annual_hours = 0.0
+    part_fte_fallback_names: list[str] = []
+
+    for emp in employees:
+        is_officer = '役員' in emp.employment_type
+        emp_type = emp.employment_type if emp.employment_type else '正社員'
+
+        # 全月分の給与を受けたか判定
+        full_year = emp.is_full_year
+
+        monthly_salary = [
+            w if w is not None else 0.0 for w in emp.monthly_wages
+        ]
+
+        # 労働時間: 月別実績データがあればそれを優先。なければ月平均で補完
+        has_monthly_hours = any(
+            h is not None and h > 0 for h in emp.monthly_hours
+        )
+        if has_monthly_hours:
+            monthly_hours = [
+                h if (h is not None and h > 0) else 0.0
+                for h in emp.monthly_hours
+            ]
+        elif emp.monthly_avg_hours > 0:
+            # 月別データが取れないフォーマットは、在籍月数×月平均で概算
+            months_with_wage = sum(
+                1 for w in emp.monthly_wages if w is not None
+            )
+            months = months_with_wage if months_with_wage > 0 else 12
+            monthly_hours = [emp.monthly_avg_hours] * months + [0.0] * (12 - months)
+        else:
+            monthly_hours = []
+
+        payroll_list.append(PayrollEmployee(
+            name=emp.name,
+            employment_type=emp_type,
+            monthly_salary=monthly_salary,
+            monthly_hours=monthly_hours,
+            is_officer=is_officer,
+            full_year=full_year,
+            annual_bonus=getattr(emp, 'annual_bonus', 0.0) or 0.0,
+        ))
+
+        # 役員を除く全従業員の年間総労働時間を集計
+        if not is_officer and monthly_hours:
+            total_annual_hours += sum(monthly_hours)
+
+        # パートで時間データが空 → _calc_fte で FTE=1.0 サイレント昇格になる人
+        # （IT導入補助金は本来 FTE 換算が要件。R215 過大計上の警告対象）
+        if (
+            not is_officer
+            and not is_full_time_employment(emp_type)
+            and not monthly_hours
+            and full_year
+        ):
+            part_fte_fallback_names.append(emp.name)
+
+    return payroll_list, total_annual_hours, part_fte_fallback_names
+
 # ── スタイル定義 ──
 TITLE_FONT = Font(name='游ゴシック', size=14, bold=True)
 HEADER_FONT = Font(name='游ゴシック', size=10, bold=True)

@@ -1182,12 +1182,17 @@ class StubExtractor(BaseExtractor):
 class ClaudeExtractor(BaseExtractor):
     """Claude API による実データ抽出"""
 
+    # 録画/再生 recorder のクラス既定値。__init__ を通さずに組み立てる
+    # テストダブルでも self.recorder 参照が AttributeError にならないよう既定を None に。
+    recorder = None
+
     def __init__(
         self,
         api_key: str,
         model: str = 'claude-sonnet-4-6',
         retry_callback: Optional[RetryCallback] = None,
         timeout: float = 480.0,
+        recorder=None,
     ):
         try:
             import anthropic
@@ -1200,6 +1205,9 @@ class ClaudeExtractor(BaseExtractor):
         self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
         self.model = model
         self.retry_callback = retry_callback
+        # 録画/再生 recorder（hojokin.api_recorder）。None=本番（実APIを直接叩く）。
+        # ReplayRecorder を渡すと回帰テストが課金ゼロで過去の抽出結果を再生できる。
+        self.recorder = recorder
         # 抽出関数 (_extract_pl_pl_section 等) が API エラーで失敗した際の「失敗理由」を記録。
         # caller名 → ユーザー向けメッセージ（_format_api_error の戻り値）を蓄積し、
         # 上位の信頼度判定（_extract_pl_structured）が confidence.reason に転記する。
@@ -1254,6 +1262,15 @@ class ClaudeExtractor(BaseExtractor):
         last_error: Optional[Exception] = None
         for attempt in range(1, MAX_API_ATTEMPTS + 1):
             try:
+                # 録画/再生: recorder があれば介在させる。
+                # replay は実応答を返して即終了、record は real_call() で実APIを叩いて保存。
+                # （recorder=None の本番は従来どおり messages.create を直接呼ぶ）
+                if self.recorder is not None:
+                    return self.recorder.intercept(
+                        caller=caller,
+                        real_call=lambda: self.client.messages.create(**kwargs),
+                        **kwargs,
+                    )
                 return self.client.messages.create(**kwargs)
 
             except anthropic.BadRequestError as e:

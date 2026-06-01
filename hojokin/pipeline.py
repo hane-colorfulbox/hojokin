@@ -18,6 +18,7 @@ from .wage_calculator import (
     PayrollEmployee,
     calculate_per_capita_wage,
     is_full_time_employment,
+    wage_employees_to_payroll,
 )
 from .wage_reader import read_wage_ledger, read_wage_ledgers, export_wage_ledger_summary
 from .pdf_reader import pdf_to_images
@@ -1598,68 +1599,12 @@ def _calc_wage_plan_from_ledger(
 
         logger.info(f'賃金台帳: {len(employees_raw)}名読取 ({len(ledger_paths)}ファイル)')
 
-        # WageEmployee → PayrollEmployee に変換
-        payroll_list = []
-        total_annual_hours = 0.0
-        # IT導入補助金 R215 は FTE換算（公募要領 p.10、マニュアル p.86「20÷40=0.5(人)」）。
-        # パート・アルバイトで monthly_hours が空のままだと _calc_fte で FTE=1.0 に
-        # サイレント昇格し R215 が過大計上される。そのケースをカウントしてアプリ画面で警告する。
-        part_fte_fallback_count = 0
-        part_fte_fallback_names: list[str] = []
-        for emp in employees_raw:
-            is_officer = '役員' in emp.employment_type
-            emp_type = emp.employment_type if emp.employment_type else '正社員'
-
-            # 全月分の給与を受けたか判定
-            full_year = emp.is_full_year
-
-            monthly_salary = [
-                w if w is not None else 0.0 for w in emp.monthly_wages
-            ]
-
-            # 労働時間: 月別実績データがあればそれを優先。なければ月平均で補完
-            has_monthly_hours = any(
-                h is not None and h > 0 for h in emp.monthly_hours
-            )
-            if has_monthly_hours:
-                monthly_hours = [
-                    h if (h is not None and h > 0) else 0.0
-                    for h in emp.monthly_hours
-                ]
-            elif emp.monthly_avg_hours > 0:
-                # 月別データが取れないフォーマットは、在籍月数×月平均で概算
-                months_with_wage = sum(
-                    1 for w in emp.monthly_wages if w is not None
-                )
-                months = months_with_wage if months_with_wage > 0 else 12
-                monthly_hours = [emp.monthly_avg_hours] * months + [0.0] * (12 - months)
-            else:
-                monthly_hours = []
-
-            payroll_list.append(PayrollEmployee(
-                name=emp.name,
-                employment_type=emp_type,
-                monthly_salary=monthly_salary,
-                monthly_hours=monthly_hours,
-                is_officer=is_officer,
-                full_year=full_year,
-                annual_bonus=getattr(emp, 'annual_bonus', 0.0) or 0.0,
-            ))
-
-            # 役員を除く全従業員の年間総労働時間を集計
-            if not is_officer and monthly_hours:
-                total_annual_hours += sum(monthly_hours)
-
-            # パートで時間データが空 → _calc_fte で FTE=1.0 サイレント昇格になる人数
-            # （IT導入補助金は本来 FTE 換算が要件。R215 過大計上の警告対象）
-            if (
-                not is_officer
-                and not is_full_time_employment(emp_type)
-                and not monthly_hours
-                and full_year
-            ):
-                part_fte_fallback_count += 1
-                part_fte_fallback_names.append(emp.name)
+        # WageEmployee → PayrollEmployee に変換（変換ロジックは wage_calculator に集約。
+        # 回帰テスト _debug/test_wage_regression.py が本番と同一の変換を検証できるようにする）。
+        payroll_list, total_annual_hours, part_fte_fallback_names = (
+            wage_employees_to_payroll(employees_raw)
+        )
+        part_fte_fallback_count = len(part_fte_fallback_names)
 
         result = calculate_per_capita_wage(payroll_list)
 

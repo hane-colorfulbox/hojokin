@@ -593,6 +593,73 @@ def check_cell_level_consistency(
     return results
 
 
+def check_r216_total(result, payroll_employees=None) -> list[str]:
+    """R216（給与支給総額）算定結果の内部整合検算。
+
+    calculate_per_capita_wage の戻り値（PerCapitaWageResult）が満たすべき不変条件を
+    確認する。PerCapitaWageResult / PayrollEmployee から計算できる範囲のみを検証する
+    （課税支給合計 vs 差引支給 など台帳セルレベルの突合は check_cell_level_consistency
+    が担当）。回帰テスト・実行時の双方から呼べる純関数（API 呼出ゼロ・決定論）。
+
+    Args:
+        result: PerCapitaWageResult（total_salary / employee_count_fte /
+            per_person_salary / included を参照）
+        payroll_employees: 未使用（将来の台帳側突合用に予約）
+
+    Returns:
+        不整合の警告文字列リスト（整合していれば空）
+    """
+    TOLERANCE = 1.0  # 円。丸め誤差の許容
+    warnings: list[str] = []
+
+    included = getattr(result, 'included', None) or []
+
+    # ① included の年計（月次課税給与 ＋ 年間賞与）と total_salary が一致するか
+    recomputed = 0.0
+    for emp in included:
+        monthly = _emp_get(emp, 'monthly_salary') or []
+        recomputed += sum(s for s in monthly if s)
+        recomputed += _emp_get(emp, 'annual_bonus', 0.0) or 0.0
+    if abs(recomputed - result.total_salary) > TOLERANCE:
+        warnings.append(
+            f'R216内部不整合: total_salary={result.total_salary:,.0f}円 が '
+            f'算定対象者の年計再計算={recomputed:,.0f}円 と一致しません'
+        )
+
+    # ② 役員が算定対象（included）に混入していないか（役員報酬は R216 から除外が必要）
+    officer_in_included = [
+        _emp_get(e, 'name', '?') for e in included if _emp_get(e, 'is_officer', False)
+    ]
+    if officer_in_included:
+        warnings.append(
+            f'R216内部不整合: 役員が給与支給総額の算定対象に混入 '
+            f'（{", ".join(officer_in_included)}）。役員報酬は R216 から除外が必要'
+        )
+
+    # ③ 1人当たり = total_salary / FTE人数 の一致（fte>0 のとき）
+    if result.employee_count_fte > 0:
+        expected_pp = result.total_salary / result.employee_count_fte
+        if abs(expected_pp - result.per_person_salary) > TOLERANCE:
+            warnings.append(
+                f'R216内部不整合: 1人当たり={result.per_person_salary:,.0f}円 が '
+                f'total/FTE={expected_pp:,.0f}円 と一致しません'
+            )
+    elif result.total_salary > 0:
+        warnings.append(
+            'R216内部不整合: 給与支給総額>0 なのに FTE人数=0（per_person が算出不能）'
+        )
+
+    # ④ 算定対象者に負の月次給与が混じっていないか
+    for emp in included:
+        monthly = _emp_get(emp, 'monthly_salary') or []
+        if any((s is not None and s < 0) for s in monthly):
+            warnings.append(
+                f'R216内部不整合: {_emp_get(emp, "name", "?")} に負の月次給与が含まれます'
+            )
+
+    return warnings
+
+
 def run_all_validations(
     hearing_data: dict | None,
     ledger_employees: list[dict] | None,
