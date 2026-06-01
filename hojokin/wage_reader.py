@@ -693,13 +693,22 @@ def _read_csv(path: Path, emp_data: dict | None = None) -> None:
         logger.debug(f'CSV から従業員を追加: {name}')
 
 
+def _visible_worksheets(wb: openpyxl.Workbook) -> list:
+    """人間に見える（表示中の）シートだけ返す。非表示シートは読まない。
+
+    人手修正で旧版シートが「×」付きのまま非表示で残ることがあり、全シート走査だと
+    名寄せで二重計上になる（hidden/veryHidden を除外し、表示中シートのみを正本扱い）。
+    """
+    return [ws for ws in wb.worksheets if ws.sheet_state == 'visible']
+
+
 def _read_flexible(wb: openpyxl.Workbook,
                    emp_data: dict | None = None) -> dict:
     """柔軟パーサー本体（emp_dataに蓄積）"""
     if emp_data is None:
         emp_data = {}
 
-    for ws in wb.worksheets:
+    for ws in _visible_worksheets(wb):
         header_rows = _find_header_rows(ws)
         if not header_rows:
             continue
@@ -761,7 +770,7 @@ def _read_individual_ledger(wb: openpyxl.Workbook) -> list[WageEmployee]:
     """フォーマット3: 行=項目、列=月、1人1ブロック"""
     employees = []
 
-    for ws in wb.worksheets:
+    for ws in _visible_worksheets(wb):
         # シート内のブロックを探す（「賃金台帳」を含むセルが区切り）
         blocks = _find_individual_blocks(ws)
 
@@ -920,7 +929,7 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
 
 def _is_individual_ledger(wb: openpyxl.Workbook) -> bool:
     """個人台帳型（月度給与ブロック）かどうか判定"""
-    for ws in wb.worksheets:
+    for ws in _visible_worksheets(wb):
         for r in range(1, min(ws.max_row + 1, 30)):
             for c in range(1, min(ws.max_column + 1, 30)):
                 val = str(ws.cell(r, c).value or '')
@@ -981,7 +990,7 @@ def read_wage_ledger(file_path: Path) -> list[WageEmployee]:
 def _workbook_to_tsv(wb: openpyxl.Workbook, file_label: str) -> str:
     """ワークブック全シートをTSV文字列に変換（AI入力用）。"""
     parts: list[str] = [f'### ファイル: {file_label} ###']
-    for ws in wb.worksheets:
+    for ws in _visible_worksheets(wb):
         parts.append(f'\n--- シート: {ws.title} ---')
         for row in ws.iter_rows(values_only=True):
             # 末尾の None だけのセルは無視して圧縮
