@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import logging
+import re
 import unicodedata
 import hashlib
 from pathlib import Path
@@ -86,10 +87,10 @@ from hojokin.ai_extractor import create_extractor
 from hojokin.config import CLAUDE_API_KEY, detect_prefecture
 from hojokin.pipeline import (
     FileDetector, run_application_transfer, run_wage_calculation,
-    run_wage_ledger_conversion,
+    run_wage_ledger_conversion, run_bonus_wage_ledger_creation,
 )
 from hojokin.wage_reader import (
-    read_wage_ledgers, judge_bonus_points,
+    judge_bonus_points, read_bonus_wage_ledger, is_bonus_wage_ledger,
     fill_bonus_sheet_1, fill_bonus_sheet_2,
 )
 
@@ -190,7 +191,12 @@ TASK_OPTIONS = {
     '賃金台帳の作成': 'wage_ledger_creation',
     '一人当たり給与支給総額': 'per_employee_wage',
     '申請書作成': 'application',
-    '加点判定（賃金台帳）': 'bonus',
+    # 賃上げ加点は2工程: ①加点判定用賃金台帳を作る → ②それを入力に加点判定。
+    # 加点判定は「基本給÷所定労働時間＝時間換算給与」を暦月固定（R6/10〜R7/9＋申請直近月）で
+    # 見るため、R215/R216用の標準賃金台帳とは別物の専用台帳が必要（標準台帳には基本給・
+    # 所定労働時間・暦月固定列が無く、正社員が判定からこぼれる）。
+    '加点判定用賃金台帳の作成': 'bonus_wage_ledger_creation',
+    '加点判定': 'bonus',
 }
 
 # 加点項目の全体像（デジタル化・AI導入補助金2026 通常枠 公募要領 p.24-27、2026-06-01 確認）。
@@ -331,6 +337,32 @@ def _find_wage_ledger_template(base_dir: Path) -> Path | None:
     return None
 
 
+def _find_bonus_wage_ledger_template(base_dir: Path) -> Path | None:
+    """加点判定用賃金台帳テンプレート（ツール/加点判定用賃金台帳テンプレート.xlsx）を解決する。"""
+    target_name = '加点判定用賃金台帳テンプレート.xlsx'
+    candidates = [
+        base_dir / 'ツール' / target_name,
+        base_dir / target_name,
+        Path(__file__).parent / 'ツール' / target_name,
+    ]
+    for p in candidates:
+        if p.exists() and not p.name.startswith('~$'):
+            return p
+    return None
+
+
+def _parse_app_month_input(s: str) -> tuple[int, int] | None:
+    """交付申請月の入力（yyyy/mm 等）を (西暦年, 月) に解釈する。失敗時 None。"""
+    if not s:
+        return None
+    m = re.match(r'^\s*(\d{4})[\s/\-.年]+(\d{1,2})', str(s))
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+        if 1 <= month <= 12:
+            return (year, month)
+    return None
+
+
 def find_template(base_dir: Path, template_type: str) -> Path | None:
     """テンプレートファイルを検索（v2を優先）
 
@@ -382,6 +414,7 @@ def run_processing(
     template_dir: Path,
     progress_callback=None,
     prefecture: str = '',
+    application_ym: tuple[int, int] | None = None,
     fiscal_month_override: int | None = None,
     has_cost_report_hint: bool = False,
     selection_override: dict[str, list[Path]] | None = None,
@@ -389,9 +422,11 @@ def run_processing(
     """メイン処理を実行"""
     results = {}
 
-    # Extractor作成（加点判定もPDF/CSV対応のためAI経路を使用）
+    # Extractor作成（加点判定用賃金台帳の作成は PDF/Excel から AI 抽出する）。
+    # 加点判定（bonus）は専用台帳を決定論で直読みするため AI 不要。
     extractor = None
-    if task_type in ('application', 'wage', 'per_employee_wage', 'all', 'bonus'):
+    if task_type in ('application', 'wage', 'per_employee_wage', 'all',
+                     'bonus_wage_ledger_creation'):
         def _on_api_retry(attempt: int, max_attempts: int, wait: float, err: str):
             # Anthropic APIの一時エラー（422/429/5xx/529/timeout等）時の再試行をユーザーに通知
             try:
@@ -506,13 +541,45 @@ def run_processing(
             'output_path': output_path if status.status == '完了' else None,
         }
 
+    if task_type == 'bonus_wage_ledger_creation':
+        if progress_callback:
+            progress_callback('加点判定用の賃金台帳を作成中...')
+
+        bonus_template = _find_bonus_wage_ledger_template(template_dir)
+        if bonus_template is None:
+            results['bonus_wage_ledger_creation'] = {
+                'status': 'エラー',
+                'message': (
+                    '加点判定用賃金台帳テンプレートが見つかりません。'
+                    '`ツール/加点判定用賃金台帳テンプレート.xlsx` を配置してください。'
+                ),
+            }
+        else:
+            output_path = work_dir / f'{company_name}_加点判定用賃金台帳.xlsx'
+            status = run_bonus_wage_ledger_creation(
+                resource_folder=work_dir,
+                company_name=company_name,
+                template_path=bonus_template,
+                output_path=output_path,
+                extractor=extractor,
+                prefecture=prefecture,
+                application_ym=application_ym,
+                selection_override=selection_override,
+            )
+            results['bonus_wage_ledger_creation'] = {
+                'status': status.status,
+                'message': status.message,
+                'output_path': output_path if status.status == '完了' else None,
+            }
+
     if task_type == 'bonus':
         if progress_callback:
-            progress_callback('賃金台帳を読み取り中...')
+            progress_callback('加点判定用賃金台帳を読み取り中...')
 
         results['bonus'] = _run_bonus_judgment(
             work_dir, company_name, prefecture, template_dir,
-            extractor=extractor,
+            template_type=template_type,
+            application_ym=application_ym,
             selection_override=selection_override,
         )
 
@@ -553,83 +620,104 @@ def run_processing(
     return results
 
 
+def _find_bonus_ledger(
+    work_dir: Path,
+    selection_override: dict[str, list[Path]] | None = None,
+) -> Path | None:
+    """work_dir から加点判定用賃金台帳（専用シート『加点判定用明細』）を1つ探す。"""
+    detector = FileDetector(work_dir, selection_override=selection_override)
+    for p in detector.get_all('wage_ledger'):
+        if is_bonus_wage_ledger(p):
+            return p
+    return None
+
+
 def _run_bonus_judgment(
     work_dir: Path,
     company_name: str,
     prefecture: str,
     template_dir: Path,
-    extractor=None,
-    cached_ledger_employees: list | None = None,
+    template_type: str = '',
+    application_ym: tuple[int, int] | None = None,
     selection_override: dict[str, list[Path]] | None = None,
 ) -> dict:
-    """加点判定を実行。
+    """加点判定を実行（専用の「加点判定用賃金台帳」を入力に、AI 再抽出なしで判定）。
 
-    cached_ledger_employees があれば再利用してAPI呼出をスキップする。
-    なければ FileDetector で賃金台帳ファイル（Excel/CSV）を検索して AI 経路で読み取る。
-    selection_override が渡されたら自動検出より優先する。
+    入力は『加点判定用賃金台帳の作成』タスクが生成（または手動記入）した専用テンプレ
+    （シート『加点判定用明細』）。①テンプレは申請枠で1枚選ぶ
+    （通常枠＝補助率引上げ・加点措置①用、それ以外＝加点措置①用）。②は全枠共通。
     """
-    # キャッシュ優先（all + bonus を同時実行する将来拡張に備えた経路）
-    if cached_ledger_employees:
-        employees = cached_ledger_employees
-    else:
-        # FileDetector 経由で賃金台帳ファイルを取得（手動選択 override にも対応）。
-        # 拡張子フィルタ・出力ファイル除外・NFC 正規化は detector 側で実施済み。
-        detector = FileDetector(work_dir, selection_override=selection_override)
-        wage_files = detector.get_all('wage_ledger')
-
-        if not wage_files:
-            return {
-                'status': 'エラー',
-                'message': (
-                    '賃金台帳ファイルが見つかりません。Excel/CSV をアップロードしてください。'
-                    'ファイル名に「賃金台帳」または「給与台帳」を含めてください。'
-                ),
-            }
-
-        try:
-            employees = read_wage_ledgers(wage_files, extractor=extractor)
-        except Exception as e:
-            return {
-                'status': 'エラー',
-                'message': f'賃金台帳の読み取り中にエラーが発生しました: {str(e)}',
-            }
-
-        if not employees:
-            return {
-                'status': 'エラー',
-                'message': '賃金台帳からデータを読み取れませんでした。ファイルの形式を確認してください。',
-            }
+    ledger_path = _find_bonus_ledger(work_dir, selection_override)
+    if ledger_path is None:
+        return {
+            'status': 'エラー',
+            'message': (
+                '加点判定用賃金台帳（専用テンプレ）が見つかりません。'
+                'まず「加点判定用賃金台帳の作成」タスクで作成するか、'
+                '`加点判定用賃金台帳テンプレート.xlsx` に記入してアップロードしてください。'
+            ),
+        }
 
     try:
-        result = judge_bonus_points(employees, prefecture)
+        ledger = read_bonus_wage_ledger(ledger_path)
+    except Exception as e:
+        return {'status': 'エラー',
+                'message': f'加点判定用賃金台帳の読み取りに失敗しました: {str(e)}'}
 
-        # 加点措置シートのテンプレートを探して自動入力
+    # 台帳に未入力なら UI 値で補完（台帳の入力値があればそちらを優先）
+    if not ledger.prefecture and prefecture:
+        ledger.prefecture = prefecture
+    if ledger.application_ym is None and application_ym:
+        ledger.application_ym = application_ym
+
+    if not ledger.employees:
+        return {'status': 'エラー',
+                'message': '加点判定用賃金台帳から従業員データを読み取れませんでした。'}
+
+    try:
+        result = judge_bonus_points(ledger)
+
+        # 申請枠で①テンプレを1枚選ぶ（通常枠＝補助率引上げ①用 / それ以外＝加点措置①用）。
+        want_hojoritsu = template_type.startswith('通常枠')
         bonus_dir = template_dir / '補助金加点'
-        output_files = {}
-
+        bonus1_file = None
+        bonus2_file = None
         if bonus_dir.exists():
             for bp in bonus_dir.iterdir():
-                if '加点措置①' in bp.name and bp.suffix == '.xlsx':
-                    out = work_dir / f'{company_name}_加点措置①_結果.xlsx'
-                    fill_bonus_sheet_1(bp, out, result)
-                    output_files['bonus1'] = out
-                elif '加点措置②' in bp.name and bp.suffix == '.xlsx':
-                    out = work_dir / f'{company_name}_加点措置②_結果.xlsx'
-                    fill_bonus_sheet_2(bp, out, result)
-                    output_files['bonus2'] = out
+                if bp.suffix.lower() != '.xlsx' or bp.name.startswith('~$'):
+                    continue
+                name = bp.name
+                if '加点措置②' in name:
+                    bonus2_file = bp
+                elif '加点措置①' in name:
+                    is_hojoritsu = '補助率' in name
+                    if want_hojoritsu and is_hojoritsu:
+                        bonus1_file = bp
+                    elif (not want_hojoritsu) and (not is_hojoritsu):
+                        bonus1_file = bp
+
+        output_files = {}
+        if bonus1_file is not None:
+            label1 = '補助率引上げ・加点措置①' if want_hojoritsu else '加点措置①'
+            out1 = work_dir / f'{company_name}_{label1}_結果.xlsx'
+            fill_bonus_sheet_1(bonus1_file, out1, result)
+            output_files['bonus1'] = out1
+        if bonus2_file is not None:
+            out2 = work_dir / f'{company_name}_加点措置②_結果.xlsx'
+            fill_bonus_sheet_2(bonus2_file, out2, result)
+            output_files['bonus2'] = out2
 
         return {
             'status': '完了',
-            'message': f'従業員{len(employees)}名の賃金台帳を分析しました。',
+            'message': f'従業員{len(ledger.employees)}名の加点判定用賃金台帳を分析しました。',
             'result': result,
             'output_files': output_files,
+            'employee_count': len(ledger.employees),
         }
 
     except Exception as e:
-        return {
-            'status': 'エラー',
-            'message': f'処理中にエラーが発生しました: {str(e)}',
-        }
+        return {'status': 'エラー',
+                'message': f'処理中にエラーが発生しました: {str(e)}'}
 
 
 # ── ヘッダー ──
@@ -708,8 +796,9 @@ with st.sidebar:
         fiscal_month_override = int(fiscal_month_label.replace('月', ''))
 
     # 製造原価ありフラグ — 製造業向け。チェック時、AI に「製造原価報告書が存在する」ヒントを注入
-    # 決算書PDFを参照しないタスク（per_employee_wage / bonus / wage_ledger_creation）では非表示
-    if task_type in ('per_employee_wage', 'bonus', 'wage_ledger_creation'):
+    # 決算書PDFを参照しないタスクでは非表示
+    if task_type in ('per_employee_wage', 'bonus', 'wage_ledger_creation',
+                     'bonus_wage_ledger_creation'):
         has_cost_report_hint = False
     else:
         has_cost_report_hint = st.checkbox(
@@ -730,14 +819,24 @@ with st.sidebar:
              '同名ファイルがあれば上書きされます。',
     )
 
-    # 加点判定の場合は都道府県が必要
-    if task_type == 'bonus':
+    # 加点判定・加点判定用台帳の作成では都道府県と交付申請月が必要
+    application_ym: tuple[int, int] | None = None
+    if task_type in ('bonus', 'bonus_wage_ledger_creation'):
         from hojokin.config import MIN_WAGE_MAP
         prefecture = st.selectbox(
             '事業場の都道府県',
             [''] + list(MIN_WAGE_MAP.keys()),
-            help='加点判定に必要です。事業場の所在地の都道府県を選択してください。',
+            help='加点判定の最低賃金比較に使用します（事業場の所在地・会社で1つ）。',
         )
+        _app_month_str = st.text_input(
+            '交付申請月（yyyy/mm）',
+            value='',
+            help='加点措置②の比較対象＝この前月（直近月）。例: 2026/06。'
+                 '加点判定用賃金台帳の C3 にも書き込まれます。',
+        )
+        application_ym = _parse_app_month_input(_app_month_str)
+        if _app_month_str and application_ym is None:
+            st.warning('交付申請月は yyyy/mm 形式で入力してください（例: 2026/06）')
     else:
         prefecture = ''
 
@@ -793,6 +892,7 @@ _REQUIRED_CATS_BY_TASK = {
     'wage':                  {'wage_ledger'},
     'per_employee_wage':     {'wage_ledger'},
     'bonus':                 {'wage_ledger'},
+    'bonus_wage_ledger_creation': {'wage_ledger'},
     'wage_ledger_creation':  {'wage_ledger'},
     'all':                   {'hearing', 'registry', 'pl'},
 }
@@ -821,10 +921,11 @@ _UI_ALLOWED_EXTS_WAGE_LEDGER_CREATION = {
 def _get_ui_allowed_exts(task: str | None) -> dict:
     """タスクに応じた UI 許可拡張子テーブルを返す。
 
-    「賃金台帳の作成」タスクのみ賃金台帳カテゴリで PDF を許可する。
+    「賃金台帳の作成」「加点判定用賃金台帳の作成」タスクは賃金台帳カテゴリで PDF を許可する
+    （生の賃金台帳/給与明細 PDF から AI 抽出するため）。
     他タスクは PDF 賃金台帳を弾く（ローカル変換運用のまま）。
     """
-    if task == 'wage_ledger_creation':
+    if task in ('wage_ledger_creation', 'bonus_wage_ledger_creation'):
         return _UI_ALLOWED_EXTS_WAGE_LEDGER_CREATION
     return _UI_ALLOWED_EXTS
 
@@ -1815,18 +1916,21 @@ else:
     has_data = has_files
     required_ok = has_required
 
+_is_bonus_task = task_type in ('bonus', 'bonus_wage_ledger_creation')
+
 can_run = bool(company_name) and has_data and required_ok
-if task_type == 'bonus':
+if _is_bonus_task:
     can_run = can_run and bool(prefecture)
-# 決算月の指定を必須化（2026-05 方針）
-# 賃金台帳の対象12ヶ月を確定するためにユーザー指定が必要
-can_run = can_run and (fiscal_month_override is not None)
+# 決算月の指定を必須化（2026-05 方針）。賃金台帳の対象12ヶ月を確定するために必要。
+# ただし加点系タスクは暦月固定（R6/10〜R7/9＋申請直近月）で判定するため決算月は不要。
+if not _is_bonus_task:
+    can_run = can_run and (fiscal_month_override is not None)
 
 if not company_name:
     st.warning('⬅️ サイドバーで会社名を入力してください')
-elif fiscal_month_override is None:
+elif not _is_bonus_task and fiscal_month_override is None:
     st.warning('⬅️ サイドバーで決算月を選択してください（賃金台帳の対象期間を確定するため必須）')
-elif task_type == 'bonus' and not prefecture:
+elif _is_bonus_task and not prefecture:
     st.warning('⬅️ サイドバーで事業場の都道府県を選択してください')
 elif data_source == 'Google Drive' and not has_drive_files:
     st.warning('⬅️ サイドバーで顧客フォルダを選択してください')
@@ -1838,7 +1942,21 @@ elif (data_source == 'Google Drive' and not has_drive_required) \
 else:
     source_label = 'Google Drive' if data_source == 'Google Drive' else 'アップロード'
     if task_type == 'bonus':
-        st.info(f'**{company_name}** の賃金台帳を分析して加点判定を行います（{source_label}）— 準備OKです')
+        st.info(
+            f'**{company_name}** の加点判定用賃金台帳を読み取り、加点措置①②を判定します'
+            f'（{source_label}）— 準備OKです\n\n'
+            '※ 入力は「加点判定用賃金台帳の作成」で作った専用台帳（シート『加点判定用明細』）です。'
+        )
+    elif task_type == 'bonus_wage_ledger_creation':
+        msg = (
+            f'**{company_name}** の賃金台帳/給与明細から「加点判定用賃金台帳」を作成します'
+            f'（{source_label}）— 準備OKです\n\n'
+            '※ 基本給と所定労働時間を抽出し、令和6年10月〜令和7年9月＋交付申請直近月の'
+            '時間換算給与ベースの台帳に変換します。出力後は内容を必ず人手で確認してください。'
+        )
+        if application_ym is None:
+            msg += '\n\n⚠️ 交付申請月（yyyy/mm）が未入力です。加点措置②の直近月列が空になります。'
+        st.info(msg)
     elif task_type == 'per_employee_wage':
         st.info(
             f'**{company_name}** の賃金台帳から一人当たり給与支給総額を算定します'
@@ -1917,7 +2035,11 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
         # 処理実行
         if task_type == 'wage_ledger_creation':
             spinner_msg = '賃金台帳PDFを Document AI で抽出中...（1〜3分かかります）'
-        elif task_type in ('bonus', 'per_employee_wage'):
+        elif task_type == 'bonus_wage_ledger_creation':
+            spinner_msg = '加点判定用の賃金台帳を作成中...（1〜3分かかります）'
+        elif task_type == 'bonus':
+            spinner_msg = '加点判定用賃金台帳を読み取り中...'
+        elif task_type == 'per_employee_wage':
             spinner_msg = '賃金台帳を分析中...'
         else:
             spinner_msg = 'AIが資料を読み取り中...（1〜3分かかります）'
@@ -1929,6 +2051,7 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 work_dir=work_dir,
                 template_dir=template_dir,
                 prefecture=prefecture,
+                application_ym=application_ym,
                 fiscal_month_override=fiscal_month_override,
                 has_cost_report_hint=has_cost_report_hint,
                 selection_override=selection_override,
@@ -2012,10 +2135,14 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                     'bonus2_min_wage_july': br.bonus2_min_wage_july,
                     'bonus2_min_wage_latest': br.bonus2_min_wage_latest,
                     'bonus2_diff': br.bonus2_diff,
+                    'bonus2_latest_label': (br.bonus2_latest_detail or {}).get('label', ''),
                     'prefecture': br.prefecture,
                     'min_wage_r6': br.min_wage_r6,
                     'min_wage_r7': br.min_wage_r7,
-                    'employee_count': len(br.employees),
+                    'application_ym': br.application_ym,
+                    'latest_ym': br.latest_ym,
+                    'notes': br.notes,
+                    'employee_count': result.get('employee_count', 0),
                 }
                 # 加点シートのファイルデータ
                 for key, path in result.get('output_files', {}).items():
@@ -2057,6 +2184,7 @@ if 'last_results' in st.session_state:
             'wage': '💰 給与支給総額計算',
             'per_employee_wage': '👤 一人当たり給与支給総額（賃金台帳のみ）',
             'bonus': '📊 加点判定',
+            'bonus_wage_ledger_creation': '📑 加点判定用賃金台帳の作成（PDF→専用Excel）',
             'wage_ledger_creation': '📑 賃金台帳の作成（PDF→ツール規格Excel）',
         }
         task_display = task_display_map.get(task_name, task_name)
@@ -2120,20 +2248,20 @@ if 'last_results' in st.session_state:
                     f"（地域別最低賃金 改定前: {br['min_wage_r6']}円 → 改定後(R7): {br['min_wage_r7']}円）"
                 )
 
-                # B2: 暦月マッピングの注意。加点判定は暦月固定の期間を見るが、
-                # 賃金台帳を「直近事業年度（非暦年）」基準で作っていると対象月がズレる。
-                st.info(
-                    'ℹ️ 加点判定は**暦月固定**の期間で判定します'
-                    '（加点措置①＝令和6年10月〜令和7年9月、加点措置②＝令和7年7月 と 申請直近月）。'
-                    'この判定は賃金台帳の「1月〜12月」列を**暦月とみなして**計算しています。'
-                    '賃金台帳を「直近事業年度（非暦年）」基準で作成している場合は対象月がズレるため、'
-                    '原本で対象月（特に令和7年7月の位置）をご確認ください。'
+                st.caption(
+                    f"従業員{br.get('employee_count', 0)}名（役員は判定母数から除外）｜"
+                    '時間換算給与＝基本給÷月間所定労働時間で算定（暦月固定：'
+                    '加点①＝令和6年10月〜令和7年9月、加点②＝令和7年7月 と 交付申請直近月）'
                 )
+
+                # 判定上の注意（対象月の欠落・所在地/申請月の未入力など）を必ず surfacing
+                for _note in br.get('notes', []):
+                    st.warning(f'⚠️ {_note}')
 
                 col_b1, col_b2 = st.columns(2)
                 # 加点措置①（公式名: 補助率引上げ・加点措置① ／ 加点項目14・補助率2/3トリガー）
                 with col_b1:
-                    st.caption('補助率引上げ・加点措置①（加点項目14｜補助率1/2→**2/3** のトリガー）')
+                    st.caption('加点措置①（加点項目14｜通常枠では補助率1/2→**2/3** のトリガー）')
                     if br['bonus1_eligible']:
                         st.success(
                             f"**① 対象** "
@@ -2148,9 +2276,14 @@ if 'last_results' in st.session_state:
 
                     with st.expander('月別詳細（R7改定後未満の人数／全従業員）'):
                         for d in br['bonus1_details']:
-                            if d['total'] > 0:
+                            if d.get('total', 0) > 0:
                                 mark = '○' if d['meets_30pct'] else '×'
-                                st.text(f"{d['month']}: {d['under_r7']}/{d['total']}名 = {d['ratio']*100:.1f}% {mark}")
+                                st.text(
+                                    f"{d['label']}: {d['under_r7']}/{d['total']}名 "
+                                    f"= {d['ratio']*100:.1f}% {mark}"
+                                )
+                            else:
+                                st.text(f"{d['label']}: データなし")
 
                 # 加点措置②（公式名: 加点措置② ／ 加点項目15）
                 with col_b2:
@@ -2159,14 +2292,15 @@ if 'last_results' in st.session_state:
                         st.success(f"**② 対象** (差額 {br['bonus2_diff']:.0f}円 ≥ 63円)")
                     else:
                         st.warning(f"**② 対象外** (差額 {br['bonus2_diff']:.0f}円 < 63円)")
-                    st.caption('判定: 直近月の事業場内最低賃金 ≥ 令和7年7月＋63円')
+                    _latest_lbl = br.get('bonus2_latest_label') or '交付申請直近月'
+                    st.caption('判定: 交付申請直近月の事業場内最低賃金 ≥ 令和7年7月＋63円')
                     st.text(f"令和7年7月 最低時給: {br['bonus2_min_wage_july']:.0f}円")
-                    st.text(f"直近月 最低時給: {br['bonus2_min_wage_latest']:.0f}円")
+                    st.text(f"{_latest_lbl} 最低時給: {br['bonus2_min_wage_latest']:.0f}円")
 
                 # 加点シートダウンロード
                 for key, file_info in result.get('bonus_files', {}).items():
                     label_map = {
-                        'bonus1': '補助率引上げ・加点措置①シート',
+                        'bonus1': '加点措置①シート',
                         'bonus2': '加点措置②シート',
                     }
                     st.download_button(
@@ -2262,4 +2396,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.38 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.39 | カラフルボックス株式会社')

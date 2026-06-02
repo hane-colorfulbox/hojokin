@@ -55,6 +55,44 @@ BONUS_THRESHOLD_YEN = 63
 MONTH_NAMES = ['1月', '2月', '3月', '4月', '5月', '6月',
                '7月', '8月', '9月', '10月', '11月', '12月']
 
+# ── 加点判定の対象暦月（デジタル化・AI導入補助金2026 公募要領で固定）──
+# 加点措置①（補助率1/2→2/3 トリガー兼用／加点項目14）の対象期間。
+# 令和6年10月〜令和7年9月の暦月12か月。Oct-Dec は令和6年・Jan-Sep は令和7年と
+# 年をまたぐため、暦月12スロット配列では表現できない。(西暦年, 月) タプルで固定保持する。
+BONUS1_WINDOW: list[tuple[int, int]] = [
+    (2024, 10), (2024, 11), (2024, 12),
+    (2025, 1), (2025, 2), (2025, 3), (2025, 4), (2025, 5), (2025, 6),
+    (2025, 7), (2025, 8), (2025, 9),
+]
+# 加点措置②（加点項目15）の基準月＝令和7年7月。比較対象は交付申請の直近月。
+BONUS2_BASE_YM: tuple[int, int] = (2025, 7)
+
+
+def prev_month(ym: tuple[int, int]) -> tuple[int, int]:
+    """(年, 月) の前月を返す（公式②シートの N14=EDATE(申請月, -1) と同義）。"""
+    year, month = ym
+    return (year - 1, 12) if month == 1 else (year, month - 1)
+
+
+def ym_label(ym: tuple[int, int]) -> str:
+    """(年, 月) → 和暦ラベル '令和7年7月'。"""
+    return wareki_label(ym[0], ym[1])
+
+
+# ── 加点判定用賃金台帳テンプレート（ツール/加点判定用賃金台帳テンプレート.xlsx）の固定レイアウト ──
+# リーダー(read_bonus_wage_ledger)とライター(bonus_wage_ledger_writer)で共有する単一の真実。
+BWL_SHEET_NAME = '加点判定用明細'
+BWL_HEADER_ROW = 6
+BWL_DATA_START_ROW = 7
+BWL_COL_NO = 2          # B
+BWL_COL_NAME = 3        # C
+BWL_COL_EMPTYPE = 4     # D
+BWL_COL_HOURS = 5       # E 月間所定労働時間
+BWL_COL_WINDOW_START = 6  # F〜Q: BONUS1_WINDOW（令和6年10月〜令和7年9月）の基本給12列
+BWL_COL_LATEST = 18       # R: 交付申請直近月の基本給
+BWL_PREF_CELL = (2, 3)    # C2: 事業場所在地（都道府県）
+BWL_APPYM_CELL = (3, 3)   # C3: 交付申請月（yyyy/mm）
+
 
 # ============================================================
 # 事業年度ウィンドウ / 年月ヘッダー ユーティリティ
@@ -192,25 +230,86 @@ class WageEmployee:
 
 
 @dataclass
+class BonusWageEmployee:
+    """加点判定用賃金台帳から読み取った従業員（(年,月)キーの基本給ベース）。
+
+    R215/R216 用の WageEmployee（暦月12スロット）とは別物。加点判定は暦月固定で
+    令和6年10月〜令和7年9月＋申請直近月をまたいで見るため、(西暦年,月)→基本給 の
+    辞書で保持する。時間換算給与 = 基本給 ÷ 所定労働時間（残業・通勤・各種手当を除く）。
+    """
+    no: int
+    name: str
+    employment_type: str = ''
+    # 月間所定労働時間（最賃比較の分母。月給÷1か月平均所定労働時間 ＝厚労省の換算式）。
+    scheduled_hours: float | None = None
+    # (西暦年, 月) → 基本給（所定内賃金、円）
+    monthly_base: dict[tuple[int, int], float] = field(default_factory=dict)
+    # (西暦年, 月) → 所定労働時間の月次上書き（任意。無ければ scheduled_hours を使う）
+    monthly_hours_override: dict[tuple[int, int], float] = field(default_factory=dict)
+    source_file: str = ''
+
+    @property
+    def is_officer(self) -> bool:
+        return '役員' in (self.employment_type or '')
+
+    def hours_for(self, ym: tuple[int, int]) -> float | None:
+        h = self.monthly_hours_override.get(ym)
+        if h is not None and h > 0:
+            return h
+        return self.scheduled_hours if (self.scheduled_hours or 0) > 0 else None
+
+    def base_for(self, ym: tuple[int, int]) -> float | None:
+        return self.monthly_base.get(ym)
+
+    def hourly_for(self, ym: tuple[int, int]) -> float | None:
+        """その月の時間換算給与 = 基本給 ÷ 所定労働時間。算出不能なら None。"""
+        base = self.monthly_base.get(ym)
+        hours = self.hours_for(ym)
+        if base is None or base <= 0 or hours is None or hours <= 0:
+            return None
+        return base / hours
+
+
+@dataclass
+class BonusWageLedger:
+    """加点判定用賃金台帳の全体（会社単位の都道府県・交付申請月 + 従業員）。"""
+    prefecture: str = ''
+    application_ym: tuple[int, int] | None = None  # 交付申請月
+    employees: list[BonusWageEmployee] = field(default_factory=list)
+    # 読み取り時の注意書き（対象月欠落・所在地未設定など）。呼出側が surfacing する。
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def latest_ym(self) -> tuple[int, int] | None:
+        """加点措置②の比較対象＝交付申請の直近月（申請月の前月）。"""
+        return prev_month(self.application_ym) if self.application_ym else None
+
+
+@dataclass
 class BonusPointResult:
-    """加点措置の判定結果"""
+    """加点措置の判定結果（(年,月)ベース）。"""
     bonus1_eligible: bool = False
-    bonus1_months_met: list[str] = field(default_factory=list)
+    # 30%以上を満たした対象月（(年,月) のリスト）
+    bonus1_months_met: list[tuple[int, int]] = field(default_factory=list)
+    # BONUS1_WINDOW の各月の詳細。要素: {'ym','label','total','under_r7','ratio',
+    #   'meets_30pct','has_data','employees':[{'name','base','hourly','is_target'}]}
     bonus1_details: list[dict] = field(default_factory=list)
 
     bonus2_eligible: bool = False
     bonus2_min_wage_july: float = 0.0
     bonus2_min_wage_latest: float = 0.0
     bonus2_diff: float = 0.0
+    # 加点措置②の各期間詳細。{'ym','label','min_wage','employees':[{'name','base','hourly'}]}
+    bonus2_july_detail: dict = field(default_factory=dict)
+    bonus2_latest_detail: dict = field(default_factory=dict)
 
-    employees: list[WageEmployee] = field(default_factory=list)
     prefecture: str = ''
     min_wage_r6: int = 0
     min_wage_r7: int = 0
-    # 加点措置②で使用した「直近月」のインデックス（0=1月, 11=12月）。
-    # judge_bonus_points が動的決定した月を保持し、fill_bonus_sheet_2 で
-    # 同じ月を出力シートに反映するために使う（画面判定とExcelの不整合防止）。
-    latest_month_idx: int | None = None
+    application_ym: tuple[int, int] | None = None
+    latest_ym: tuple[int, int] | None = None  # 加点②の比較対象月（申請月の前月）
+    # 判定上の注意（対象月欠落・所在地未設定・最賃マスタ欠落など）
+    notes: list[str] = field(default_factory=list)
 
 
 # ============================================================
@@ -1584,6 +1683,127 @@ def _ai_data_to_wage_employees(
     return employees
 
 
+def _load_wage_ai_payload(
+    file_paths: list[Path],
+) -> tuple[list[str], list[tuple[str, bytes]]]:
+    """賃金台帳ファイル群を AI 抽出用の (TSVブロック list, PDFバイナリ list) に変換する。
+
+    PDF はテキスト層があれば TSV 化、薄ければバイナリ添付にフォールバック。
+    CSV/Excel は TSV 化。read_wage_ledgers_with_ai と加点用抽出で共有する。
+    """
+    tsv_blocks: list[str] = []
+    pdf_files: list[tuple[str, bytes]] = []
+    for path in file_paths:
+        ext = path.suffix.lower()
+        if ext == '.pdf':
+            try:
+                tsv_blocks.append(_pdf_to_tsv(path))
+                logger.info(f'賃金台帳PDF→テキスト変換: {path.name}')
+            except RuntimeError as e:
+                logger.warning(f'{e} → バイナリ送信にフォールバック')
+                try:
+                    pdf_files.append((path.name, path.read_bytes()))
+                except Exception as e2:
+                    logger.warning(f'賃金台帳PDF読込失敗(AI経路): {path.name} ({e2})')
+            except Exception as e:
+                logger.warning(f'賃金台帳PDF読込失敗(AI経路): {path.name} ({e})')
+            continue
+        if ext == '.csv':
+            try:
+                tsv_blocks.append(_csv_to_tsv(path))
+            except Exception as e:
+                level = _csv_decode_warning_level(path)
+                msg = f'賃金台帳CSV読込失敗(AI経路): {path.name} ({e})'
+                logger.info(msg) if level == 'info' else logger.warning(msg)
+            continue
+        try:
+            wb = openpyxl.load_workbook(str(path), data_only=True)
+        except Exception as e:
+            logger.warning(f'賃金台帳読込失敗(AI経路): {path.name} ({e})')
+            continue
+        tsv_blocks.append(_workbook_to_tsv(wb, path.name))
+        wb.close()
+    return tsv_blocks, pdf_files
+
+
+def _ai_data_to_bonus_employees(ai_data: list[dict]) -> list[BonusWageEmployee]:
+    """AI抽出データ（ymキーの monthly[{ym,base,hours,...}]）を BonusWageEmployee に変換。
+
+    12スロットには畳まず (年,月)→基本給 を保持する（加点①は R6/10〜R7/9 をまたぐため）。
+    所定労働時間は月次 hours の中央値を代表値に置く（無ければ None＝後で人手記入）。
+    """
+    out: list[BonusWageEmployee] = []
+    for i, emp in enumerate(ai_data):
+        if not isinstance(emp, dict):
+            continue
+        name = str(emp.get('name') or '').strip()
+        if not name:
+            continue
+        emp_type = str(emp.get('employment_type', '') or '').strip()
+        base_by_ym: dict[tuple[int, int], float] = {}
+        hours_by_ym: dict[tuple[int, int], float] = {}
+        hours_samples: list[float] = []
+        for m in (emp.get('monthly') or []):
+            if not isinstance(m, dict):
+                continue
+            parsed = parse_ym_header(m.get('ym'))
+            if not parsed or parsed[0] is None:
+                continue
+            ym = (parsed[0], parsed[1])
+            base = _to_float(m.get('base'))
+            if base is not None and base > 0:
+                base_by_ym[ym] = base
+            h = _to_float(m.get('hours'))
+            if h is not None and h > 0:
+                hours_by_ym[ym] = h
+                hours_samples.append(h)
+        sched = sorted(hours_samples)[len(hours_samples) // 2] if hours_samples else None
+        out.append(BonusWageEmployee(
+            no=i + 1, name=name, employment_type=emp_type,
+            scheduled_hours=sched, monthly_base=base_by_ym,
+            monthly_hours_override=hours_by_ym,
+        ))
+    return out
+
+
+def read_bonus_source_employees(
+    file_paths: list[Path],
+    extractor,
+    *,
+    disable_image_fallback: bool = False,
+) -> list[BonusWageEmployee]:
+    """生の賃金台帳/給与明細から加点判定用の従業員（(年,月)→基本給）を AI 抽出する。
+
+    read_wage_ledgers_with_ai と同じ抽出経路を使うが、事業年度12スロットに畳まず
+    ymキーの基本給を保持する（加点①の R6/10〜R7/9 は年をまたぐため）。
+    """
+    if not file_paths:
+        return []
+    tsv_blocks, pdf_files = _load_wage_ai_payload(file_paths)
+    if not tsv_blocks and not pdf_files:
+        return []
+    combined_tsv = '\n\n'.join(tsv_blocks) if tsv_blocks else ''
+    logger.info(
+        f'加点用AI抽出開始: TSV{len(tsv_blocks)}ブロック({len(combined_tsv):,}文字)'
+        + (f' + PDFバイナリ{len(pdf_files)}件' if pdf_files else '')
+    )
+    try:
+        ai_data = extractor.extract_wage_ledger(
+            combined_tsv, None,
+            pdf_files=pdf_files if pdf_files else None,
+            disable_image_fallback=disable_image_fallback,
+        )
+    except Exception as e:
+        from .ai_extractor import APICreditExhaustedError, ImageFallbackBlockedError
+        if isinstance(e, (APICreditExhaustedError, ImageFallbackBlockedError)):
+            raise
+        logger.error(f'加点用AI抽出例外: {e}', exc_info=True)
+        return []
+    employees = _ai_data_to_bonus_employees(ai_data)
+    logger.info(f'加点用AI抽出結果: 入力{len(ai_data)}名 → {len(employees)}名')
+    return employees
+
+
 def read_wage_ledgers_with_ai(
     file_paths: list[Path],
     extractor,
@@ -1605,46 +1825,7 @@ def read_wage_ledgers_with_ai(
     if not file_paths:
         return []
 
-    tsv_blocks: list[str] = []
-    pdf_files: list[tuple[str, bytes]] = []  # テキスト抽出失敗時のバイナリフォールバック用
-
-    for path in file_paths:
-        ext = path.suffix.lower()
-        if ext == '.pdf':
-            try:
-                tsv_blocks.append(_pdf_to_tsv(path))
-                logger.info(f'賃金台帳PDF→テキスト変換: {path.name}')
-            except RuntimeError as e:
-                # テキスト層が薄い（画像PDF）→ バイナリ送信にフォールバック
-                logger.warning(f'{e} → バイナリ送信にフォールバック')
-                try:
-                    pdf_files.append((path.name, path.read_bytes()))
-                except Exception as e2:
-                    logger.warning(f'賃金台帳PDF読込失敗(AI経路): {path.name} ({e2})')
-            except Exception as e:
-                logger.warning(f'賃金台帳PDF読込失敗(AI経路): {path.name} ({e})')
-            continue
-        if ext == '.csv':
-            try:
-                tsv_blocks.append(_csv_to_tsv(path))
-            except Exception as e:
-                # _csv_to_tsv 内で詳細ログ済み。ここでは降格判定のみ
-                # （同名 xlsx/xlsm が存在すればそちら経由で読めるので info で十分）
-                level = _csv_decode_warning_level(path)
-                msg = f'賃金台帳CSV読込失敗(AI経路): {path.name} ({e})'
-                if level == 'info':
-                    logger.info(msg)
-                else:
-                    logger.warning(msg)
-            continue
-        try:
-            wb = openpyxl.load_workbook(str(path), data_only=True)
-        except Exception as e:
-            logger.warning(f'賃金台帳読込失敗(AI経路): {path.name} ({e})')
-            continue
-        tsv_blocks.append(_workbook_to_tsv(wb, path.name))
-        wb.close()
-
+    tsv_blocks, pdf_files = _load_wage_ai_payload(file_paths)
     if not tsv_blocks and not pdf_files:
         return []
 
@@ -2598,143 +2779,218 @@ def _write_calculation_basis_sheet(
 # 加点措置判定
 # ============================================================
 
-def judge_bonus_points(
-    employees: list[WageEmployee],
-    prefecture: str,
-    latest_month_idx: int | None = None,
-) -> BonusPointResult:
-    """
-    加点措置①②の判定を行う
+def _parse_app_month(v) -> tuple[int, int] | None:
+    """交付申請月セルの値を (西暦年, 月) に正規化する。datetime / 'yyyy/mm' / 和暦に対応。"""
+    import datetime as _dt
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return (v.year, v.month)
+    parsed = parse_ym_header(v)
+    if parsed and parsed[0] is not None:
+        return (parsed[0], parsed[1])
+    return None
 
-    Args:
-        employees: 従業員リスト
-        prefecture: 事業場の都道府県
-        latest_month_idx: 直近月のインデックス（0=1月, 11=12月）。
-                          Noneの場合は最新のデータがある月を使用。
+
+def read_bonus_wage_ledger(path: Path) -> BonusWageLedger:
+    """加点判定用賃金台帳（専用テンプレ）を決定論で直読みして BonusWageLedger を返す。
+
+    AI 再抽出はしない。月列は暦月固定（F〜Q=令和6年10月〜令和7年9月、R=交付申請直近月）。
+    時間換算給与は持たず、基本給と所定労働時間から judge_bonus_points が算出する。
     """
+    wb = openpyxl.load_workbook(str(path), data_only=True)
+    ws = wb[BWL_SHEET_NAME] if BWL_SHEET_NAME in wb.sheetnames else wb[wb.sheetnames[0]]
+
+    ledger = BonusWageLedger()
+    pref = ws.cell(*BWL_PREF_CELL).value
+    ledger.prefecture = str(pref).strip() if pref else ''
+    ledger.application_ym = _parse_app_month(ws.cell(*BWL_APPYM_CELL).value)
+    latest_ym = ledger.latest_ym
+
+    for r in range(BWL_DATA_START_ROW, ws.max_row + 1):
+        name_val = ws.cell(r, BWL_COL_NAME).value
+        if name_val is None or not str(name_val).strip():
+            continue
+        name = str(name_val).replace('　', ' ').strip()
+        no_val = ws.cell(r, BWL_COL_NO).value
+        try:
+            no = int(no_val) if no_val is not None else (r - BWL_DATA_START_ROW + 1)
+        except (TypeError, ValueError):
+            no = r - BWL_DATA_START_ROW + 1
+        emp_type = str(ws.cell(r, BWL_COL_EMPTYPE).value or '').strip()
+        emp = BonusWageEmployee(
+            no=no, name=name, employment_type=emp_type,
+            scheduled_hours=_to_float(ws.cell(r, BWL_COL_HOURS).value),
+            source_file=path.name,
+        )
+        for i, ym in enumerate(BONUS1_WINDOW):
+            v = _to_float(ws.cell(r, BWL_COL_WINDOW_START + i).value)
+            if v is not None and v > 0:
+                emp.monthly_base[ym] = v
+        if latest_ym is not None:
+            v = _to_float(ws.cell(r, BWL_COL_LATEST).value)
+            if v is not None and v > 0:
+                emp.monthly_base[latest_ym] = v
+        ledger.employees.append(emp)
+    wb.close()
+
+    if not ledger.prefecture:
+        ledger.notes.append('台帳に事業場所在地（都道府県）が入力されていません（C2セル）。')
+    if ledger.application_ym is None:
+        ledger.notes.append(
+            '台帳に交付申請月（yyyy/mm）が入力されていません（C3セル）。加点措置②は判定できません。'
+        )
+    if not ledger.employees:
+        ledger.notes.append('台帳から従業員データを読み取れませんでした。氏名列（C列）を確認してください。')
+    return ledger
+
+
+def is_bonus_wage_ledger(path: Path) -> bool:
+    """ファイルが加点判定用賃金台帳（専用シート『加点判定用明細』を持つ）か判定する。"""
+    if path.suffix.lower() not in ('.xlsx', '.xlsm'):
+        return False
+    try:
+        wb = openpyxl.load_workbook(str(path), read_only=True)
+        ok = BWL_SHEET_NAME in wb.sheetnames
+        wb.close()
+        return ok
+    except Exception:
+        return False
+
+
+def judge_bonus_points(ledger: BonusWageLedger) -> BonusPointResult:
+    """加点措置①②を (年,月) 固定の暦月で判定する。
+
+    加点①（補助率1/2→2/3 トリガー兼用／加点項目14）:
+      令和6年10月〜令和7年9月の各暦月で「時間換算給与 < R7改定後地域別最賃」の
+      従業員が（役員を除く）全従業員の30%以上である月が3か月以上 → 対象。
+    加点②（加点項目15）:
+      令和7年7月 と 交付申請直近月（申請月の前月）の事業場内最低賃金（時間換算給与の
+      最小値）を比較し、差が63円以上 → 対象。
+    時間換算給与 = 基本給 ÷ 所定労働時間（残業・通勤・各種手当を除く）。役員は母数から除外。
+    公式シート①の判定式 `IF(AND(時間換算給与 < R7改定後, 時間換算給与 > 0),"対象")` に準拠
+    （下限は >0 のみ。R6改定前は判定に用いない）。
+    """
+    prefecture = ledger.prefecture
     result = BonusPointResult(
-        employees=employees,
         prefecture=prefecture,
         min_wage_r6=MIN_WAGE_R6.get(prefecture, 0),
         min_wage_r7=MIN_WAGE_MAP.get(prefecture, 0),
+        application_ym=ledger.application_ym,
+        latest_ym=ledger.latest_ym,
+        notes=list(ledger.notes),
     )
 
-    if not result.min_wage_r6 or not result.min_wage_r7:
+    if not result.min_wage_r7:
+        result.notes.append(
+            f'最低賃金マスタに「{prefecture}」が見つかりません。都道府県を確認してください。'
+        )
         logger.warning(f'最低賃金が見つかりません: {prefecture}')
         return result
 
-    # 公式「賃金状況報告シート（補助率引上げ・加点措置①用）」の判定数式は
-    #   対象 = IF(AND(時間換算給与 < R7改定後, 時間換算給与 > 0), "対象", "対象外")
-    # で、下限は「> 0」のみ。R6改定前は参考表示（改定前列）で判定には用いない。
-    # かつて R6 を下限に加えていたが、それだと R6 未満に計算された従業員を取りこぼし、
-    # 公式シートより厳しく「対象外」と誤判定して補助率2/3を逃すため、公式に合わせる。
-    # （公募要領 2026 p.18 補助率2/3条件・p.26 加点項目14／賃金状況報告シート① 数式で確認）
     mw_r7 = result.min_wage_r7
+    # 判定母数は労働者のみ（役員報酬は最賃規制の対象外。R215/R216 と同じ役員定義）。
+    workers = [e for e in ledger.employees if not e.is_officer]
 
-    # ── 加点措置①（公式名: 補助率引上げ・加点措置① ／ 公募要領 加点項目14・補助率2/3トリガー）──
-    # 令和6年10月〜令和7年9月の暦月のうち、R7改定後最低賃金未満の従業員が
-    # 全従業員の30%以上である月が3か月以上 → 対象。
-    target_months = list(range(0, 12))
-    months_meeting_criteria = []
-
-    for m_idx in target_months:
-        total_emps = 0
-        under_r7_emps = 0
-        month_detail = {
-            'month': MONTH_NAMES[m_idx],
-            'total': 0,
-            'under_r7': 0,
-            'ratio': 0.0,
-            'meets_30pct': False,
-            'employees': [],
-        }
-
-        for emp in employees:
-            if emp.monthly_wages[m_idx] is None:
-                continue
-
-            hourly = emp.get_hourly_for_month(m_idx)
+    # ── 加点措置① ──
+    months_met: list[tuple[int, int]] = []
+    for ym in BONUS1_WINDOW:
+        total = 0
+        under = 0
+        emps_detail: list[dict] = []
+        for emp in workers:
+            hourly = emp.hourly_for(ym)
             if hourly is None or hourly <= 0:
                 continue
-
-            total_emps += 1
-            # 公式シート①準拠: R7改定後未満なら対象（hourly>0は上の continue で担保済み）。
-            # R6改定前の下限は設けない（公式数式は < R7改定後 のみ）。
-            is_under_r7 = hourly < mw_r7
-
-            if is_under_r7:
-                under_r7_emps += 1
-
-            month_detail['employees'].append({
+            # 公式シートの時間換算給与列は整数（円）。事務局の判定式 IF(I<G) はその整数で
+            # 再計算されるため、画面判定とExcelを一致させるべく丸めた整数で比較する。
+            hourly = round(hourly)
+            total += 1
+            is_target = hourly < mw_r7  # >0 は上の continue で担保
+            if is_target:
+                under += 1
+            emps_detail.append({
                 'name': emp.name,
-                'hourly': round(hourly),
-                'is_target': is_under_r7,
+                'base': emp.base_for(ym),
+                'hourly': hourly,
+                'is_target': is_target,
             })
+        ratio = (under / total) if total > 0 else 0.0
+        meets = total > 0 and ratio >= 0.30
+        if meets:
+            months_met.append(ym)
+        result.bonus1_details.append({
+            'ym': ym,
+            'label': ym_label(ym),
+            'total': total,
+            'under_r7': under,
+            'ratio': ratio,
+            'meets_30pct': meets,
+            'has_data': total > 0,
+            'employees': emps_detail,
+        })
+        if total == 0:
+            result.notes.append(
+                f'加点①対象月 {ym_label(ym)} の時間換算給与データがありません'
+                '（基本給/所定労働時間の欠落）。台帳の対象月入力を確認してください。'
+            )
 
-        month_detail['total'] = total_emps
-        month_detail['under_r7'] = under_r7_emps
-
-        if total_emps > 0:
-            ratio = under_r7_emps / total_emps
-            month_detail['ratio'] = ratio
-            month_detail['meets_30pct'] = ratio >= 0.30
-
-            if month_detail['meets_30pct']:
-                months_meeting_criteria.append(MONTH_NAMES[m_idx])
-
-        result.bonus1_details.append(month_detail)
-
-    result.bonus1_months_met = months_meeting_criteria
-    result.bonus1_eligible = len(months_meeting_criteria) >= 3
-
+    result.bonus1_months_met = months_met
+    result.bonus1_eligible = len(months_met) >= 3
     logger.info(
-        f'加点措置①: {len(months_meeting_criteria)}か月が条件達成 '
+        f'加点措置①: {len(months_met)}か月が30%以上 '
         f'→ {"対象" if result.bonus1_eligible else "対象外"}'
     )
 
     # ── 加点措置② ──
-    july_idx = 6
+    def _period_detail(ym: tuple[int, int]) -> tuple[dict, list[float]]:
+        emps: list[dict] = []
+        hourlies: list[float] = []
+        for emp in workers:
+            hourly = emp.hourly_for(ym)
+            if hourly is None or hourly <= 0:
+                continue
+            hourly = round(hourly)  # 公式②シートの MIN は整数の時間換算給与で再計算される
+            hourlies.append(hourly)
+            emps.append({
+                'name': emp.name,
+                'base': emp.base_for(ym),
+                'hourly': hourly,
+            })
+        min_wage = min(hourlies) if hourlies else 0.0
+        return ({'ym': ym, 'label': ym_label(ym),
+                 'min_wage': min_wage, 'employees': emps}, hourlies)
 
-    july_hourly_rates = [
-        emp.get_hourly_for_month(july_idx)
-        for emp in employees
-        if emp.monthly_wages[july_idx] is not None
-        and emp.get_hourly_for_month(july_idx) is not None
-        and emp.get_hourly_for_month(july_idx) > 0
-    ]
+    july_detail, july_h = _period_detail(BONUS2_BASE_YM)
+    result.bonus2_july_detail = july_detail
+    result.bonus2_min_wage_july = july_detail['min_wage']
 
-    if latest_month_idx is None:
-        for m in range(11, -1, -1):
-            if any(emp.monthly_wages[m] is not None for emp in employees):
-                latest_month_idx = m
-                break
-        if latest_month_idx is None:
-            latest_month_idx = 11
+    latest_ym = ledger.latest_ym
+    latest_h: list[float] = []
+    if latest_ym is None:
+        result.notes.append('交付申請月が未入力のため、加点措置②の直近月を確定できません。')
+    else:
+        latest_detail, latest_h = _period_detail(latest_ym)
+        result.bonus2_latest_detail = latest_detail
+        result.bonus2_min_wage_latest = latest_detail['min_wage']
 
-    # fill_bonus_sheet_2 が同じ月をシートに反映できるよう保存
-    result.latest_month_idx = latest_month_idx
-
-    latest_hourly_rates = [
-        emp.get_hourly_for_month(latest_month_idx)
-        for emp in employees
-        if emp.monthly_wages[latest_month_idx] is not None
-        and emp.get_hourly_for_month(latest_month_idx) is not None
-        and emp.get_hourly_for_month(latest_month_idx) > 0
-    ]
-
-    if july_hourly_rates and latest_hourly_rates:
-        result.bonus2_min_wage_july = min(july_hourly_rates)
-        result.bonus2_min_wage_latest = min(latest_hourly_rates)
+    if july_h and latest_h:
         result.bonus2_diff = result.bonus2_min_wage_latest - result.bonus2_min_wage_july
         result.bonus2_eligible = result.bonus2_diff >= BONUS_THRESHOLD_YEN
+    else:
+        if not july_h:
+            result.notes.append(
+                f'加点②基準月 {ym_label(BONUS2_BASE_YM)} の時間換算給与データがありません。'
+            )
+        if latest_ym is not None and not latest_h:
+            result.notes.append(
+                f'加点②直近月 {ym_label(latest_ym)} の時間換算給与データがありません。'
+            )
 
     logger.info(
-        f'加点措置②: 7月={result.bonus2_min_wage_july:.0f}円 → '
+        f'加点措置②: {ym_label(BONUS2_BASE_YM)}={result.bonus2_min_wage_july:.0f}円 → '
         f'直近={result.bonus2_min_wage_latest:.0f}円 '
         f'(差額{result.bonus2_diff:.0f}円) '
         f'→ {"対象" if result.bonus2_eligible else "対象外"}'
     )
-
     return result
 
 
@@ -2742,63 +2998,80 @@ def judge_bonus_points(
 # 加点措置シートへの自動入力
 # ============================================================
 
+def _bw_set(ws, row: int, col: int, value) -> None:
+    """結合セルでも安全に値を書く（結合範囲の左上に書き込む）。数式セルは呼び出さない前提。"""
+    from openpyxl.cell.cell import MergedCell
+    cell = ws.cell(row=row, column=col)
+    if isinstance(cell, MergedCell):
+        for rng in ws.merged_cells.ranges:
+            if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+                ws.cell(row=rng.min_row, column=rng.min_col, value=value)
+                return
+        return
+    cell.value = value
+
+
+def _detect_bonus_data_start(ws, header_col: int = 2, default: int = 18) -> int:
+    """データ開始行を動的検出する。
+
+    公式シートは「No」見出し行 → 「例」サンプル行 → データ行 の順。
+    ①用=見出し16/データ18、補助率引上げ①用=見出し17/データ19、②用=見出し15/データ17。
+    いずれも『見出し行 + 2』がデータ開始行（事務局の COUNTIF/MIN もその行から集計）。
+    """
+    for r in range(1, 40):
+        v = ws.cell(row=r, column=header_col).value
+        if isinstance(v, str) and v.strip() == 'No':
+            return r + 2
+    return default
+
+
+def _select_bonus1_periods(result: BonusPointResult, n: int = 3) -> list[dict]:
+    """加点①で公式シートに出す賃金計算期間（最大n=3か月）を選ぶ。
+
+    30%以上を達成した月を優先し、比率が高い順。3か月に満たない場合は、データのある
+    月のうち比率が高い順で補う（事務局が「最も要件に近い月」を確認できるようにする）。
+    """
+    candidates = [d for d in result.bonus1_details if d['has_data']]
+    candidates.sort(key=lambda d: (d['meets_30pct'], d['ratio']), reverse=True)
+    return candidates[:n]
+
+
 def fill_bonus_sheet_1(
     template_path: Path,
     output_path: Path,
     result: BonusPointResult,
-    selected_months: list[int] | None = None,
+    selected_periods: list[dict] | None = None,
 ) -> Path:
-    """
-    加点措置①用シートに従業員データを入力
+    """加点措置①用（または補助率引上げ・加点措置①用）シートに従業員データを入力。
 
-    加点措置①のシート構成:
-      3つの賃金計算期間（3か月分）を横に並べて入力
-      期間①: B-K列, 期間②: M-U列, 期間③: W-AE列
-      データ行は18行目から
+    シート構成: 3つの賃金計算期間を横並び（期間① B-K / ② M-U / ③ W-AE）。
+    各期間に H/R/AB=基本給、I/S/AC=時間換算給与 を書く。判定式・VLOOKUP・COUNTIF は温存。
+    データ開始行はテンプレ別に動的検出（①用=18 / 補助率引上げ①用=19）。
     """
     wb = openpyxl.load_workbook(str(template_path))
     ws = wb[wb.sheetnames[0]]
 
-    if selected_months is None:
-        if result.bonus1_months_met:
-            month_name_to_idx = {f'{i+1}月': i for i in range(12)}
-            selected_months = [
-                month_name_to_idx[m] for m in result.bonus1_months_met[:3]
-            ]
-        else:
-            all_months = [d for d in result.bonus1_details if d['total'] > 0]
-            selected_months = [
-                MONTH_NAMES.index(d['month']) for d in all_months[:3]
-            ]
+    if selected_periods is None:
+        selected_periods = _select_bonus1_periods(result, 3)
 
+    # base=基本給(H/R/AB列), hourly=時間換算給与(I/S/AC列)
     period_cols = [
-        {'no': 2, 'name': 3, 'pref': 4, 'wage': 8, 'hourly': 9},
-        {'no': 13, 'name': 14, 'pref': 15, 'wage': 18, 'hourly': 19},
-        {'no': 23, 'name': 24, 'pref': 25, 'wage': 28, 'hourly': 29},
+        {'no': 2, 'name': 3, 'pref': 4, 'base': 8, 'hourly': 9},
+        {'no': 13, 'name': 14, 'pref': 15, 'base': 18, 'hourly': 19},
+        {'no': 23, 'name': 24, 'pref': 25, 'base': 28, 'hourly': 29},
     ]
+    data_start = _detect_bonus_data_start(ws, header_col=2, default=18)
 
-    DATA_START_ROW = 18
-
-    for period_idx, m_idx in enumerate(selected_months[:3]):
+    for period_idx, detail in enumerate(selected_periods[:3]):
         cols = period_cols[period_idx]
-
-        active_emps = [
-            e for e in result.employees
-            if e.monthly_wages[m_idx] is not None
-            and e.get_hourly_for_month(m_idx) is not None
-            and e.get_hourly_for_month(m_idx) > 0
-        ]
-
-        for i, emp in enumerate(active_emps):
-            row = DATA_START_ROW + i
-            wage = emp.monthly_wages[m_idx]
-            hourly = emp.get_hourly_for_month(m_idx)
-
-            ws.cell(row=row, column=cols['no'], value=i + 1)
-            ws.cell(row=row, column=cols['name'], value=emp.name)
-            ws.cell(row=row, column=cols['pref'], value=result.prefecture)
-            ws.cell(row=row, column=cols['wage'], value=wage)
-            ws.cell(row=row, column=cols['hourly'], value=round(hourly))
+        for i, emp in enumerate(detail.get('employees', [])):
+            row = data_start + i
+            _bw_set(ws, row, cols['no'], i + 1)
+            _bw_set(ws, row, cols['name'], emp['name'])
+            _bw_set(ws, row, cols['pref'], result.prefecture)
+            if emp.get('base') is not None:
+                _bw_set(ws, row, cols['base'], round(emp['base']))
+            _bw_set(ws, row, cols['hourly'], round(emp['hourly']))
 
     wb.save(str(output_path))
     wb.close()
@@ -2810,57 +3083,42 @@ def fill_bonus_sheet_2(
     template_path: Path,
     output_path: Path,
     result: BonusPointResult,
-    july_month_idx: int = 6,
-    latest_month_idx: int | None = None,
 ) -> Path:
-    """
-    加点措置②用シートに従業員データを入力
+    """加点措置②用シートに従業員データを入力。
 
-    加点措置②のシート構成:
-      2つの賃金計算期間を横に並べて入力
-      データ行は17行目から
-
-    latest_month_idx を省略した場合、judge_bonus_points が
-    動的決定して result.latest_month_idx に保存した月を使う。
-    画面判定（最新データがある月）とExcel出力を一致させる目的。
-    フォールバックとして 11（12月）を使う。
+    シート構成: 期間①（令和7年7月・F14固定）と期間②（交付申請直近月・N14=EDATE(D5,-1)）を
+    横並び。F/N=基本給, G/O=時間換算給与 を書く。事業場内最低賃金 D7/D8 は時間換算給与列の
+    MIN 配列式・D10 の判定式で自動算出されるため温存。
+    交付申請月を D5 に日付で書き込み、N14=EDATE(D5,-1) の直近月ラベルを駆動する。
     """
     wb = openpyxl.load_workbook(str(template_path))
     ws = wb[wb.sheetnames[0]]
 
-    if latest_month_idx is None:
-        latest_month_idx = (
-            result.latest_month_idx
-            if result.latest_month_idx is not None else 11
-        )
-
+    # base=基本給(F/N列), hourly=時間換算給与(G/O列)
     period_cols = [
-        {'no': 2, 'name': 3, 'pref': 4, 'wage': 6, 'hourly': 7},
-        {'no': 10, 'name': 11, 'pref': 12, 'wage': 14, 'hourly': 15},
+        {'no': 2, 'name': 3, 'pref': 4, 'base': 6, 'hourly': 7},
+        {'no': 10, 'name': 11, 'pref': 12, 'base': 14, 'hourly': 15},
     ]
+    data_start = _detect_bonus_data_start(ws, header_col=2, default=17)
 
-    DATA_START_ROW = 17
+    # D5（申請月）を日付で設定 → N14=EDATE(D5,-1) が直近月を表示・D7/D8 の集計対象を駆動
+    if result.application_ym:
+        import datetime as _dt
+        _bw_set(ws, 5, 4, _dt.datetime(result.application_ym[0], result.application_ym[1], 1))
 
-    for period_idx, m_idx in enumerate([july_month_idx, latest_month_idx]):
+    details = [result.bonus2_july_detail, result.bonus2_latest_detail]
+    for period_idx, detail in enumerate(details):
+        if not detail:
+            continue
         cols = period_cols[period_idx]
-
-        active_emps = [
-            e for e in result.employees
-            if e.monthly_wages[m_idx] is not None
-            and e.get_hourly_for_month(m_idx) is not None
-            and e.get_hourly_for_month(m_idx) > 0
-        ]
-
-        for i, emp in enumerate(active_emps):
-            row = DATA_START_ROW + i
-            wage = emp.monthly_wages[m_idx]
-            hourly = emp.get_hourly_for_month(m_idx)
-
-            ws.cell(row=row, column=cols['no'], value=i + 1)
-            ws.cell(row=row, column=cols['name'], value=emp.name)
-            ws.cell(row=row, column=cols['pref'], value=result.prefecture)
-            ws.cell(row=row, column=cols['wage'], value=wage)
-            ws.cell(row=row, column=cols['hourly'], value=round(hourly))
+        for i, emp in enumerate(detail.get('employees', [])):
+            row = data_start + i
+            _bw_set(ws, row, cols['no'], i + 1)
+            _bw_set(ws, row, cols['name'], emp['name'])
+            _bw_set(ws, row, cols['pref'], result.prefecture)
+            if emp.get('base') is not None:
+                _bw_set(ws, row, cols['base'], round(emp['base']))
+            _bw_set(ws, row, cols['hourly'], round(emp['hourly']))
 
     wb.save(str(output_path))
     wb.close()

@@ -2144,6 +2144,129 @@ def _read_wage_report(path: Path) -> tuple[list[dict], int, int, int]:
     return employees, len(seishain), len(part), yakuin_hoshu_3m
 
 
+def run_bonus_wage_ledger_creation(
+    resource_folder: Path,
+    company_name: str,
+    template_path: Path,
+    output_path: Path,
+    extractor: BaseExtractor | None = None,
+    prefecture: str = '',
+    application_ym: tuple[int, int] | None = None,
+    selection_override: dict[str, list[Path]] | None = None,
+) -> ProcessingStatus:
+    """タスク「加点判定用賃金台帳の作成」: 生の賃金台帳/給与明細 → 加点判定用 Excel。
+
+    基本給と所定労働時間を AI 抽出し、令和6年10月〜令和7年9月＋交付申請直近月の
+    時間換算給与（＝基本給÷所定労働時間）ベースの専用台帳に変換する。
+    Document AI 一本（Sonnet 画像経路フォールバックは無効）。
+    抽出精度が加点判定（補助率2/3 トリガー）を左右するため、欠落を警告し人手確認を促す。
+    """
+    from .ai_extractor import APICreditExhaustedError, ImageFallbackBlockedError
+    from .wage_reader import (
+        read_bonus_source_employees, BONUS1_WINDOW, prev_month,
+    )
+    from .bonus_wage_ledger_writer import write_bonus_wage_ledger
+
+    status = ProcessingStatus(
+        company_name=company_name,
+        template_type='加点判定用賃金台帳の作成',
+        status='処理中',
+    )
+    try:
+        if extractor is None:
+            extractor = create_extractor(CLAUDE_API_KEY)
+
+        detector = FileDetector(
+            resource_folder,
+            selection_override=selection_override,
+            extra_allowed_exts={'wage_ledger': {'.pdf'}},
+        )
+        logger.info(detector.summary())
+        wage_files = detector.get_all('wage_ledger')
+        if not wage_files:
+            status.status = 'エラー'
+            status.message = (
+                '賃金台帳/給与明細ファイルが見つかりません。'
+                'PDF/Excel/CSV のいずれかをアップロードしてください'
+                '（ファイル名に「賃金台帳」または「給与台帳」を含めてください）。'
+            )
+            return status
+
+        try:
+            employees = read_bonus_source_employees(
+                wage_files, extractor=extractor, disable_image_fallback=True,
+            )
+        except ImageFallbackBlockedError as e:
+            status.status = 'エラー'
+            status.message = (
+                f'⛔ Document AI で賃金台帳を抽出できませんでした（{str(e).split("。")[0]}）。'
+                '手書き/画像PDF は手元の Claude Code（wagebook-convert）での変換をご検討ください。'
+            )
+            return status
+        except APICreditExhaustedError as e:
+            status.status = 'エラー'
+            status.message = f'⛔ API残高切れで抽出を継続できませんでした（{e}）。'
+            return status
+
+        if not employees:
+            status.status = 'エラー'
+            status.message = (
+                '⛔ 賃金台帳から従業員データを抽出できませんでした。'
+                'PDF原本のレイアウト・手書きの有無を確認してください。'
+            )
+            return status
+
+        write_bonus_wage_ledger(
+            employees, template_path, output_path,
+            prefecture=prefecture, application_ym=application_ym,
+        )
+
+        # カバレッジ警告（加点に必要な月の基本給・所定労働時間がどれだけ埋まったか）
+        target_yms = list(BONUS1_WINDOW)
+        latest_ym = prev_month(application_ym) if application_ym else None
+        if latest_ym:
+            target_yms.append(latest_ym)
+        no_base = [
+            e.name for e in employees
+            if not any(ym in e.monthly_base for ym in target_yms)
+        ]
+        no_hours = [e.name for e in employees if e.scheduled_hours is None]
+
+        msgs = [f'{len(employees)}名の加点判定用賃金台帳を作成しました。']
+        if no_base:
+            head = '、'.join(no_base[:5]) + ('…' if len(no_base) > 5 else '')
+            msgs.append(
+                f'⚠️ 加点対象月の基本給が取得できなかった従業員: {len(no_base)}名（{head}）。'
+                '原本を確認し、各月の基本給（所定内賃金）を手入力してください。'
+            )
+        if no_hours:
+            head = '、'.join(no_hours[:5]) + ('…' if len(no_hours) > 5 else '')
+            msgs.append(
+                f'⚠️ 月間所定労働時間が取得できなかった従業員: {len(no_hours)}名（{head}）。'
+                'E列に会社の所定労働時間（例: 160）を手入力してください（最低賃金比較の分母）。'
+            )
+        if application_ym is None:
+            msgs.append(
+                '⚠️ 交付申請月が未指定のため、加点措置②の直近月列（R列）が空です。'
+                'サイドバーで交付申請月を指定して再作成するか、台帳の C3 と R列を手入力してください。'
+            )
+        msgs.append(
+            '※ 出力台帳は提出前に必ず人手で確認してください'
+            '（基本給・所定労働時間の抽出精度が加点判定＝補助率2/3 を左右します）。'
+        )
+
+        status.status = '完了'
+        status.message = '\n\n'.join(msgs)
+        status.output_files = [output_path.name]
+        return status
+
+    except Exception as e:
+        logger.error(f'加点判定用賃金台帳の作成エラー: {e}', exc_info=True)
+        status.status = 'エラー'
+        status.message = f'処理中にエラーが発生しました: {e}'
+        return status
+
+
 def run_wage_ledger_conversion(
     resource_folder: Path,
     company_name: str,
