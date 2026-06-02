@@ -87,6 +87,10 @@ def main() -> int:
     with zipfile.ZipFile(zip_dated, 'w', zipfile.ZIP_DEFLATED) as zf:
         for file in sorted(SKILL_DIR.rglob('*')):
             if file.is_file():
+                # __pycache__ / .pyc は配布物に含めない
+                # （review/verify_wagebook.py の実行時に生成されるキャッシュ）
+                if '__pycache__' in file.parts or file.suffix == '.pyc':
+                    continue
                 arcname = Path('wagebook-convert') / file.relative_to(SKILL_DIR)
                 zf.write(file, arcname.as_posix())
                 files_included.append(arcname.as_posix())
