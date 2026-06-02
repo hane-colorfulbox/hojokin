@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -267,12 +268,17 @@ def _verify_and_fix_pl_signs(basic: dict) -> dict:
     抽出される事故が発生する。プロンプトで整合性チェックを指示しているが
     Sonnet が遵守しないケースが観測されたため、プログラム側で機械的に補正する。
 
-    補正発動条件（すべて満たすときのみ反転）:
+    補正発動条件（2パターン。誤爆を避けるため絶対値一致を必須にする）:
+      パターン1（粗利益も誤読）:
         1. revenue, cost_of_sales が共に正値（売上関連は信頼できる）
-        2. gross_profit と revenue - cost_of_sales が
-           「絶対値一致 かつ 符号逆」=粗利益の括弧誤読が確定
+        2. gross_profit と revenue - cost_of_sales が「絶対値一致 かつ 符号逆」
         3. operating/ordinary/net_profit のうち負値のものを反転
-           （正常な赤字決算は粗利益が正で営業利益のみ負になるため発動しない）
+      パターン2（粗利益は正常だが営業利益以下のみ誤読 ← 黒字企業で観測されたケース）:
+        1. gross_profit が計算値と一致（粗利益は信頼できる）
+        2. sga_total（販管費合計）が正値で、operating_calc = gross - sga > 0
+        3. AIの営業利益が負 かつ |営業利益| == |operating_calc|（符号だけ逆）
+        4. → operating/ordinary/net_profit の負値を反転
+        （真の赤字は sga>gross→operating_calc<0 となり発動しない＝誤爆しない）
 
     Returns:
         補正後の dict（補正時は '_sign_fixed' / '_sign_fixed_reason' を付与）。
@@ -291,36 +297,124 @@ def _verify_and_fix_pl_signs(basic: dict) -> dict:
     except (TypeError, ValueError):
         return basic
 
+    def _flip_profits(src: dict, keys=('operating_profit', 'ordinary_profit', 'net_profit')):
+        """src の負値の利益を反転した新 dict と反転キー一覧を返す。"""
+        out = dict(src)
+        flipped_keys: list[str] = []
+        for key in keys:
+            v = src.get(key)
+            if v is None:
+                continue
+            try:
+                iv = int(v)
+            except (TypeError, ValueError):
+                continue
+            if iv < 0:
+                out[key] = -iv
+                flipped_keys.append(key)
+        return out, flipped_keys
+
     gross_calc = revenue - cost
-    # 正常（AIの粗利益が計算値と一致）
+
+    # ── パターン1: 粗利益自体の括弧誤読（絶対値一致・符号逆）→ 粗利＋各利益を反転 ──
+    if gross_ai != gross_calc and abs(gross_ai) == abs(gross_calc) and gross_ai * gross_calc < 0:
+        fixed, flipped = _flip_profits(basic)
+        fixed['gross_profit'] = gross_calc
+        flipped = ['gross_profit'] + flipped
+        fixed['_sign_fixed'] = True
+        fixed['_sign_fixed_reason'] = (
+            f'粗利益の括弧誤読を検知: AI抽出値={gross_ai:,} ≠ '
+            f'売上高({revenue:,}) - 売上原価({cost:,}) = {gross_calc:,} '
+            f'(絶対値一致・符号逆)。反転対象: {", ".join(flipped)}'
+        )
+        logger.warning(f'[_verify_and_fix_pl_signs] {fixed["_sign_fixed_reason"]}')
+        return fixed
+
+    # ── パターン2: 粗利益は正常だが営業利益以下のみ括弧誤読（黒字企業で観測）──
+    #   販管費合計(sga_total)で 営業利益 = 粗利益 - 販管費合計 を検算し、符号だけ逆なら反転。
     if gross_ai == gross_calc:
+        sga = basic.get('sga_total')
+        op_ai = basic.get('operating_profit')
+        if sga is not None and op_ai is not None:
+            try:
+                sga = int(sga)
+                op_ai = int(op_ai)
+            except (TypeError, ValueError):
+                return basic
+            op_calc = gross_calc - sga
+            # 本来プラス(op_calc>0)なのにAIが負(op_ai<0)・絶対値一致 → 括弧誤読が確定
+            if sga > 0 and op_calc > 0 and op_ai < 0 and abs(op_ai) == abs(op_calc):
+                fixed, flipped = _flip_profits(basic)
+                if flipped:
+                    fixed['_sign_fixed'] = True
+                    fixed['_sign_fixed_reason'] = (
+                        f'営業利益等の括弧誤読を検知: AI営業利益={op_ai:,} だが '
+                        f'粗利益({gross_calc:,}) - 販管費合計({sga:,}) = {op_calc:,} > 0 '
+                        f'(絶対値一致・符号逆)。反転対象: {", ".join(flipped)}'
+                    )
+                    logger.warning(f'[_verify_and_fix_pl_signs] {fixed["_sign_fixed_reason"]}')
+                    return fixed
         return basic
-    # 絶対値が一致しない、または符号が同じ → 別パターンの誤読なのでここでは触らない
-    if abs(gross_ai) != abs(gross_calc) or gross_ai * gross_calc >= 0:
-        return basic
-    # 粗利益の括弧誤読が確定 → 全利益を反転
-    fixed = dict(basic)
-    fixed['gross_profit'] = gross_calc
-    flipped = ['gross_profit']
-    for key in ('operating_profit', 'ordinary_profit', 'net_profit'):
-        v = basic.get(key)
-        if v is None:
-            continue
-        try:
-            iv = int(v)
-        except (TypeError, ValueError):
-            continue
-        if iv < 0:
-            fixed[key] = -iv
-            flipped.append(key)
-    fixed['_sign_fixed'] = True
-    fixed['_sign_fixed_reason'] = (
-        f'粗利益の括弧誤読を検知: AI抽出値={gross_ai:,} ≠ '
-        f'売上高({revenue:,}) - 売上原価({cost:,}) = {gross_calc:,} '
-        f'(絶対値一致・符号逆)。反転対象: {", ".join(flipped)}'
-    )
-    logger.warning(f'[_verify_and_fix_pl_signs] {fixed["_sign_fixed_reason"]}')
-    return fixed
+
+    # ── それ以外（絶対値不一致など別パターンの誤読）は触らない ──
+    return basic
+
+
+# ============================================================
+# 業種コード（日本標準産業分類）補助
+# ============================================================
+# 大分類 名称→記号（令和5年[2023年]7月改定・第14回改定）。
+# AI/Web検索が大分類記号を取り違える（建設業をE/Cと誤る等）ため、
+# 名称から記号を決定論的に引き直す。名称は信頼でき記号だけブレるため有効。
+MAJOR_DIVISION_LETTER = {
+    '農業、林業': 'A', '農業': 'A', '林業': 'A',
+    '漁業': 'B',
+    '鉱業、採石業、砂利採取業': 'C', '鉱業': 'C',
+    '建設業': 'D',
+    '製造業': 'E',
+    '電気・ガス・熱供給・水道業': 'F',
+    '情報通信業': 'G',
+    '運輸業、郵便業': 'H', '運輸業': 'H',
+    '卸売業、小売業': 'I', '卸売業': 'I', '小売業': 'I',
+    '金融業、保険業': 'J', '金融業': 'J', '保険業': 'J',
+    '不動産業、物品賃貸業': 'K', '不動産業': 'K',
+    '学術研究、専門・技術サービス業': 'L',
+    '宿泊業、飲食サービス業': 'M', '宿泊業': 'M', '飲食サービス業': 'M',
+    '生活関連サービス業、娯楽業': 'N', '生活関連サービス業': 'N', '娯楽業': 'N',
+    '教育、学習支援業': 'O',
+    '医療、福祉': 'P', '医療': 'P', '福祉': 'P',
+    '複合サービス事業': 'Q',
+    'サービス業（他に分類されないもの）': 'R',
+    '公務（他に分類されるものを除く）': 'S', '公務': 'S',
+    '分類不能の産業': 'T',
+}
+
+
+def _major_letter_for_name(name: str) -> str:
+    """大分類名称から記号を返す（先頭の記号・空白を除去して照合）。不明なら ''。"""
+    if not name:
+        return ''
+    s = re.sub(r'^[A-Za-zＡ-Ｚ]\s*', '', str(name).strip()).strip()
+    if s in MAJOR_DIVISION_LETTER:
+        return MAJOR_DIVISION_LETTER[s]
+    for nm in sorted(MAJOR_DIVISION_LETTER, key=len, reverse=True):
+        if nm in s:
+            return MAJOR_DIVISION_LETTER[nm]
+    return ''
+
+
+def _fix_major_division_letters(text: str) -> str:
+    """'E 建設業' のような誤記号を名称基準で正しい記号に直す。
+
+    既に記号が付いている箇所だけを補正する（記号の無い箇所に勝手に付けない）。
+    """
+    if not text:
+        return text
+    out = str(text)
+    for nm in sorted(MAJOR_DIVISION_LETTER, key=len, reverse=True):
+        letter = MAJOR_DIVISION_LETTER[nm]
+        out = re.sub(r'[A-Za-zＡ-Ｚ]\s*(?=' + re.escape(nm) + ')', letter + ' ', out)
+    return out
 
 
 def _merge_wage_employees_by_month(
@@ -599,6 +693,7 @@ PROMPT_PL_BASIC = """**出力は ```json コードブロック1個のみ。前�
 
 整合性チェック（必ず実施）:
   - `売上高 - 売上原価 = 売上総利益` が成立するか
+  - `売上総利益 - 販売費及び一般管理費合計 = 営業利益`（符号含め）が成立するか
   - 不一致なら、いずれかの値の符号誤読を疑い、もう一度原本を見直して符号を決め直す
   - とくに「営業利益」「経常利益」「当期純利益」は会社が赤字のとき必ず負数になる
 
@@ -609,6 +704,7 @@ PROMPT_PL_BASIC = """**出力は ```json コードブロック1個のみ。前�
   "revenue": 売上高,
   "cost_of_sales": 売上原価,
   "gross_profit": 売上総利益,
+  "sga_total": 販売費及び一般管理費の合計（円・整数・必ず正値。費用合計なので括弧やマイナスにしない。合計行が無ければ販管費明細を合算）,
   "operating_profit": 営業利益（損失なら必ずマイナス、括弧・△・▲記号で表示されていれば負数として返す）,
   "ordinary_profit": 経常利益（同上）,
   "net_profit": 当期純利益（同上）
@@ -750,13 +846,13 @@ PROMPT_AI_JUDGMENT = """以下の会社情報に基づいて、補助金申請�
 
 ```json
 {{
-  "industry_code": "日本標準産業分類（令和5年6月改定・第14回改定）の細分類コード（4桁）。古い体系の3桁コードは不可。総務省統計局・e-Stat の最新分類（https://www.e-stat.go.jp/classifications/terms/10）に従うこと。具体的コードは推定せず、業態から該当する細分類を引くこと",
+  "industry_code": "日本標準産業分類（令和5年6月改定・第14回改定）の細分類コード（4桁）。古い体系の3桁コードは不可。総務省統計局・e-Stat の最新分類（https://www.e-stat.go.jp/classifications/terms/10）に従うこと。具体的コードは推定せず、業態から該当する細分類を引くこと。主たる事業＝売上が最も大きい事業の細分類を1つ選ぶ（履歴事項目的の1番目に引っ張られない）。建設業の大分類記号は必ずD・製造業はE",
   "industry_text": "日本標準産業分類（令和5年6月改定）に基づき '大分類 X xxx / 中分類 xx xxx / 小分類 xxx xxx / 細分類 xxxx xxx' 形式で返す。コード番号と名称は一致させること",
   "business_description": "事業内容の説明文。**必ず240文字以上252文字以内**（句読点・記号も1文字、改行は含めない）。255文字を超えると申請書のセルで切られるので絶対に超えない。バッファとして252文字までに収めること。以下4要素を順番に必ず含めること: (1)現状の事業概要（業種・主要サービス・顧客層を1〜2文） (2)直面している課題・非効率（具体的な業務名・所要時間） (3)導入するITツールによる解決策（どの業務をどう変えるか） (4)期待される効果（時間削減・売上向上・新規事業展開の見込みを具体的に）。一般論ではなく、ヒアリング回答に含まれる固有の業務名・数値を必ず織り込むこと。語尾は『〜である』調で統一",
   "management_intent": "営業利益がプラスなら '事業の拡大に積極的'、マイナスなら '事業の維持に注力'",
   "future_goals": "営業利益がプラスなら '事業の拡大'、マイナスなら '利益の確保'",
   "security_status": "パソコンやサーバなどには、IDやパスワードを設け情報セキュリティ管理を行っている",
-  "business_types": "履歴事項の目的から該当する日本標準産業分類の大分類をカンマ区切りで",
+  "business_types": "履歴事項の目的から該当する日本標準産業分類の大分類をカンマ区切りで。大分類記号は正確に（建設業=D, 製造業=E）。主たる事業を中心にし、関係の薄い大分類を不必要に増やさない",
   "it_investment_status": "ヒアリングのIT投資実績が「はい」なら過去にIT投資を行ったことがある旨を記載。「いいえ」なら今までIT投資を行っていなかった",
   "it_utilization_status": "ヒアリングのIT投資実績に基づき適切に選択",
   "it_utilization_scope": "ITツールの導入により電子化する事務の範囲（例: '会計', '受発注', '決済' 等から該当するものをカンマ区切りで）",
@@ -1584,6 +1680,62 @@ class ClaudeExtractor(BaseExtractor):
             tax_amount=d.get('tax_amount', 0) or 0,
         )
 
+    def _lookup_industry_via_search(self, business_purposes, main_business) -> dict | None:
+        """Web検索で日本標準産業分類（令和5年改定）の細分類を引く。失敗時 None。
+
+        記憶頼みだと細分類4桁を取り違える（防水工事=0795→0641）ため、
+        e-Stat 等を実検索して主たる事業の細分類を特定する。
+        サーバ側 web_search ツールを使う（応答に tool ブロックが混ざるので text のみ連結）。
+        """
+        biz = (main_business or '').strip()
+        if not biz:
+            biz = '、'.join(str(b) for b in (business_purposes or []) if b)
+        if not biz:
+            return None
+        prompt = (
+            '次の事業者の「主たる事業（売上の中核となる事業）」について、'
+            '日本標準産業分類（令和5年[2023年]7月改定・第14回改定）の細分類を特定してください。'
+            '総務省統計局 / e-Stat（https://www.e-stat.go.jp/classifications/terms/10）の'
+            '公式分類を Web 検索で確認すること。複数事業があれば主たる事業1つに絞る。\n'
+            f'事業内容: {biz}\n\n'
+            '最後に必ず次のJSONだけを ```json コードブロック1個で出力（コードは数字のみ）:\n'
+            '{"industry_code":"細分類4桁","major_name":"大分類の名称(記号は付けない)",'
+            '"middle":"中分類2桁","middle_name":"中分類の名称",'
+            '"small":"小分類3桁","small_name":"小分類の名称","detail_name":"細分類の名称"}'
+        )
+        try:
+            resp = self._messages_create_with_retry(
+                caller='lookup_industry',
+                stats=f'web_search prompt={len(prompt)}chars',
+                model=self.model,
+                max_tokens=2000,
+                tools=[{'type': 'web_search_20250305', 'name': 'web_search', 'max_uses': 4}],
+                messages=[{'role': 'user', 'content': prompt}],
+            )
+            text = ''.join(
+                getattr(b, 'text', '') for b in resp.content
+                if getattr(b, 'type', None) == 'text'
+            )
+            d = self._ensure_dict(self._parse_json(text), 'lookup_industry')
+            code = re.sub(r'\D', '', str(d.get('industry_code', '')))
+            if len(code) != 4:
+                logger.warning(f'[lookup_industry] 4桁コードを取得できず: {d.get("industry_code")!r}')
+                return None
+            d['industry_code'] = code
+            try:
+                u = resp.usage
+                searches = getattr(getattr(u, 'server_tool_use', None), 'web_search_requests', '?')
+                logger.warning(
+                    f'[lookup_industry] code={code} '
+                    f'tokens={u.input_tokens}in+{u.output_tokens}out searches={searches}'
+                )
+            except Exception:
+                pass
+            return d
+        except Exception as e:
+            logger.warning(f'[lookup_industry] Web検索失敗、AI判断のコードにフォールバック: {e}')
+            return None
+
     def generate_ai_judgment(self, company, financial, tool_name, hearing_data=None) -> AIJudgment:
         # ヒアリングデータから各種情報を取得
         hearing_fields = {
@@ -1656,14 +1808,36 @@ class ClaudeExtractor(BaseExtractor):
         mw = get_min_wage(company.address)
         min_wage_text = f'{mw[0]}/{mw[1]}円' if mw else d.get('min_wage', '')
 
+        # 業種コードは Web 検索で日本標準産業分類を実引きして上書き（記憶頼みの誤りを防ぐ）。
+        # 失敗時は AI 判断のコードにフォールバック。大分類記号は名称から決定論補正。
+        industry_code = d.get('industry_code', '')
+        industry_text = _fix_major_division_letters(d.get('industry_text', ''))
+        searched = self._lookup_industry_via_search(
+            company.business_purposes, hearing_fields.get('main_business')
+        )
+        if searched:
+            code = searched['industry_code']
+            mid = re.sub(r'\D', '', str(searched.get('middle', ''))) or code[:2]
+            small = re.sub(r'\D', '', str(searched.get('small', ''))) or code[:3]
+            major_name = re.sub(r'^[A-Za-zＡ-Ｚ]\s*', '', str(searched.get('major_name', ''))).strip()
+            letter = _major_letter_for_name(major_name)
+            industry_code = code
+            industry_text = (
+                f"大分類 {letter} {major_name} / "
+                f"中分類 {mid} {searched.get('middle_name', '')} / "
+                f"小分類 {small} {searched.get('small_name', '')} / "
+                f"細分類 {code} {searched.get('detail_name', '')}"
+            )
+        business_types = _fix_major_division_letters(d.get('business_types', ''))
+
         return AIJudgment(
-            industry_code=d.get('industry_code', ''),
-            industry_text=d.get('industry_text', ''),
+            industry_code=industry_code,
+            industry_text=industry_text,
             business_description=d.get('business_description', ''),
             management_intent=d.get('management_intent', ''),
             future_goals=d.get('future_goals', ''),
             security_status=d.get('security_status', ''),
-            business_types=d.get('business_types', ''),
+            business_types=business_types,
             min_wage_text=min_wage_text,
             it_investment_status=d.get('it_investment_status', ''),
             it_utilization_status=d.get('it_utilization_status', ''),
