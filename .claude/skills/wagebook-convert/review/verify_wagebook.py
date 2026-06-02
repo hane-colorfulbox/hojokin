@@ -1,0 +1,247 @@
+"""賃金台帳変換の出力 xlsx を機械検算する『必須レビューゲート』(SKILL.md §5.5)。
+
+設計方針（重要）:
+- **openpyxl だけ**に依存する。hojokin パッケージ・Anthropic API・Streamlit を一切呼ばない
+  → 配布先の他人PC（まっさら環境）・headless でも動く。課金ゼロ。
+- **R215/R216 を再計算しない**。ツール側 hojokin/wage_calculator.py の算定式をここで再実装すると
+  式がドリフトして「誤った PASS」を出す（CLAUDE.md 同期負債）。本スクリプトは
+  **不変量の観測と FLAG 列挙だけ**を行う。R216 の正値判定は、リポジトリ/Streamlit 側の
+  本物の read_wage_ledger 往復（最終ゲート）に委ねる。
+- 自己防衛: シート名・列レイアウトがテンプレと違えば沈黙せず非ゼロ終了する。
+
+使い方:
+    python .claude/skills/wagebook-convert/review/verify_wagebook.py "{会社名}_賃金台帳一覧.xlsx"
+
+出力（=§9 完了報告にそのまま貼る）:
+    各行の Σ(G:R)+T、月別縦計、雇用形態内訳、各 FLAG、末尾に PASS/要対応 件数。
+終了コード: 0=要対応なし / 1=要対応あり（FAIL or 要確認が残っている） / 2=ファイル/構造エラー。
+"""
+import sys
+from collections import Counter
+from pathlib import Path
+
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
+SHEET_NAME = '従業員別明細'
+HEADER_ROW = 5
+DATA_START_ROW = 6
+COL_NAME = 3        # C
+COL_TYPE = 4        # D 雇用形態
+COL_HOURS = 5       # E 月平均時間
+COL_MONTH_FIRST = 7   # G (1月)
+COL_MONTH_LAST = 18   # R (12月)
+COL_TRANSPORT = 19    # S 年間通勤手当
+COL_BONUS = 20        # T 年間賞与
+MONTH_LABELS = [f'{m}月' for m in range(1, 13)]
+
+# 役員ラベル未正規化の検知トリガ（職位名「現場代理人/主任/営業」等は含めない＝誤検知回避）
+OFFICER_TRIGGERS = ('代表取締役', '取締役', '監査役', '監事', '理事長', '理事')
+PART_TRIGGERS = ('パート', 'アルバイト', '非常勤')
+BONUS_SPIKE_RATIO = 1.5  # その人の非空月の中央値×この倍率を超える月は賞与混入の疑い
+
+
+def _num(v):
+    """数値化できれば float、できなければ None。空文字・None は None。"""
+    if v is None or v == '':
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _median(xs):
+    s = sorted(xs)
+    n = len(s)
+    if n == 0:
+        return None
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def main(argv):
+    if len(argv) < 2:
+        print('使い方: python verify_wagebook.py <出力xlsx>', file=sys.stderr)
+        return 2
+    xlsx = Path(argv[1])
+    if not xlsx.exists():
+        print(f'❌ ファイルが見つかりません: {xlsx}', file=sys.stderr)
+        return 2
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        print('❌ openpyxl が未導入。機械検算をスキップし、SKILL.md §5-A〜§5-M を'
+              '全件人手で実施すること（このゲートは飛ばさない）。', file=sys.stderr)
+        return 2
+
+    try:
+        wb = load_workbook(xlsx, data_only=True)
+    except Exception as e:  # noqa: BLE001 沈黙させず原因を出す
+        print(f'❌ xlsx を開けません: {e}', file=sys.stderr)
+        return 2
+    if SHEET_NAME not in wb.sheetnames:
+        print(f'❌ シート「{SHEET_NAME}」が無い（シート: {wb.sheetnames}）。'
+              'ツール出力 Sheet2 等を誤って渡していないか確認。', file=sys.stderr)
+        return 2
+    ws = wb[SHEET_NAME]
+    header = str(ws.cell(HEADER_ROW, COL_NAME).value or '')
+    if '氏名' not in header:
+        print(f'❌ {HEADER_ROW}行目C列が「氏名」でない（"{header}"）。テンプレと列レイアウトが'
+              '違う可能性。ヘッダー行/データ開始行を確認。', file=sys.stderr)
+        return 2
+
+    rows = []
+    for r in range(DATA_START_ROW, ws.max_row + 1):
+        name = ws.cell(r, COL_NAME).value
+        if name is None or str(name).strip() == '':
+            continue
+        months = [_num(ws.cell(r, c).value) for c in range(COL_MONTH_FIRST, COL_MONTH_LAST + 1)]
+        rows.append({
+            'row': r,
+            'name': str(name).strip(),
+            'type': str(ws.cell(r, COL_TYPE).value or '').strip(),
+            'hours': _num(ws.cell(r, COL_HOURS).value),
+            'months': months,
+            'S': _num(ws.cell(r, COL_TRANSPORT).value),
+            'T': _num(ws.cell(r, COL_BONUS).value),
+        })
+
+    if not rows:
+        print('❌ データ行（B6以降）が空。転記されていない。', file=sys.stderr)
+        return 2
+
+    print(f'=== レビューゲート機械検算: {xlsx.name}（{len(rows)}名） ===\n')
+
+    # --- 各行の年間（課税月計＋賞与） ---
+    print('[各行 Σ(G:R)+T]（PDF各社員の課税年間合計と人手照合する材料）')
+    for e in rows:
+        gr = sum(v for v in e['months'] if v is not None)
+        t = e['T'] or 0
+        print(f"  行{e['row']:>2} {e['name']}: Σ(G:R)={gr:,.0f} +T={t:,.0f} → 計={gr + t:,.0f}")
+    print()
+
+    fail = []       # 修正必須（PASSをブロック）
+    confirm = []    # 要確認（PDFで素性確認し報告に解決を明記してから進む）
+
+    # --- ① S列二重控除（要確認: 月列の素性は機械では決められないのでPDF確認必須） ---
+    s_rows = [e for e in rows if e['S'] is not None and e['S'] > 0]
+    print('[FLAG-S 通勤手当S列に値がある行]（バグ①二重控除の候補）')
+    if s_rows:
+        for e in s_rows:
+            print(f"  行{e['row']} {e['name']}: S={e['S']:,.0f}")
+        print('  → 月列に「課税支給合計」を入れたなら S列は空が正（§3.1/§5-F：埋めると二重控除で'
+              'R216過小）。月列が「合計（通勤費込み）」ならS列保持が正。'
+              '**PDFで月列の素性を確認し、報告に判断を明記**。')
+        confirm.append(f'FLAG-S {len(s_rows)}件（S列の要否をPDFで確認）')
+    else:
+        print('  なし（S列は全行空 or 0）')
+    print()
+
+    # --- ② 月配置ズレ（観測材料のみ。確定はPDF突合＝§5.5-3で人手必須） ---
+    monthly_totals = [
+        sum(e['months'][m] for e in rows if e['months'][m] is not None)
+        for m in range(12)
+    ]
+    print('[月別縦計]（全員の各月合計。バグ②月配置ズレ検出の“材料”）')
+    print('  ' + ' / '.join(f'{lab}={tot:,.0f}' for lab, tot in zip(MONTH_LABELS, monthly_totals)))
+    gap_rows = [
+        e for e in rows
+        if any(e['months'][m] is None for m in range(12))
+        and not all(e['months'][m] is None for m in range(12))
+    ]
+    if gap_rows:
+        print(f'  ⚠ 途中に空欄月のある社員 {len(gap_rows)}名 → §5.5-3 でこの全員＋無作為3名を'
+              'PDFと1セル突合（縦計が出た≠OK。左詰めズレは年間合計検算を素通りする §1.1.0）:')
+        for e in gap_rows:
+            present = [MONTH_LABELS[m] for m in range(12) if e['months'][m] is not None]
+            print(f"    行{e['row']} {e['name']}: 在={','.join(present)}")
+        confirm.append(f'月配置: 空欄月あり{len(gap_rows)}名＋無作為3名をPDF1セル突合')
+    print()
+
+    # --- ③ 賞与の月セル混入（要確認: 賞与か繁忙期/歩合か人手判断） ---
+    print('[FLAG-B 賞与の月セル混入候補]（他月比1.5倍超の突出月）')
+    spike_found = False
+    for e in rows:
+        vals = [v for v in e['months'] if v is not None]
+        med = _median(vals)
+        if med and med > 0:
+            spikes = [(MONTH_LABELS[m], e['months'][m]) for m in range(12)
+                      if e['months'][m] is not None and e['months'][m] > med * BONUS_SPIKE_RATIO]
+            if spikes:
+                spike_found = True
+                detail = ', '.join(f'{lab}={v:,.0f}' for lab, v in spikes)
+                print(f"  行{e['row']} {e['name']}: {detail}（中央値{med:,.0f}）")
+    if spike_found:
+        print('  → 賞与なら T列へ分離（§4.1.1）。繁忙期残業/歩合なら月セルのままで正。PDF確認。')
+        confirm.append('賞与混入候補あり（T列分離 or 残業/歩合かをPDF確認）')
+    else:
+        print('  なし')
+    print()
+
+    # --- ④-a 役員ラベル未正規化（FAIL） ---
+    officer_residue = [
+        e for e in rows
+        if any(t in e['type'] for t in OFFICER_TRIGGERS) and '役員' not in e['type']
+    ]
+    if officer_residue:
+        print('[FAIL 役員ラベル未正規化]（R216に役員混入。§2で「役員」へ正規化必須）')
+        for e in officer_residue:
+            print(f"  行{e['row']} {e['name']}: 雇用形態=「{e['type']}」→「役員」へ")
+        fail.append(f'役員ラベル未正規化 {len(officer_residue)}件')
+        print()
+
+    # --- ④-b パートでE列(月平均時間)空（FAIL: FTE=1.0サイレント昇格でR215過大） ---
+    part_no_hours = [
+        e for e in rows
+        if any(t in e['type'] for t in PART_TRIGGERS) and e['hours'] is None
+    ]
+    if part_no_hours:
+        print('[FAIL パートでE列(月平均時間)空]（FTE=1.0昇格でR215過大。§1 E列必須）')
+        for e in part_no_hours:
+            print(f"  行{e['row']} {e['name']}: 雇用形態=「{e['type']}」だがE列空")
+        fail.append(f'パートでE列空 {len(part_no_hours)}件')
+        print()
+
+    # --- 0混入（要確認: 空欄であるべき箇所の0） ---
+    zero_rows = [(e, [MONTH_LABELS[m] for m in range(12) if e['months'][m] == 0])
+                 for e in rows]
+    zero_rows = [(e, zs) for e, zs in zero_rows if zs]
+    if zero_rows:
+        print('[FLAG-0 月セルに0]（中途/退社/休職は空欄が規約。0は誤判定の元）')
+        for e, zs in zero_rows:
+            print(f"  行{e['row']} {e['name']}: {','.join(zs)} が0")
+        confirm.append(f'月セルに0が {len(zero_rows)}名（空欄にすべきか確認）')
+        print()
+
+    # --- 雇用形態内訳・全月在籍非役員数（観測） ---
+    type_counts = Counter(e['type'] or '(空)' for e in rows)
+    print('[雇用形態内訳]', dict(type_counts))
+    has_officer = any('役員' in (e['type'] or '') for e in rows)
+    if not has_officer:
+        print('  ⚠ 「役員」が0件。代表者が賃金台帳に居るなら §2.1 で役員判定したか確認。')
+    full_year_non_officer = sum(
+        1 for e in rows
+        if all(v is not None for v in e['months']) and '役員' not in (e['type'] or '')
+    )
+    print(f'[全月在籍の非役員] {full_year_non_officer}名')
+    if full_year_non_officer == 0:
+        print('  ❌ 0名 → R216/R215 が台帳だけでは確定不能（§0.2/§6-9 役員報酬ベース要否を報告）')
+        fail.append('全月在籍非役員0名')
+    print()
+
+    # --- 集計 ---
+    print('=== 集計 ===')
+    if not fail and not confirm:
+        print('=== PASS ===（FAIL・要確認なし。ただし §5.5-3 のPDF白紙突合は別途必須）')
+        return 0
+    if fail:
+        print(f'■ 修正必須 FAIL {len(fail)}件: ' + ' / '.join(fail))
+    if confirm:
+        print(f'■ 要確認 {len(confirm)}件（PDFで素性確認し報告に解決を明記）: ' + ' / '.join(confirm))
+    print('=== 要対応あり ===（FAILは修正、要確認はPDF確認の上で解決を§9報告に明記してから完了報告へ）')
+    return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main(sys.argv))
