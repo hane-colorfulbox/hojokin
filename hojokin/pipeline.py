@@ -2261,6 +2261,9 @@ def run_wage_ledger_conversion(
                 extractor=extractor,
                 fiscal_period_hint=fiscal_hint,
                 disable_image_fallback=True,
+                # 決算書を読まないこのタスクは今日基準で期末年を推定するため、台帳の実在年で
+                # 12ヶ月窓を選び直す（1期ズレによる R216 サイレント過少計上を防ぐ）。
+                derive_year_from_data=True,
             )
         except ImageFallbackBlockedError as e:
             status.status = 'エラー'
@@ -2373,6 +2376,14 @@ def run_wage_ledger_conversion(
             # 検証側のエラーで本体処理を止めない
             logger.warning(f'セル単位整合性チェックでエラー（処理続行）: {e}')
 
+        # 事業年度ウィンドウ選択の注意書き（年の自動補正・低カバレッジ）を集約。
+        # 全従業員に同値で載るため重複排除して surfacing する。
+        window_notes: list[str] = []
+        for e in employees:
+            note = getattr(e, 'fiscal_window_note', '') or ''
+            if note and note not in window_notes:
+                window_notes.append(note)
+
         # テンプレートに書込
         write_result = write_wage_ledger_to_template(
             employees,
@@ -2383,6 +2394,7 @@ def run_wage_ledger_conversion(
             is_kojin=is_kojin,
             extraction_path=extraction_path,
             handwritten_files=handwritten_files,
+            additional_warnings=window_notes,
             officer_names=officer_names,
             data_source_files=data_source_files,
             cell_consistency_warnings=cell_consistency_warnings,
@@ -2413,6 +2425,10 @@ def run_wage_ledger_conversion(
             msg_parts.append(
                 f'⚠ セル単位整合性 {len(cell_consistency_warnings)}件 — '
                 f'変換メモシートで確認のうえ原本照合'
+            )
+        if window_notes:
+            msg_parts.append(
+                '⚠ 対象期間の自動補正/要確認あり — 変換メモシート「事業年度ウィンドウ」を確認'
             )
 
         status.status = '完了'

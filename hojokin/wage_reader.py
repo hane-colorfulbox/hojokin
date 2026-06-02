@@ -172,6 +172,10 @@ class WageEmployee:
     # 決定論で確定する。writer が和暦年月ヘッダーを事業年度順に並べるために使う。
     # None の場合（決算月不明・暦年運用）は暦年 1〜12月でフォールバックする。
     fiscal_window: list[tuple[int, int]] | None = None
+    # 事業年度ウィンドウ選択時の注意書き（年の自動補正・低カバレッジ等）。空なら問題なし。
+    # per-ledger の情報を全従業員に同値で載せ、賃金台帳作成タスクが変換メモ／ステータスに
+    # surfacing する用途に使う（R216 期間ズレのサイレント過少計上を可視化するため）。
+    fiscal_window_note: str = ''
 
     @property
     def is_full_year(self) -> bool:
@@ -1201,6 +1205,107 @@ def _build_calendar_arrays_recent(monthly_entries: list) -> tuple[list, list, li
     return wages, hours, days
 
 
+def _collect_present_yms(ai_data: list) -> set[tuple[int, int]]:
+    """全従業員の monthly エントリから (西暦年, 月) 集合を返す（年不明は除外）。"""
+    present: set[tuple[int, int]] = set()
+    for emp in ai_data or []:
+        if not isinstance(emp, dict):
+            continue
+        for e in emp.get('monthly') or []:
+            ym = _ai_entry_ym(e)
+            if ym is None:
+                continue
+            y, mo = ym
+            if y is not None:
+                present.add((y, mo))
+    return present
+
+
+def _window_ending(end_year: int, end_month: int) -> list[tuple[int, int]]:
+    """期末 (end_year, end_month) から事業年度12ヶ月を期首→期末順で返す。"""
+    end_total = end_year * 12 + (end_month - 1)
+    start_total = end_total - 11
+    return [((start_total + i) // 12, (start_total + i) % 12 + 1) for i in range(12)]
+
+
+def select_fiscal_window_from_data(
+    ai_data: list, fiscal_period_hint: str | None,
+) -> tuple[list[tuple[int, int]] | None, dict]:
+    """決算月（hint由来＝信頼）と台帳の実在年から、カバレッジ最大の事業年度12ヶ月を選ぶ。
+
+    fiscal_period_hint の **期末月** は決算月（ユーザー指定）として信頼するが、**期末年**は
+    台帳に実在する年（monthly[].ym の YYYY）から決め直す。これにより「決算月＋今日基準」で
+    組んだ窓が台帳の実データと1期ズレても（補助金申請が集中する期末〜申告期限の谷間で頻発）、
+    台帳側に追従して正しい12ヶ月を選べる。年が判別できない台帳ではヒント窓のまま返す。
+
+    タイブレーク: カバレッジ降順 → 最新年（直近事業年度）優先。
+    進行中の未完了FYは月が揃わずカバレッジが低いため自然に選ばれない。
+
+    Returns:
+        (fiscal_window or None, info)
+        info = {'end_month','hint_year','chosen_year','coverage',
+                'hint_coverage','has_year_data','shifted'}
+    """
+    base = resolve_fiscal_window(fiscal_period_hint)
+    if base is None:
+        return None, {}
+    hint_year, end_month = base[-1]  # 期末 = 決算月（信頼）/ 年は今日基準の推定
+    present = _collect_present_yms(ai_data)
+    info = {
+        'end_month': end_month, 'hint_year': hint_year, 'chosen_year': hint_year,
+        'coverage': 0, 'hint_coverage': 0, 'has_year_data': bool(present),
+        'shifted': False,
+    }
+    if not present:
+        # 台帳に西暦年が無い（ym=null 等）→ ヒント窓のまま（by_month_noyear で月割当）
+        return base, info
+    years = {y for (y, _m) in present}
+    # FY末年候補: 実在年とその +1（非12月決算は2暦年に跨るため）+ ヒント年
+    candidates = sorted(years | {y + 1 for y in years} | {hint_year})
+    best_key: tuple[int, int] | None = None
+    best: tuple[int, list[tuple[int, int]], int] | None = None
+    for cy in candidates:
+        win = _window_ending(cy, end_month)
+        cov = sum(1 for ym in win if ym in present)
+        if cy == hint_year:
+            info['hint_coverage'] = cov
+        key = (cov, cy)  # カバレッジ最大 → 同点なら最新年
+        if best_key is None or key > best_key:
+            best_key, best = key, (cy, win, cov)
+    chosen_year, chosen_win, cov = best  # type: ignore[misc]
+    info['chosen_year'] = chosen_year
+    info['coverage'] = cov
+    info['shifted'] = (chosen_year != hint_year)
+    return chosen_win, info
+
+
+def _format_window_note(info: dict) -> str:
+    """select_fiscal_window_from_data の info を人間向け注意書きに整形（空＝問題なし）。"""
+    if not info:
+        return ''
+    end_m = info.get('end_month')
+    notes: list[str] = []
+    if info.get('shifted'):
+        cy, hy = info['chosen_year'], info['hint_year']
+        win = _window_ending(cy, end_m)
+        period = f'{wareki_label(*win[0])}〜{wareki_label(*win[-1])}'
+        notes.append(
+            f'⚠ 対象年を自動補正: 決算月{end_m}月＋今日基準の推定では{hy}年期末でしたが、'
+            f'台帳の実データは{cy}年期末の事業年度（{period}）でした。'
+            f'台帳に合わせて{cy}年期末を採用しました。'
+            f'意図と異なる場合は決算月の指定と対象台帳を確認してください。'
+        )
+    cov = info.get('coverage', 0)
+    if info.get('has_year_data') and cov < 12:
+        win = _window_ending(info['chosen_year'], end_m)
+        period = f'{wareki_label(*win[0])}〜{wareki_label(*win[-1])}'
+        notes.append(
+            f'⚠ 対象事業年度（{period}）の12ヶ月のうち、台帳にデータが存在するのは{cov}ヶ月のみ。'
+            f'期間ズレ・月欠損の可能性があるため、PDF原本で対象期間を確認してください。'
+        )
+    return ' / '.join(notes)
+
+
 def _sum_window_bonuses(
     bonus_entries: list, fiscal_window: list[tuple[int, int]] | None,
 ) -> tuple[float, list[float]]:
@@ -1312,6 +1417,7 @@ def _validate_ai_employee(emp: dict) -> tuple[bool, str]:
 
 def _ai_data_to_wage_employees(
     ai_data: list[dict], fiscal_period_hint: str | None = None,
+    *, derive_year_from_data: bool = False,
 ) -> list[WageEmployee]:
     """AI抽出データを WageEmployee リストに変換（バリデーション付き）。
 
@@ -1320,13 +1426,26 @@ def _ai_data_to_wage_employees(
     集約してから旧スキーマ（monthly_wages[12] 等）に正規化する。
     旧スキーマ（monthly_wages を直接持つ）はそのまま処理（後方互換）。
 
+    derive_year_from_data=True（賃金台帳作成タスク）の場合、期末「年」を台帳の実在年から
+    決め直す（決算月は hint を信頼）。決算書を読まず今日基準で年を推定する作成タスクで、
+    台帳が1期ズレてもサイレント過少計上しないための補正。年補正・低カバレッジは
+    fiscal_window_note に載せて呼出側が surfacing する。
+    （申請書/給与計算タスクは決算書 fiscal_year_end が期末年の正なので False のまま据置。）
+
     労働時間が「ない / 異常に少ない（残業時間と誤認の疑い）」場合は、
     労働日数×8時間で補完する。役員は労働時間補完の対象外。
     """
     HOURS_PER_DAY = 8.0
     SUSPICIOUS_AVG_HOURS = 50.0  # 役員/パート以外で月平均がこれ未満なら誤認の疑い
 
-    fiscal_window = resolve_fiscal_window(fiscal_period_hint)
+    window_note = ''
+    if derive_year_from_data and fiscal_period_hint:
+        fiscal_window, _winfo = select_fiscal_window_from_data(ai_data, fiscal_period_hint)
+        window_note = _format_window_note(_winfo)
+        if window_note:
+            logger.warning(f'事業年度ウィンドウ選択: {window_note}')
+    else:
+        fiscal_window = resolve_fiscal_window(fiscal_period_hint)
     employees: list[WageEmployee] = []
     for i, emp in enumerate(ai_data):
         if not isinstance(emp, dict):
@@ -1460,6 +1579,7 @@ def _ai_data_to_wage_employees(
             annual_transport_allowance=atransport_val,
             annual_bonus=float(emp.get('annual_bonus') or 0.0),
             fiscal_window=fiscal_window,
+            fiscal_window_note=window_note,
         ))
     return employees
 
@@ -1470,6 +1590,7 @@ def read_wage_ledgers_with_ai(
     fiscal_period_hint: str | None = None,
     *,
     disable_image_fallback: bool = False,
+    derive_year_from_data: bool = False,
 ) -> list[WageEmployee]:
     """
     AI による賃金台帳読み取り。
@@ -1551,7 +1672,9 @@ def read_wage_ledgers_with_ai(
         logger.error(f'AI抽出例外: {e}', exc_info=True)
         return []
 
-    employees = _ai_data_to_wage_employees(ai_data, fiscal_period_hint)
+    employees = _ai_data_to_wage_employees(
+        ai_data, fiscal_period_hint, derive_year_from_data=derive_year_from_data,
+    )
     logger.info(
         f'AI抽出結果: 入力{len(ai_data)}名 → 妥当{len(employees)}名'
     )
@@ -1695,6 +1818,7 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
         ),
         annual_bonus=max(a.annual_bonus or 0.0, b.annual_bonus or 0.0),
         fiscal_window=a.fiscal_window or b.fiscal_window,
+        fiscal_window_note=a.fiscal_window_note or b.fiscal_window_note,
     )
 
 
@@ -1867,6 +1991,7 @@ def read_wage_ledgers(
     fiscal_period_hint: str | None = None,
     *,
     disable_image_fallback: bool = False,
+    derive_year_from_data: bool = False,
 ) -> list[WageEmployee]:
     """
     複数の賃金台帳ファイルを読み、同名の従業員をマージして返す。
@@ -1893,6 +2018,7 @@ def read_wage_ledgers(
             ai_employees = read_wage_ledgers_with_ai(
                 file_paths, extractor, fiscal_period_hint,
                 disable_image_fallback=disable_image_fallback,
+                derive_year_from_data=derive_year_from_data,
             )
             if ai_employees:
                 ai_employees = _dedupe_employees_by_normalized_name(ai_employees)
