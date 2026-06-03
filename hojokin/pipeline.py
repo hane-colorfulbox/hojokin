@@ -2318,6 +2318,36 @@ def run_bonus_wage_ledger_creation(
         return status
 
 
+def _bonus_period_shift_warning(
+    employees, fiscal_month_override: int | None,
+) -> str | None:
+    """支給日なし賞与 × 非暦年決算の賞与期間ズレ警告（③）。該当なければ None。
+
+    支給日（支給年月）の無い賞与は事業年度ウィンドウで絞り込めず、暦年ベースの年間賞与が
+    そのまま算入される（WageEmployee.bonus_undated_total > 0）。決算月が12月以外（非暦年）
+    だと対象事業年度とズレ、R216（給与支給総額）の賞与額が不正確になり得る。
+    支給日が原本に無いため自動補正はできず、人手確認を促す警告のみ返す。
+    """
+    undated = [
+        getattr(e, 'name', '?') for e in (employees or [])
+        if (getattr(e, 'bonus_undated_total', 0.0) or 0.0) > 0
+    ]
+    if not undated or fiscal_month_override == 12:
+        return None
+    month_label = (
+        f'{fiscal_month_override}月決算'
+        if fiscal_month_override else '決算月未指定'
+    )
+    return (
+        f'⚠ 賞与の対象期間に注意（{month_label}・非暦年）: '
+        f'{len(undated)}名の賞与に支給日（支給年月）が無く、'
+        '対象事業年度の12ヶ月で絞り込めていません'
+        '（暦年ベースの年間賞与をそのまま年間賞与として算入）。'
+        '対象事業年度内の賞与かを、賞与明細・勘定科目内訳明細書・PDF原本で'
+        f'確認してください。対象者: {undated}'
+    )
+
+
 def run_wage_ledger_conversion(
     resource_folder: Path,
     company_name: str,
@@ -2557,6 +2587,11 @@ def run_wage_ledger_conversion(
             note = getattr(e, 'fiscal_window_note', '') or ''
             if note and note not in window_notes:
                 window_notes.append(note)
+
+        # 賞与の期間ズレ警告（③）。支給日なし賞与×非暦年決算で R216 がズレ得る点を surface。
+        _bonus_note = _bonus_period_shift_warning(employees, fiscal_month_override)
+        if _bonus_note:
+            window_notes.append(_bonus_note)
 
         # テンプレートに書込
         write_result = write_wage_ledger_to_template(

@@ -214,6 +214,10 @@ class WageEmployee:
     # per-ledger の情報を全従業員に同値で載せ、賃金台帳作成タスクが変換メモ／ステータスに
     # surfacing する用途に使う（R216 期間ズレのサイレント過少計上を可視化するため）。
     fiscal_window_note: str = ''
+    # 支給日（支給年月）が読めず、事業年度ウィンドウで絞り込めないまま年間賞与に算入した
+    # 賞与額の合計（円）。年間集計表など支給日のない台帳で > 0 になる。非暦年決算では
+    # 暦年集計とのズレで R216 がズレ得るため、賃金台帳作成タスクが警告 surfacing に使う。
+    bonus_undated_total: float = 0.0
 
     @property
     def is_full_year(self) -> bool:
@@ -1679,6 +1683,7 @@ def _ai_data_to_wage_employees(
             annual_bonus=float(emp.get('annual_bonus') or 0.0),
             fiscal_window=fiscal_window,
             fiscal_window_note=window_note,
+            bonus_undated_total=float(sum(emp.get('_bonus_undated') or [])),
         ))
     return employees
 
@@ -2000,6 +2005,9 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
         annual_bonus=max(a.annual_bonus or 0.0, b.annual_bonus or 0.0),
         fiscal_window=a.fiscal_window or b.fiscal_window,
         fiscal_window_note=a.fiscal_window_note or b.fiscal_window_note,
+        bonus_undated_total=max(
+            a.bonus_undated_total or 0.0, b.bonus_undated_total or 0.0
+        ),
     )
 
 
