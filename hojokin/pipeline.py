@@ -126,6 +126,42 @@ def _parse_fiscal_end_from_filename(
     return None
 
 
+def _parse_fiscal_year_from_filename(name: str) -> int | None:
+    """ファイル名から決算期の「西暦年」だけを取り出す（順位付け専用）。失敗時 None。
+
+    `_parse_fiscal_end_from_filename` は月情報が無いと（fiscal_month_override 未指定時に）
+    None を返すが、同一会社内で「どちらがより新しい期か」を決めるには年だけで足りる。
+    「令和N年度」「RN年」「YYYY年度」のような月なしファイル名でも年を抽出し、
+    決算書ファイルの自動選択・UI 表示が前年度を誤選択しないようにする。
+    """
+    s = unicodedata.normalize('NFC', name)
+
+    def _valid_year(y: int) -> int | None:
+        return y if 1900 <= y <= 2100 else None
+
+    # 月ありで取れるならその年（期末年）を採用
+    full = _parse_fiscal_end_from_filename(s)
+    if full is not None:
+        return full[0]
+
+    # 月なしフォールバック（fiscal_month_override 不要・年のみ）
+    if _REIWA_GANNEN_NOMONTH_RE.search(s):
+        return _valid_year(2019)
+    m = _REIWA_NOMONTH_RE.search(s)
+    if m:
+        return _valid_year(2018 + int(m.group(1)))
+    m = _HEISEI_NOMONTH_RE.search(s)
+    if m:
+        return _valid_year(1988 + int(m.group(1)))
+    m = _RY_NOMONTH_RE.search(s)
+    if m:
+        return _valid_year(2018 + int(m.group(1)))
+    m = _YYYY_NOMONTH_RE.search(s)
+    if m:
+        return _valid_year(int(m.group(1)))
+    return None
+
+
 _WAGE_PERIOD_REIWA_RE = re.compile(
     r'R\s*(\d{1,2})\s*[\.\-_／/]\s*(\d{1,2})\s*[-〜~～ー]\s*R\s*(\d{1,2})\s*[\.\-_／/]\s*(\d{1,2})'
 )
@@ -547,6 +583,21 @@ class FileDetector:
                 logger.info(
                     f'同一期末年月のPL候補が{len(latest)}件あり → フル版優先で選択'
                 )
+            return _pick_full_version(latest)
+
+        # ---- ステップ2.5: 月情報なしファイル名（令和N年度 等）を年だけで順位付け ----
+        # 決算月未指定 + 月なし名でも、年で最新を選べる（mtime ガチャ回避）。
+        # 「令和6年度決算報告書」「令和7年度決算報告書」のような並びで前年度が
+        # 選ばれる事故を防ぐ。
+        year_pairs = [(p, _parse_fiscal_year_from_filename(p.name)) for p in pls]
+        with_year = [(p, y) for p, y in year_pairs if y is not None]
+        if with_year:
+            max_year = max(y for _, y in with_year)
+            latest = [p for p, y in with_year if y == max_year]
+            logger.info(
+                f'PL候補を決算年で順位付け（月情報なし）: 最新={max_year}年 → '
+                f'{[p.name for p in latest]}'
+            )
             return _pick_full_version(latest)
 
         # ---- ステップ3: フォールバック（mtime 最新）— 強警告 ----

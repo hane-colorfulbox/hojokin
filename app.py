@@ -1345,9 +1345,13 @@ def _auto_selected_for_display(category: str, recommended: list[str]) -> str | N
         return None
     if category == 'pl':
         try:
-            from hojokin.pipeline import _parse_fiscal_end_from_filename
+            from hojokin.pipeline import (
+                _parse_fiscal_end_from_filename,
+                _parse_fiscal_year_from_filename,
+            )
         except Exception:
             return recommended[0]
+        # 月ありで取れるものは (年,月) で最新を選ぶ
         with_date = [
             (name, _parse_fiscal_end_from_filename(name))
             for name in recommended
@@ -1355,6 +1359,14 @@ def _auto_selected_for_display(category: str, recommended: list[str]) -> str | N
         valid = [(n, ym) for n, ym in with_date if ym is not None]
         if valid:
             return max(valid, key=lambda t: t[1])[0]
+        # 「令和N年度」のような月なし名は年だけで順位付け（前年度を先頭に出さない）。
+        # pipeline の get_pl_latest（決算月指定時）の実選択と表示を一致させる。
+        with_year = [
+            (n, _parse_fiscal_year_from_filename(n)) for n in recommended
+        ]
+        valid_year = [(n, y) for n, y in with_year if y is not None]
+        if valid_year:
+            return max(valid_year, key=lambda t: t[1])[0]
     return recommended[0]
 
 
@@ -2396,4 +2408,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.40 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.41 | カラフルボックス株式会社')
