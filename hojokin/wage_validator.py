@@ -398,6 +398,14 @@ BONUS_OMISSION_TOLERANCE = 0.05
 # がこの値より小さければ「定額」と判定する
 DEFAULT_FLAT_CV_THRESHOLD = 0.05
 
+# C5（月給実値ズレ）の許容。PDF「総支給額(課税)」行と AI 月次値が、絶対額・相対比の
+# 両方でこれを超えて食い違ったら「同額連続月の取りこぼし/月ズレ」を疑い警告する。
+# 両方の閾値を満たす場合のみ警告するので、OCR・丸めの微差では誤検知しない。
+# 比較相手は課税ベース（monthly_taxable_totals）に限る。monthly_basic_pay（基本給）は
+# 諸手当を含まず AI の課税支給額と土俵が違うため、突合に使うと誤検知する。
+CELL_VALUE_ABS_TOLERANCE = 1000     # 円
+CELL_VALUE_REL_TOLERANCE = 0.01     # 1%
+
 
 def _name_match_key(name: str) -> str:
     """姓名の空白・記号差を吸収して比較用キーを返す。"""
@@ -453,6 +461,9 @@ def check_cell_level_consistency(
     c2_misplaced: list[str] = [] # 月給誤配置
     c3_bonus_lost: list[str] = []  # 賞与漏れ
     c4_flat_gap: list[str] = []  # 定額連続性の途切れ
+    c5_value_mismatch: list[str] = []  # 月給実値ズレ（同額連続月の取りこぼし/月ズレ）
+    matched_count = 0          # PDF と氏名照合できた従業員数
+    c5_checked_any = False     # 1人でも課税実値で突合できたか
 
     for emp in ledger_employees:
         name = _emp_get(emp, 'name') or ''
@@ -460,6 +471,7 @@ def check_cell_level_consistency(
         pe = pdf_by_key.get(key)
         if pe is None:
             continue  # PDF側に該当氏名が無い場合は別チェックの管轄
+        matched_count += 1
 
         wages = _emp_get(emp, 'monthly_wages') or []
         if len(wages) != 12:
@@ -563,6 +575,31 @@ def check_cell_level_consistency(
                                 f'他月は {int(mean):,}円前後で定額のため、漏れの可能性'
                             )
 
+        # C5: 月給実値ズレ（同額連続月の取りこぼし/月ズレ検知）
+        # PDF「総支給額(課税)」に月別実値があるのに、AI 出力の同月セルが絶対額・相対比とも
+        # 許容超で食い違う場合に警告。「8月と9月が同額のとき片方に他月の値が混入し以降
+        # ズレる」抽出層バグ（Sonnet の隣接月アンチ重複バイアス）を捕捉する。
+        # 賞与支給月は monthly セルへの賞与加算有無で正当にズレ得るため対象外（C3 が担当）。
+        # 基本給(monthly_basic_pay)は課税と土俵が違うので突合に使わない（諸手当ぶん誤検知）。
+        for mon in source_months:
+            if not (1 <= mon <= 12) or mon in bonus_months:
+                continue
+            pdf_val = taxable.get(mon)
+            if not pdf_val or pdf_val <= 0:
+                continue  # 課税実値が取れない月は突合不可（C1/別チェックの管轄）
+            ai_val = wages[mon - 1]
+            if ai_val is None or ai_val <= 0:
+                continue  # 空欄は C1 が担当
+            c5_checked_any = True
+            diff = abs(ai_val - pdf_val)
+            if (diff > CELL_VALUE_ABS_TOLERANCE
+                    and diff / pdf_val > CELL_VALUE_REL_TOLERANCE):
+                c5_value_mismatch.append(
+                    f'  - {name}（{emp_type}）: {mon}月セルが AI={ai_val:,.0f}円 / '
+                    f'PDF総支給額(課税)={pdf_val:,.0f}円 と相違。'
+                    f'同額連続月の取りこぼし等で月がズレていないか原本照合してください'
+                )
+
     # 結果整形
     results: list[str] = []
     if c1_missing:
@@ -589,6 +626,22 @@ def check_cell_level_consistency(
             ' ⚠ セル単位整合性: 定額連続性の途切れ '
             f'{len(c4_flat_gap)}件 — PDF未パース時のフォールバック検知\n'
             + '\n'.join(c4_flat_gap)
+        )
+    if c5_value_mismatch:
+        results.append(
+            ' ⚠ セル単位整合性: 月給実値ズレの可能性 '
+            f'{len(c5_value_mismatch)}件 — 同額連続月の取りこぼし/月ズレを疑います。'
+            'PDF原本の該当月を必ず照合してください\n'
+            + '\n'.join(c5_value_mismatch)
+        )
+    # 実値突合が1人もできなかった（PDFから課税月額を取得できない＝画像/手書きや
+    # 未対応レイアウト）場合は、月ズレ検知が効いていない旨を明示する（無音の取りこぼし防止）。
+    if matched_count > 0 and not c5_checked_any:
+        results.append(
+            ' ⚠ セル単位整合性: PDFから月別の総支給額(課税)を取得できず、'
+            '月別実値突合（月ズレ検知）が実施できませんでした。'
+            '画像/手書きPDFや未対応レイアウトの可能性があるため、'
+            '同額が連続する月を中心に原本照合を推奨します'
         )
     return results
 
