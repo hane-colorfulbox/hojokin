@@ -1575,7 +1575,7 @@ st.markdown(
 # Skill 本体は .claude/skills/wagebook-convert/ で管理（git）、配布は ZIP 経由（Drive）。
 # 過去事故：暦年と事業年度が混在した独自フォーマットで作って R215/R216 が誤集計された
 # Skill ZIP の更新日（build_skill_zip.py 実行後に手動更新）
-_WAGEBOOK_SKILL_VERSION = '2026-06-02'
+_WAGEBOOK_SKILL_VERSION = '2026-06-04'
 # Drive 共有リンク（wagebook-convert.zip を配置した Drive ファイル URL）
 # 配布先: マイドライブ/補助金ツール/wagebook-convert.zip （カラフルボックス株式会社グループ閲覧可）
 _WAGEBOOK_SKILL_ZIP_URL = 'https://drive.google.com/file/d/1VxD0y4l7DPb9qK7eDfOpWUDQvMZ9eBBF/view?usp=sharing'
@@ -2408,4 +2408,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.43 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.44 | カラフルボックス株式会社')
