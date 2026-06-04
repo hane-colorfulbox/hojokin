@@ -16,6 +16,7 @@
     各行の Σ(G:R)+T、月別縦計、雇用形態内訳、各 FLAG、末尾に PASS/要対応 件数。
 終了コード: 0=要対応なし / 1=要対応あり（FAIL or 要確認が残っている） / 2=ファイル/構造エラー。
 """
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -58,6 +59,23 @@ def _median(xs):
         return None
     mid = n // 2
     return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def _extract_fiscal_month(ws):
+    """ヘッダー注記（B1〜B4 等）から「（N月決算）」を抽出。見つからなければ None。
+    SKILL.md §4 で B1/B3 に『…（N月決算）』を必ず書く規約。FLAG-T の発火判定に使う。"""
+    texts = []
+    for r in range(1, HEADER_ROW):       # 1〜4 行目
+        for c in range(2, 5):            # B, C, D 列
+            v = ws.cell(r, c).value
+            if v:
+                texts.append(str(v))
+    m = re.search(r'(\d{1,2})\s*月決算', ' '.join(texts))
+    if m:
+        mm = int(m.group(1))
+        if 1 <= mm <= 12:
+            return mm
+    return None
 
 
 def main(argv):
@@ -178,6 +196,29 @@ def main(argv):
     else:
         print('  なし')
     print()
+
+    # --- 賞与の年度帰属（非暦年決算ガード §4.1.1-a）FLAG-T ---
+    bonus_rows = [e for e in rows if e['T'] is not None and e['T'] > 0]
+    if bonus_rows:
+        fiscal_month = _extract_fiscal_month(ws)
+        print('[FLAG-T 賞与の年度帰属]（T列に年間賞与がある行。非暦年決算の窓内/窓外確定）')
+        if fiscal_month is not None and fiscal_month != 12:
+            print(f'  決算月={fiscal_month}月（非暦年）／T列あり {len(bonus_rows)}名。'
+                  '台帳に賞与の支給月が無ければ回数→月を推測確定しないこと。')
+            print('  → 暫定なら B2＋完了報告に「含めた回/除外した回」＋要確認（支給年月 or '
+                  '勘定科目内訳明細書＝法人R216の正式ソース）を明記（§4.1.1-a）。')
+            confirm.append(
+                f'賞与年度帰属: 決算月{fiscal_month}月（非暦年）でT列あり'
+                '→支給月で確定 or 暫定＋要顧客確認を明記（§4.1.1-a）'
+            )
+        elif fiscal_month is None:
+            print(f'  ⚠ 決算月をヘッダー注記から検出できず（B1/B3 に「（N月決算）」が無い）／'
+                  f'T列あり {len(bonus_rows)}名。')
+            print('  → 決算月が12月以外なら賞与支給月ベースで窓内か要確認（§4.1.1-a）。'
+                  'B1/B3 に「（N月決算）」を入れると本チェックが自動で効く（advisory・exit影響なし）。')
+        else:  # fiscal_month == 12
+            print('  決算月=12月（事業年度＝暦年）。令和N年の賞与＝当年度で帰属ズレなし（ガード対象外）。')
+        print()
 
     # --- ④-a 役員ラベル未正規化（FAIL） ---
     officer_residue = [
