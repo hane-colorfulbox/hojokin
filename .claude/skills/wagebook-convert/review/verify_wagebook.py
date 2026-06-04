@@ -18,6 +18,7 @@
 """
 import re
 import sys
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -76,6 +77,31 @@ def _extract_fiscal_month(ws):
         if 1 <= mm <= 12:
             return mm
     return None
+
+
+def _header_is_clean_month(text) -> bool:
+    """月見出しが『ツールが確実に読める規格どおりの形』か判定（FLAG-H 用）。
+    許容: 'N月'(注記なし) / '令和N年M月' / '平成N年M月' / 'RN.M' / 'YYYY年M月' / 'YYYY/MM'。
+    '1月(R7.1)' のような注記付きは False（末尾に余計な文字＝規格外）。
+    ※ ツール側 parse_ym_header は注記を許容するよう堅牢化済みだが、本ゲートは
+      『規格どおりプレーン/和暦か』を強制し、旧ツール・他リーダーでの 0名誤読を pre-ship で防ぐ。"""
+    if text is None:
+        return False
+    s = unicodedata.normalize('NFKC', str(text))
+    s = re.sub(r'[\s　]+', '', s)
+    if not s:
+        return False
+    if re.fullmatch(r'令和\d+年\d{1,2}月', s):
+        return True
+    if re.fullmatch(r'平成\d+年\d{1,2}月', s):
+        return True
+    if re.fullmatch(r'[RH]\d+[./-]\d{1,2}月?', s, re.IGNORECASE):
+        return True
+    if re.fullmatch(r'\d{4}[年/\-.]\d{1,2}月?', s):
+        return True
+    if re.fullmatch(r'\d{1,2}月', s):
+        return True
+    return False
 
 
 def main(argv):
@@ -242,6 +268,25 @@ def main(argv):
         for e in part_no_hours:
             print(f"  行{e['row']} {e['name']}: 雇用形態=「{e['type']}」だがE列空")
         fail.append(f'パートでE列空 {len(part_no_hours)}件')
+        print()
+
+    # --- FLAG-H 月ヘッダー規格外（注記付き等。ツールが月列を検出できず0名誤読する事故の pre-ship 検知）---
+    bad_headers = []
+    for m in range(12):
+        col = COL_MONTH_FIRST + m
+        htext = ws.cell(HEADER_ROW, col).value
+        col_has_data = any(e['months'][m] is not None for e in rows)
+        if htext is None or str(htext).strip() == '':
+            if col_has_data:
+                bad_headers.append((col, '(見出し空欄・データ有り)'))
+        elif not _header_is_clean_month(htext):
+            bad_headers.append((col, repr(str(htext))))
+    if bad_headers:
+        print('[FAIL FLAG-H 月ヘッダーが規格外]（注記付き等。ツールが月列を検出できず0名誤読の恐れ）')
+        for col, why in bad_headers:
+            print(f"  {chr(64 + col)}5: {why} → プレーン「N月」or 和暦「令和N年M月」へ。"
+                  '事業年度マッピングは B2/B3 注記に書く（§0.0／SKILL.md §1🔴）')
+        fail.append(f'月ヘッダー規格外 {len(bad_headers)}件（FLAG-H）')
         print()
 
     # --- 0混入（要確認: 空欄であるべき箇所の0） ---

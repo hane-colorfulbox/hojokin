@@ -169,7 +169,12 @@ def parse_ym_header(text) -> tuple[int | None, int] | None:
     m = re.fullmatch(r'(\d{4})(\d{2})', s)
     if m and 1 <= int(m.group(2)) <= 12:
         return int(m.group(1)), int(m.group(2))
-    m = re.fullmatch(r'(\d{1,2})月', s)
+    # 先頭一致（fullmatch ではなく match）で末尾の注記を許容する。
+    # 例: スキルがヘッダーを '1月\n(R7.1)' のように注記付きで出しても、空白除去後
+    # '1月(R7.1)' の先頭 '1月' を月として拾える（fullmatch だと注記で None になり、
+    # ツールが月列を検出できず台帳を0名と誤読する事故が起きた）。和暦/西暦/RN.M は
+    # 上で先に評価済みなので、ここに来るのは素の 'N月[...]' 系のみ。
+    m = re.match(r'(\d{1,2})月', s)
     if m and 1 <= int(m.group(1)) <= 12:
         return None, int(m.group(1))
     return None
