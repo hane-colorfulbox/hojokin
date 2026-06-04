@@ -1580,6 +1580,36 @@ _WAGEBOOK_SKILL_VERSION = '2026-06-04'
 # 配布先: マイドライブ/補助金ツール/wagebook-convert.zip （カラフルボックス株式会社グループ閲覧可）
 _WAGEBOOK_SKILL_ZIP_URL = 'https://drive.google.com/file/d/1VxD0y4l7DPb9qK7eDfOpWUDQvMZ9eBBF/view?usp=sharing'
 with st.expander(
+    '🔧 はじめての方へ：CC環境セットアップ（Python・1回だけ）',
+    expanded=False,
+):
+    st.markdown(
+        'スキルを使う前に、**このPCで1回だけ**実施してください。'
+        '手元の Claude Code（CC）に下のプロンプトを貼り付けて実行するだけです。'
+        'Python 3.8 以上が無ければ CC が導入を試みます。\n\n'
+        '※ スキル本体（ZIP）を更新しても、このセットアップの再実行は不要です。'
+    )
+    st.code(
+        '【補助金・賃金台帳スキル：CC環境の初回セットアップ（このPCで1回だけ）】\n'
+        'あなた（Claude Code）は、賃金台帳変換スキルを動かす環境をこのPCに用意します。\n'
+        '順に実行し、最後に結果だけ報告してください。\n'
+        '\n'
+        '1. Python を探す：`python --version` / `python3 --version`、WSLがあれば `wsl python3 --version` も試す。\n'
+        '   Python 3.8 以上 が見つかればそれを使う（新しいほど良い）。\n'
+        '2. 3.8以上が見つからない場合は導入する：\n'
+        '   - Windowsネイティブ：`winget install -e --id Python.Python.3.12` を実行し、入れ直して再確認。\n'
+        '   - winget が無い/失敗する場合：python.org から Python 3.12 を入れて再実行する旨をユーザーに伝えて停止。\n'
+        '   - WSLのみの環境：WSL側の python3 が 3.8 以上ならそれを使う。\n'
+        '3. openpyxl を導入：見つかった Python で `python -m pip install openpyxl`\n'
+        '   （WSLの python3 を使う場合は `pip3 install openpyxl --break-system-packages`）。\n'
+        '4. 動作確認：`python -c "import openpyxl; print(\'OK\', openpyxl.__version__)"`（使う Python に合わせる）。\n'
+        '5. 報告：使った Python のパスとバージョン、openpyxl のバージョン、最終結果（OK/NG）。\n'
+        '\n'
+        '※ これは1回だけ。スキル本体（wagebook-convert.zip）を更新しても、このセットアップの再実行は不要です。',
+        language='markdown',
+    )
+
+with st.expander(
     '📘 賃金台帳の作成手順（CC向け Skill） — 賃金台帳を作る/直すときはここを確認',
     expanded=False,
 ):
@@ -1596,6 +1626,7 @@ with st.expander(
     )
 
     st.markdown('### 🔧 初回セットアップ（1回だけ実施）')
+    st.markdown('※ 先に上の「🔧 はじめての方へ：CC環境セットアップ（Python）」を1回済ませてください。')
     st.markdown(
         f'1. [`wagebook-convert.zip` をダウンロード]({_WAGEBOOK_SKILL_ZIP_URL})\n'
         '2. ZIP を展開し、フォルダ `wagebook-convert/` を以下に配置：\n'
@@ -1638,11 +1669,11 @@ with st.expander(
 
     st.warning(
         '**変換結果がおかしい／Skill が起動しないとき**\n\n'
-        '1. まず Skill を入れ直してみてください。上の「初回セットアップ」のリンクから '
-        '`wagebook-convert.zip` をもう一度ダウンロードし、`wagebook-convert/` を上書きして '
-        'Claude Code を再起動。毎回更新する必要はありませんが、不具合のときは「手元が古い」可能性が高いので、まずこれを試します'
-        f'（最新版: {_WAGEBOOK_SKILL_VERSION}）。\n'
-        '2. 入れ直してもまだおかしいときは、羽根に共有してください。'
+        f'1. **まず手元の Skill が最新版（{_WAGEBOOK_SKILL_VERSION}）か確認してください。** '
+        '古ければ、上の「初回セットアップ」のリンクから `wagebook-convert.zip` をもう一度ダウンロードし、'
+        '`wagebook-convert/` を上書きして Claude Code を再起動。'
+        '不具合のときは「手元が古い」可能性が高いので、まずこれを試します。\n'
+        '2. **最新版でもまだおかしいときは、羽根に共有してください。** '
         '会社名・症状（例：給与支給総額が通勤手当ぶん少ない／人数が多すぎる 等）・CC が出力した Excel を添えてください。\n\n'
         '※ 数字が合わない出力をそのまま申請に使わないでください。迷ったら止めて共有が正解です。'
         '（共有する賃金台帳・Excel は顧客データを含むので、社内の安全な経路で）'
@@ -2408,4 +2439,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.45 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.46 | カラフルボックス株式会社')
