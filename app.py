@@ -1632,6 +1632,9 @@ with st.expander(
         '2. ZIP を展開し、フォルダ `wagebook-convert/` を以下に配置：\n'
         '   - Windows: `C:\\\\Users\\\\<ユーザー名>\\\\.claude\\\\skills\\\\wagebook-convert\\\\`\n'
         '   - macOS: `~/.claude/skills/wagebook-convert/`\n'
+        '   - **`.claude` の下に `skills` フォルダが無ければ、自分で作成してください**'
+        '（初めての方は無いのが普通です）。`skills` の中に展開した `wagebook-convert/` を丸ごと置き、'
+        '`...\\\\skills\\\\wagebook-convert\\\\SKILL.md` の形になれば配置完了です。\n'
         '3. Claude Code を再起動\n'
         '4. CC に `/wagebook-convert` と打って Skill 名が候補に出れば成功\n\n'
         f'**最新版: {_WAGEBOOK_SKILL_VERSION}**（手元の Skill が古い場合は再ダウンロードして上書き）'
@@ -2437,4 +2440,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.47 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.48 | カラフルボックス株式会社')
