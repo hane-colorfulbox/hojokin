@@ -89,6 +89,37 @@ def _extract_with_pymupdf(pdf_bytes: bytes) -> str:
     return '\n'.join(parts)
 
 
+def _extract_with_pdfplumber_for_layout(pdf_bytes: bytes) -> str:
+    """layout parser 専用: テーブルTSV に加えて各ページの本文テキストも付与する。
+
+    `_extract_with_pdfplumber` はテーブル検出時にページ本文（`氏名:` ヘッダ等）を捨てる。
+    給与計算ソフトの「1人2ページ（支給明細＋控除明細）」型では、支給明細ページの
+    氏名行が table の外に出ているとそのページごと脱落し、月別の課税支給合計が
+    取得できず月ズレ検証が無効化される事故があった（実案件A）。
+    本関数はテーブルTSV（構造化された月列・課税支給合計の取得用）を先に置き、
+    その後に `--- page text ---` としてページ本文（氏名抽出用）を必ず付ける。
+    月列・課税支給合計の解析はテーブルTSV側を優先（先に出現）するため、本文を後ろに置く。
+    この table-aware text を消費するのは wage_pdf_layout_parser のみ（AI抽出経路には影響しない）。
+    """
+    import pdfplumber
+
+    parts: list[str] = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for i, page in enumerate(pdf.pages, 1):
+            parts.append(f'===== page {i} =====')
+            tables = page.extract_tables()
+            if tables:
+                for ti, table in enumerate(tables, 1):
+                    parts.append(f'--- table {ti} ---')
+                    parts.append(_table_to_tsv(table))
+            # テーブル有無に関わらずページ本文も付与する（氏名ヘッダ回収のため）。
+            text = page.extract_text() or ''
+            if text.strip():
+                parts.append('--- page text ---')
+                parts.append(text)
+    return '\n'.join(parts)
+
+
 def extract_pdf_text_table_aware(pdf_bytes: bytes) -> str:
     """PDF をテーブル構造を保ったテキストに変換する（Document AI は使わない）。
 
@@ -108,7 +139,7 @@ def extract_pdf_text_table_aware(pdf_bytes: bytes) -> str:
         取得できなかった場合は空文字。
     """
     try:
-        result = _extract_with_pdfplumber(pdf_bytes)
+        result = _extract_with_pdfplumber_for_layout(pdf_bytes)
         if result and result.strip():
             return result
     except Exception as e:

@@ -830,7 +830,6 @@ def run_application_transfer(
             )
 
         # AI 生成の事業内容の文字数チェック（240〜255文字が望ましい）
-        # 255超は申請書セルで切り詰められるため、Sonnet で N 案生成 → 文字数で機械選択する。
         # フロー: AI候補採用 / 機械削除フォールバック / 失敗（原文残し）の3パターンで警告分岐。
         biz_desc_warning = ''
         biz_desc = (extraction.ai_judgment.business_description or '').strip()
@@ -871,11 +870,37 @@ def run_application_transfer(
                     )
                     logger.warning(f'事業内容の自動短縮に失敗: {n_orig}文字のまま残置')
             elif n_orig < 240:
-                biz_desc_warning = (
-                    f' ⚠ 事業内容が短すぎます（{n_orig}文字 / 推奨240〜255文字）。'
-                    f'4要素（現状・課題・解決策・期待効果）が十分書き切れているか、'
-                    f'ヒアリング情報を追記して厚みを出してください。'
-                )
+                # 240字未満は Opus(writing_model) で 4要素を厚くして 240〜252 字に増量する。
+                # 成否で >255 短縮と同じ3パターン警告構造に揃える。
+                result = None
+                if extractor is not None:
+                    try:
+                        result = extractor.expand_business_description(biz_desc)
+                    except Exception as e:
+                        logger.warning(f'事業内容の自動増量に失敗（警告にフォールバック）: {e}', exc_info=True)
+                        result = None
+
+                if result and result.text and result.source == 'ai':
+                    extraction.ai_judgment.business_description = result.text
+                    biz_desc_warning = (
+                        f' ℹ 事業内容が短め（原文{n_orig}文字）だったため、AI で再生成し'
+                        f'4要素を厚くした案（{result.length}文字）を採用しました。'
+                        f'提出前に内容を必ず目視確認してください。'
+                    )
+                    logger.warning(f'事業内容を自動増量(AI採用): {n_orig}文字 → {result.length}文字')
+                elif result and result.text and result.source == 'mechanical':
+                    extraction.ai_judgment.business_description = result.text
+                    biz_desc_warning = (
+                        f' ℹ 事業内容が短め（原文{n_orig}文字）だったため増量し、'
+                        f'{result.length}文字に調整しました。提出前に内容を必ず目視確認してください。'
+                    )
+                    logger.warning(f'事業内容を自動増量(機械調整): {n_orig}文字 → {result.length}文字')
+                else:
+                    biz_desc_warning = (
+                        f' ⚠ 事業内容が短すぎます（{n_orig}文字 / 推奨240〜255文字）。'
+                        f'4要素（現状・課題・解決策・期待効果）が十分書き切れているか、'
+                        f'ヒアリング情報を追記して厚みを出してください。'
+                    )
 
         # 賃金台帳に PDF がアップロードされた場合の警告
         # 2026-05 方針: 賃金台帳は Excel/CSV のみ受け付ける。
@@ -2348,6 +2373,82 @@ def _bonus_period_shift_warning(
     )
 
 
+def _recon_name_key(name: str) -> str:
+    """氏名照合キー: NFKC正規化＋空白除去。"""
+    return re.sub(r'\s+', '', unicodedata.normalize('NFKC', str(name or '')))
+
+
+def _reconcile_monthly_with_layout(employees, pdf_layout) -> list[str]:
+    """AI抽出の月配置を、PDFから決定論的に読んだ実列で補正する（落とし穴①の根治）。
+
+    給与ソフトの「N月度（締め期間＝前月／末締め翌月払い）」レイアウトでは、AIが締め期間を
+    勤務月と解釈して全体が1ヶ月ズレ、事業年度ウィンドウで境界月が脱落 → 令和N年12月が空 →
+    全員「全月在籍でない」と誤判定され R216/R215 が 0 になる事故があった（実案件A）。
+    決定論パーサー(`wage_pdf_layout_parser`)は「N月度」を月番号（度ラベル＝支給サイクル＝決算書
+    と一致）で読むので、その月別課税支給合計を「月配置の正解」として AI 出力を上書き補正する。
+
+    安全ゲート（誤補正＝別バグ混入の防止）:
+      - 氏名一致する従業員のみ。
+      - 決定論側の埋まり月数 >= AI側の埋まり月数（決定論が同等以上に揃っている）。
+      - AIの非空値が決定論値の部分多重集合（＝同じ金額群＝純粋な配置ズレと確認できるときだけ上書き）。
+        決定論が別年度・誤読で異なる値を持つ場合は上書きしない（AIのまま＋要確認）。
+
+    Returns:
+        補正・要確認のメモ文字列リスト（変換メモ／警告に載せる）。employees は in-place 補正。
+    """
+    if not employees or not pdf_layout:
+        return []
+    from collections import Counter
+
+    by_name: dict[str, object] = {}
+    for p in pdf_layout:
+        key = _recon_name_key(getattr(p, 'name', ''))
+        if key and key not in by_name:
+            by_name[key] = p
+
+    corrected: list[str] = []
+    unverified: list[str] = []
+    for e in employees:
+        name = getattr(e, 'name', '') or ''
+        ai = list(getattr(e, 'monthly_wages', []) or [])
+        if len(ai) != 12:
+            continue
+        p = by_name.get(_recon_name_key(name))
+        det_map = dict(getattr(p, 'monthly_taxable_totals', {}) or {}) if p else {}
+        det = [det_map.get(m) for m in range(1, 13)]
+        det_count = sum(1 for v in det if v)
+        ai_count = sum(1 for v in ai if v)
+        if det_count == 0:
+            if ai_count:
+                unverified.append(name)  # 決定論で読めず（極小ページ等）。AIのまま要確認。
+            continue
+        det_norm = [int(v) if v else None for v in det]
+        ai_norm = [int(v) if v else None for v in ai]
+        if det_norm == ai_norm:
+            continue  # 既に一致。補正不要。
+        subset = not (Counter(v for v in ai_norm if v) - Counter(v for v in det_norm if v))
+        if det_count >= ai_count and subset:
+            e.monthly_wages = [float(v) if v else None for v in det]
+            corrected.append(name)
+        else:
+            unverified.append(name)  # 値が食い違う＝純粋なズレでない → 上書きせず要確認。
+
+    notes: list[str] = []
+    if corrected:
+        notes.append(
+            f'✅ 月配置をPDF実列で自動補正: {len(corrected)}名'
+            '（AIの月ズレを決定論パーサーの月別課税支給合計で修正。'
+            f'末締め翌月払い等の「N月度」レイアウト対策）: {corrected}'
+        )
+    if unverified:
+        notes.append(
+            f'⚠ 月配置の決定論照合ができなかった: {len(unverified)}名'
+            '（極小ページ/値不一致）。PDF原本で月配置を確認してください: '
+            f'{unverified}'
+        )
+    return notes
+
+
 def run_wage_ledger_conversion(
     resource_folder: Path,
     company_name: str,
@@ -2557,7 +2658,15 @@ def run_wage_ledger_conversion(
                     )
 
             if pdf_layout_all:
-                # AI 抽出結果（WageEmployee dataclass）を validator が読める dict 列に正規化
+                # 月配置の自己補正（決定論実列で AI の月ズレを直す）。employees を in-place 補正。
+                # 「N月度＋締め前月」等のレイアウトで R216/R215 が0になる事故の根治（法人・個人共通）。
+                correction_notes = _reconcile_monthly_with_layout(
+                    employees, pdf_layout_all,
+                )
+                if correction_notes:
+                    logger.info('月配置 自己補正:\n' + '\n'.join(correction_notes))
+
+                # AI 抽出結果（補正後）を validator が読める dict 列に正規化して整合性チェック
                 emp_dicts = [
                     {
                         'name': getattr(e, 'name', '') or '',
@@ -2569,6 +2678,8 @@ def run_wage_ledger_conversion(
                 cell_consistency_warnings = check_cell_level_consistency(
                     emp_dicts, pdf_layout_all,
                 )
+                # 補正メモを先頭に載せる（人手チェック用の変換メモへ）
+                cell_consistency_warnings = correction_notes + cell_consistency_warnings
                 if cell_consistency_warnings:
                     logger.warning(
                         f'セル単位整合性チェック: {len(cell_consistency_warnings)}件の警告\n'

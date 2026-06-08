@@ -116,7 +116,7 @@ def _split_pages(pdf_text: str) -> list[tuple[int, str]]:
 def _extract_name_from_page(page_text: str) -> str | None:
     """ページから氏名を抽出する。
 
-    レイアウト1（森開発系）: 「役 職\t社員\t\t佐⽵ 倫尚(No.000002)」
+    レイアウト1（実案件B系）: 「役 職\t社員\t\t山田 太郎(No.000002)」
     レイアウト2（給与計算ソフト系）: 「氏名: 田中 太郎」
     """
     for raw_line in page_text.splitlines():
@@ -250,6 +250,50 @@ def _label_in_line(label: str, line: str) -> bool:
     return norm_label in norm_line
 
 
+def _cell_to_int(cell: str) -> int | None:
+    """タブ区切りセルを整数に。空セル・非数値は None（その月は支給なし＝空欄）。"""
+    s = re.sub(r'[\s,]', '', _normalize(cell))
+    if s.isdigit() and len(s) >= 4:  # 4桁以上=金額（日付・コードを除外）
+        return int(s)
+    return None
+
+
+def _align_tabbed_row(
+    raw_line: str, n_cols: int, label_candidates: Iterable[str],
+) -> dict[int, int] | None:
+    """タブ区切りの金額行を「列位置を保ったまま」月Indexに割り付ける。
+
+    `_extract_numbers` は空セルを潰して詰めてしまい、中途月のある行（パート・
+    途中入退社）で月ズレを起こす。table-aware TSV はタブで列位置を保持しているので、
+    タブ分割し、ラベルセル（「課税支給合計」等）より後ろのセルを空セルも含めて
+    位置対応させる（落とし穴①対策・§1.1.0）。先頭に空セルや見出しセルが付く
+    レイアウト（例: 「\t総支給額(課税)\t…」）にも対応するため、ラベルセルの位置を探す。
+
+    Returns:
+        {0始まりの列Index: 金額} or 整列できなければ None（呼出し側でフォールバック）。
+    """
+    if '\t' not in raw_line:
+        return None
+    cells = raw_line.split('\t')
+    # ラベルを含むセルの位置を探し、その後ろを値セルとする
+    label_idx = None
+    for i, c in enumerate(cells):
+        if any(_label_in_line(lbl, c) for lbl in label_candidates):
+            label_idx = i
+            break
+    if label_idx is None:
+        return None
+    vals = [_cell_to_int(c) for c in cells[label_idx + 1:]]
+    # 末尾の合計列を判定して除外（本体の和に一致するとき）
+    if len(vals) == n_cols + 1 and vals[-1] is not None:
+        body = [v for v in vals[:-1] if v is not None]
+        if body and abs(sum(body) - vals[-1]) <= 2:
+            vals = vals[:-1]
+    if len(vals) < n_cols:
+        return None
+    return {idx: v for idx, v in enumerate(vals[:n_cols]) if v is not None}
+
+
 def _extract_monthly_amounts(
     page_text: str,
     month_columns: list[int],
@@ -258,30 +302,35 @@ def _extract_monthly_amounts(
 ) -> dict[int, int]:
     """月分ヘッダの直下から、指定ラベル行の値を月別 dict にする。
 
-    ヘッダ列数と一致しない場合は、最初のN個を月に割り当て、合計列が末尾なら除外する。
+    密な行（全月に値）は従来どおり数値抽出で位置対応（既存挙動を維持）。
+    数値が列数に満たない＝空セルのある中途月行のみ、タブ整列で列位置を復元する
+    （空セルを潰して詰める事故＝月ズレを防ぐ。§1.1.0）。
     """
     if not month_columns or header_line_index is None:
         return {}
     lines = page_text.splitlines()
-    result: dict[int, int] = {}
+    n_cols = len(month_columns)
     for j in range(header_line_index + 1, min(header_line_index + 80, len(lines))):
-        line = _normalize(lines[j])
+        raw = lines[j]
+        line = _normalize(raw)
         if not any(_label_in_line(lbl, line) for lbl in label_candidates):
             continue
         nums = _extract_numbers(line)
-        if not nums:
-            continue
-        n_cols = len(month_columns)
-        if len(nums) == n_cols + 1:
-            # 末尾が合計列 → 除外
-            if abs(sum(nums[:-1]) - nums[-1]) <= 2:
-                nums = nums[:-1]
+        # 末尾が合計列なら除外
+        if len(nums) == n_cols + 1 and abs(sum(nums[:-1]) - nums[-1]) <= 2:
+            nums = nums[:-1]
+        # 密な行（ちょうど列数）は位置対応で確定（既存レイアウトの挙動を維持）
+        if len(nums) == n_cols:
+            return {mon: nums[idx] for idx, mon in enumerate(month_columns)}
+        # 空セルで数値が欠ける中途月行 → タブ整列で列位置を復元
+        aligned = _align_tabbed_row(raw, n_cols, label_candidates)
+        if aligned is not None:
+            return {month_columns[idx]: v for idx, v in aligned.items()}
+        # 最終手段: 数値が列数以上あれば先頭から割当（旧フォールバック）
         if len(nums) >= n_cols:
-            for idx, mon in enumerate(month_columns):
-                result[mon] = nums[idx]
-        # 一度マッチしたら抜ける（同名ラベルが複数あっても先頭優先）
-        return result
-    return result
+            return {mon: nums[idx] for idx, mon in enumerate(month_columns)}
+        return {}
+    return {}
 
 
 def _parse_employee_page(
@@ -323,7 +372,7 @@ def _normalize_name_key(name: str) -> str:
 def _merge_employees(emps: list[PdfEmployee]) -> list[PdfEmployee]:
     """同一氏名（空白除去で一致）のページを統合する。
 
-    月給ページと賞与ページが分離しているレイアウト（森開発系）に必要。
+    月給ページと賞与ページが分離しているレイアウト（実案件B系）に必要。
     """
     merged: dict[str, PdfEmployee] = {}
     order: list[str] = []
