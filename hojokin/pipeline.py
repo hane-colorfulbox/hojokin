@@ -1006,6 +1006,10 @@ def run_application_transfer(
         pl_accounting_warning = _check_pl_accounting_consistency(extraction.financial)
         # 業種コードのフォーマット検証（旧3桁体系・自己流コード検出）
         industry_code_warning = _check_industry_code_format(extraction.ai_judgment)
+        # 役員名の誤入力検出（従業員代表者・事業所内最低賃金者の欄に役員名が入っていたら警告）
+        officer_alert_warning = _check_representative_against_officers(
+            hearing_data, extraction.company,
+        )
         # 賃金台帳抽出結果の自動品質検証（人数妥当性・月別カバレッジ・値分布・賞与未参照）
         from .wage_validator import run_all_validations
         validation_warnings = ''.join(
@@ -1030,6 +1034,7 @@ def run_application_transfer(
             + wage_pdf_warning
             + pl_accounting_warning
             + industry_code_warning
+            + officer_alert_warning
         )
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件{wage_warning})')
 
@@ -1923,6 +1928,55 @@ def _compute_pl_value_pages(
     except Exception as e:
         logger.warning(f'PL値→ページ逆引きに失敗（データソースシート出力はスキップ可）: {e}')
     return pl_value_pages
+
+
+def _check_representative_against_officers(hearing_data: dict, company) -> str:
+    """従業員代表者・事業所内最低賃金者の欄に役員名が入っていたら警告文字列を返す。
+
+    役員（代表取締役・取締役・監査役等）は「従業員代表者」「事業所内最低賃金者」の
+    対象外。ヒアリングのこれらの欄に役員名が誤入力されているのを検知し、人手修正を促す。
+    該当なし／役員不明（company is None・役員0名）なら '' を返す（誤検知防止）。
+
+    氏名照合は wage_reader._normalize_name_key（NFKC＋空白除去＋OCR異体字）で正規化して
+    完全一致。役員キー集合の作り方は wage_ledger_writer.match_officer_names_to_employees と同型。
+    対象欄はヒアリングのラベル（'従業員代表'／'最低賃金者'）で枠非依存に拾う
+    （金額欄 '事業所内最低賃金' は '者' を含まないため対象外）。
+    """
+    if not hearing_data or company is None:
+        return ''
+    from .wage_reader import _normalize_name_key
+
+    officer_names: list[str] = []
+    rep = getattr(company, 'representative_name', '') or ''
+    if rep:
+        officer_names.append(rep)
+    for o in (getattr(company, 'officers', None) or []):
+        n = (o.get('name') if isinstance(o, dict) else getattr(o, 'name', '')) or ''
+        if n:
+            officer_names.append(n)
+    officer_keys = {_normalize_name_key(n) for n in officer_names if str(n).strip()}
+    if not officer_keys:
+        return ''
+
+    TARGET_LABELS = ('従業員代表', '最低賃金者')
+    hits: list[str] = []
+    for _row, rec in (hearing_data or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        label = str(rec.get('label', '') or '')
+        if not any(t in label for t in TARGET_LABELS):
+            continue
+        val = rec.get('value')
+        if val is None or not str(val).strip():
+            continue
+        if _normalize_name_key(str(val)) in officer_keys:
+            hits.append(f'{label}「{val}」')
+    if not hits:
+        return ''
+    return (
+        f' ⚠ 役員名の誤入力の可能性: {"、".join(hits)} が履歴事項証明書の役員と一致します。'
+        '役員は従業員代表者・事業所内最低賃金者の対象外です。従業員の氏名に修正してください。'
+    )
 
 
 def _check_industry_code_format(ai_judgment) -> str:
