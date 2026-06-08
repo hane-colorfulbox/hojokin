@@ -2364,7 +2364,9 @@ def _bonus_period_shift_warning(
     支給日（支給年月）の無い賞与は事業年度ウィンドウで絞り込めず、暦年ベースの年間賞与が
     そのまま算入される（WageEmployee.bonus_undated_total > 0）。決算月が12月以外（非暦年）
     だと対象事業年度とズレ、R216（給与支給総額）の賞与額が不正確になり得る。
-    支給日が原本に無いため自動補正はできず、人手確認を促す警告のみ返す。
+    「賃金台帳の作成」タスクで賞与の支給月を入力すれば対象年度に自動で絞り込む
+    （_sum_window_bonuses の undated_paid_months）。入力が無い／窓内外が混在で按分不能の
+    ときは bonus_undated_total が残るので、本警告で人手確認を促す。
     """
     undated = [
         getattr(e, 'name', '?') for e in (employees or [])
@@ -2381,8 +2383,9 @@ def _bonus_period_shift_warning(
         f'{len(undated)}名の賞与に支給日（支給年月）が無く、'
         '対象事業年度の12ヶ月で絞り込めていません'
         '（暦年ベースの年間賞与をそのまま年間賞与として算入）。'
-        '対象事業年度内の賞与かを、賞与明細・勘定科目内訳明細書・PDF原本で'
-        f'確認してください。対象者: {undated}'
+        'サイドバー「賞与の支給月」に支給年月を入力すると対象事業年度で自動補正します。'
+        '入力できない場合は、対象事業年度内の賞与かを賞与明細・勘定科目内訳明細書・'
+        f'PDF原本で確認してください。対象者: {undated}'
     )
 
 
@@ -2471,6 +2474,7 @@ def run_wage_ledger_conversion(
     fiscal_month_override: int | None = None,
     is_kojin: bool = False,
     selection_override: dict[str, list[Path]] | None = None,
+    bonus_paid_months: list[tuple[int | None, int]] | None = None,
 ) -> ProcessingStatus:
     """タスク「賃金台帳の作成」: PDF/Excel/CSV → ツール規格 Excel 賃金台帳一覧。
 
@@ -2487,6 +2491,9 @@ def run_wage_ledger_conversion(
         fiscal_month_override: 決算月（1〜12）。AI への事業年度フィルタ用
         is_kojin: 個人事業主テンプレ選択時に True（雇用形態正規化が変わる）
         selection_override: ファイル手動選択
+        bonus_paid_months: 賞与の支給年月リスト [(年, 月), ...]（年は None 可）。
+            支給日なし賞与（年間集計表等）を対象事業年度で絞り込むためのユーザー入力。
+            全て窓内→全額算入 / 全て窓外→除外 / 混在→全額算入＋要確認。未指定なら従来動作。
 
     Returns:
         ProcessingStatus（status: '完了' / 'エラー'）
@@ -2582,6 +2589,8 @@ def run_wage_ledger_conversion(
                 # 決算書を読まないこのタスクは今日基準で期末年を推定するため、台帳の実在年で
                 # 12ヶ月窓を選び直す（1期ズレによる R216 サイレント過少計上を防ぐ）。
                 derive_year_from_data=True,
+                # 支給日なし賞与（年間集計表等）をユーザー入力の支給月で対象年度に絞る
+                undated_paid_months=bonus_paid_months,
             )
         except ImageFallbackBlockedError as e:
             status.status = 'エラー'

@@ -363,6 +363,22 @@ def _parse_app_month_input(s: str) -> tuple[int, int] | None:
     return None
 
 
+def _parse_bonus_months_input(s: str) -> list[tuple[int, int]] | None:
+    """賞与の支給月入力（yyyy/mm のカンマ区切り）を [(年, 月), ...] に解釈する。
+
+    空入力や全トークン不正なら None（＝指定なし扱い）。一部だけ解釈できた場合は
+    解釈できた分のみ返す。各トークンは _parse_app_month_input を再利用して解釈する。
+    """
+    if not s or not s.strip():
+        return None
+    months: list[tuple[int, int]] = []
+    for tok in re.split(r'[,、，]', s):
+        parsed = _parse_app_month_input(tok.strip())
+        if parsed:
+            months.append(parsed)
+    return months or None
+
+
 def find_template(base_dir: Path, template_type: str) -> Path | None:
     """テンプレートファイルを検索（v2を優先）
 
@@ -418,6 +434,7 @@ def run_processing(
     fiscal_month_override: int | None = None,
     has_cost_report_hint: bool = False,
     selection_override: dict[str, list[Path]] | None = None,
+    bonus_paid_months: list[tuple[int, int]] | None = None,
 ):
     """メイン処理を実行"""
     results = {}
@@ -610,6 +627,7 @@ def run_processing(
                 fiscal_month_override=fiscal_month_override,
                 is_kojin=is_kojin,
                 selection_override=selection_override,
+                bonus_paid_months=bonus_paid_months,
             )
             results['wage_ledger_creation'] = {
                 'status': status.status,
@@ -794,6 +812,21 @@ with st.sidebar:
     fiscal_month_override: int | None = None
     if fiscal_month_label != _FISCAL_MONTH_OPTIONS[0]:
         fiscal_month_override = int(fiscal_month_label.replace('月', ''))
+
+    # 賞与の支給月（任意）— 「賃金台帳の作成」タスクで非暦年決算のときだけ表示。
+    # 年間集計表など「支給日の無い賞与」を対象事業年度の12ヶ月で正しく絞り込むためのヒント。
+    bonus_paid_months: list[tuple[int, int]] | None = None
+    if task_type == 'wage_ledger_creation' and fiscal_month_override not in (None, 12):
+        _bonus_str = st.text_input(
+            '賞与の支給月（任意・yyyy/mm カンマ区切り）',
+            value='',
+            help='台帳に賞与の支給年月が無い（年間集計表など）非暦年決算のとき、'
+                 '夏・冬など各回の支給年月を入力すると対象事業年度で自動補正します。'
+                 '例: 2024/12, 2025/07。空欄なら従来どおり（支給日不明なら要確認の警告を表示）。',
+        )
+        bonus_paid_months = _parse_bonus_months_input(_bonus_str)
+        if _bonus_str and not bonus_paid_months:
+            st.warning('賞与の支給月は yyyy/mm をカンマ区切りで入力してください（例: 2024/12, 2025/07）')
 
     # 製造原価ありフラグ — 製造業向け。チェック時、AI に「製造原価報告書が存在する」ヒントを注入
     # 決算書PDFを参照しないタスクでは非表示
@@ -2099,6 +2132,7 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 fiscal_month_override=fiscal_month_override,
                 has_cost_report_hint=has_cost_report_hint,
                 selection_override=selection_override,
+                bonus_paid_months=bonus_paid_months,
             )
 
         # Drive 格納（オプション）— Drive ソース選択 + チェックON + 格納先フォルダ確定時のみ

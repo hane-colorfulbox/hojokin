@@ -1416,17 +1416,27 @@ def _format_window_note(info: dict) -> str:
 
 def _sum_window_bonuses(
     bonus_entries: list, fiscal_window: list[tuple[int, int]] | None,
+    *, undated_paid_months: list[tuple[int | None, int]] | None = None,
 ) -> tuple[float, list[float]]:
     """賞与を事業年度ウィンドウでフィルタして合算。(合計, 年度判定不能で算入した額) を返す。
 
     - (年,月) が窓内 → 算入
     - 年不明だが月が窓内 → 算入（best-effort, undated に記録して警告対象に）
-    - 支給日完全不明（ym パース不可）→ 算入（落とすと R216 過少のため）＋ undated
+    - 支給日完全不明（ym パース不可）→ 後述「支給日不明バケット」で処理
     - 窓外（翌期・前期）→ 算入しない（R216 は対象事業年度の賞与のみ）
     重複（分割PDFの重なり）は (ym, 金額) で de-dup。
+
+    undated_paid_months（ユーザーが「賃金台帳の作成」タスクで入力した賞与支給月リスト）:
+      支給日完全不明の賞与に対し、年間集計表など「年間合計しか無い」資料では金額の
+      月按分が原理的に不能。よってバケット全体に対して保守的に判定する:
+        - 指定支給月が全て窓内 → 全額算入（解決済み・undated に積まない＝警告不要）
+        - 指定支給月が全て窓外 → 当年度に含めない（暦年賞与を非暦年決算に誤算入する事故を防ぐ）
+        - 窓内外が混在 → 按分不能のため全額算入＋undated 記録（要人手確認）
+      未指定（None/空）のときは従来どおり全額算入＋undated 記録（警告対象）。
     """
     total = 0.0
     undated: list[float] = []
+    undated_amounts: list[float] = []  # ym 完全不明の賞与額（後でまとめて判定）
     seen: set = set()
     window_set = set(fiscal_window) if fiscal_window else None
     window_months = {mo for (_y, mo) in fiscal_window} if fiscal_window else None
@@ -1446,8 +1456,7 @@ def _sum_window_bonuses(
             total += amt
             continue
         if ym is None:
-            total += amt
-            undated.append(amt)
+            undated_amounts.append(amt)
             continue
         y, mo = ym
         if y is None:
@@ -1457,11 +1466,30 @@ def _sum_window_bonuses(
             continue
         if (y, mo) in window_set:
             total += amt
+
+    # 支給日完全不明バケットの処理
+    if undated_amounts:
+        if window_set is not None and undated_paid_months:
+            def _in_window(m: tuple[int | None, int]) -> bool:
+                y, mo = m
+                return (mo in window_months) if y is None else ((y, mo) in window_set)
+            in_win = [m for m in undated_paid_months if _in_window(m)]
+            if not in_win:
+                pass  # 全て窓外 → 当年度に含めない（total に積まない）
+            elif len(in_win) == len(undated_paid_months):
+                total += sum(undated_amounts)  # 全て窓内 → 全額算入（解決済み）
+            else:
+                total += sum(undated_amounts)  # 混在 → 按分不能・全額算入＋要確認
+                undated.extend(undated_amounts)
+        else:
+            total += sum(undated_amounts)  # 支給月未指定 → 従来動作
+            undated.extend(undated_amounts)
     return total, undated
 
 
 def _normalize_ai_employee_dict(
     emp: dict, fiscal_window: list[tuple[int, int]] | None,
+    *, undated_paid_months: list[tuple[int | None, int]] | None = None,
 ) -> dict:
     """新スキーマ（monthly/bonuses）を旧スキーマ（monthly_wages[12] 等）に正規化する。
 
@@ -1476,7 +1504,9 @@ def _normalize_ai_employee_dict(
         wages, hours, days = _build_windowed_arrays(monthly_entries, fiscal_window)
     else:
         wages, hours, days = _build_calendar_arrays_recent(monthly_entries)
-    bonus_total, undated = _sum_window_bonuses(bonus_entries, fiscal_window)
+    bonus_total, undated = _sum_window_bonuses(
+        bonus_entries, fiscal_window, undated_paid_months=undated_paid_months,
+    )
     out = dict(emp)
     out['monthly_wages'] = wages
     out['monthly_hours'] = hours
@@ -1526,6 +1556,7 @@ def _validate_ai_employee(emp: dict) -> tuple[bool, str]:
 def _ai_data_to_wage_employees(
     ai_data: list[dict], fiscal_period_hint: str | None = None,
     *, derive_year_from_data: bool = False,
+    undated_paid_months: list[tuple[int | None, int]] | None = None,
 ) -> list[WageEmployee]:
     """AI抽出データを WageEmployee リストに変換（バリデーション付き）。
 
@@ -1560,7 +1591,9 @@ def _ai_data_to_wage_employees(
             logger.warning(f'AI抽出: index={i} が辞書でないためスキップ: {type(emp).__name__}')
             continue
         # 新スキーマ → 旧スキーマ正規化（事業年度ウィンドウ適用・賞与集約）
-        emp = _normalize_ai_employee_dict(emp, fiscal_window)
+        emp = _normalize_ai_employee_dict(
+            emp, fiscal_window, undated_paid_months=undated_paid_months,
+        )
         if emp.get('_bonus_undated'):
             logger.warning(
                 f'AI抽出: {emp.get("name", "?")} の賞与に支給日不明分があり年間賞与へ算入しました '
@@ -1821,6 +1854,7 @@ def read_wage_ledgers_with_ai(
     *,
     disable_image_fallback: bool = False,
     derive_year_from_data: bool = False,
+    undated_paid_months: list[tuple[int | None, int]] | None = None,
 ) -> list[WageEmployee]:
     """
     AI による賃金台帳読み取り。
@@ -1865,6 +1899,7 @@ def read_wage_ledgers_with_ai(
 
     employees = _ai_data_to_wage_employees(
         ai_data, fiscal_period_hint, derive_year_from_data=derive_year_from_data,
+        undated_paid_months=undated_paid_months,
     )
     logger.info(
         f'AI抽出結果: 入力{len(ai_data)}名 → 妥当{len(employees)}名'
@@ -2186,6 +2221,7 @@ def read_wage_ledgers(
     *,
     disable_image_fallback: bool = False,
     derive_year_from_data: bool = False,
+    undated_paid_months: list[tuple[int | None, int]] | None = None,
 ) -> list[WageEmployee]:
     """
     複数の賃金台帳ファイルを読み、同名の従業員をマージして返す。
@@ -2213,6 +2249,7 @@ def read_wage_ledgers(
                 file_paths, extractor, fiscal_period_hint,
                 disable_image_fallback=disable_image_fallback,
                 derive_year_from_data=derive_year_from_data,
+                undated_paid_months=undated_paid_months,
             )
             if ai_employees:
                 ai_employees = _dedupe_employees_by_normalized_name(ai_employees)
