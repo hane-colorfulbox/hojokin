@@ -2474,4 +2474,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.55 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.56 | カラフルボックス株式会社')

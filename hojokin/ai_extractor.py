@@ -103,6 +103,16 @@ def _model_supports_sampling_params(model: str) -> bool:
 WAGE_LEDGER_SPLIT_PAGE_THRESHOLD = 15
 WAGE_LEDGER_SPLIT_BYTES_THRESHOLD = 4 * 1024 * 1024
 
+# PL抽出の「製造原価/完成工事原価の見落とし疑い」検知の閾値（_is_pl_extraction_suspicious）。
+# 補助率2/3判定に効く感度ロジックのため、値は変更せず定数化のみ。
+PL_SUSPICION_LOW_SALARY = 1_000_000           # 条件2: 給料手当がこの額未満なら小さすぎ
+PL_SUSPICION_HIGH_AMOUNT = 10_000_000         # 条件2/5: 売上・売上総利益の「大きい」基準
+PL_SUSPICION_SALARY_REVENUE_RATIO = 0.01      # 条件3: 給料/売上 がこの比率未満なら異常
+PL_SUSPICION_COST_FLOOR = 5_000_000           # 条件4: 売上原価がこの額超で原価部労務費を疑う
+PL_SUSPICION_PERSONNEL_COST_RATIO = 0.05      # 条件4: 人件費/売上原価 がこの比率未満なら異常
+PL_SUSPICION_LOW_PERSONNEL = 3_000_000        # 条件5: 人件費がこの額未満なら小さすぎ
+PL_SUSPICION_COST_PERSONNEL_MULTIPLE = 10     # 条件6: 売上原価/人件費 がこの倍率超なら疑う
+
 # 進捗コールバックの型: (attempt, max_attempts, wait_seconds, error_summary) -> None
 RetryCallback = Callable[[int, int, float, str], None]
 
@@ -216,23 +226,23 @@ def _is_pl_extraction_suspicious(d: dict) -> tuple[bool, str]:
         return True, '人件費合計0で売上あり'
 
     # 条件2: 給料手当が極端に小さく売上が大きい中小企業（建設業/製造業の典型）
-    if salary < 1_000_000 and revenue > 10_000_000:
+    if salary < PL_SUSPICION_LOW_SALARY and revenue > PL_SUSPICION_HIGH_AMOUNT:
         return True, f'給料手当{salary:,}で売上{revenue:,}（製造原価/工事原価の見落とし疑い）'
 
     # 条件3: 給料/売上比率が異常に低い + 営業利益プラス
-    if revenue > 0 and (salary / revenue) < 0.01 and operating > 0:
+    if revenue > 0 and (salary / revenue) < PL_SUSPICION_SALARY_REVENUE_RATIO and operating > 0:
         ratio = salary / revenue * 100
         return True, f'給料/売上比率{ratio:.2f}%で営業利益プラス'
 
     # 条件4: 売上原価が大きいのに人件費合計が小さい（労務費が原価に流れている疑い）
-    if cost_of_sales > 5_000_000 and total_personnel > 0 and total_personnel < cost_of_sales * 0.05:
+    if cost_of_sales > PL_SUSPICION_COST_FLOOR and total_personnel > 0 and total_personnel < cost_of_sales * PL_SUSPICION_PERSONNEL_COST_RATIO:
         return True, (
             f'売上原価{cost_of_sales:,}に対して人件費{total_personnel:,}が極端に小さい'
             f'（原価部に労務費がある可能性）'
         )
 
     # 条件5: 売上総利益が大きいのに人件費が3M未満で営業利益プラス
-    if total_personnel < 3_000_000 and operating > 0 and gross > 10_000_000:
+    if total_personnel < PL_SUSPICION_LOW_PERSONNEL and operating > 0 and gross > PL_SUSPICION_HIGH_AMOUNT:
         return True, f'売上総利益{gross:,}・営業利益プラスなのに人件費{total_personnel:,}'
 
     # 条件6: 売上原価/人件費 比 > 10倍 = 建設業/製造業で原価部に労務費が大量にある典型
@@ -240,7 +250,7 @@ def _is_pl_extraction_suspicious(d: dict) -> tuple[bool, str]:
     # 医療法人など製造原価のない業種は売上原価そのものが小さいので発動しない
     if cost_of_sales > 0 and total_personnel > 0:
         ratio = cost_of_sales / total_personnel
-        if ratio > 10:
+        if ratio > PL_SUSPICION_COST_PERSONNEL_MULTIPLE:
             return True, (
                 f'売上原価/人件費 = {ratio:.1f}倍 '
                 f'（売上原価{cost_of_sales:,} / 人件費{total_personnel:,}、'
