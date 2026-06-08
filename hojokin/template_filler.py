@@ -31,10 +31,22 @@ def _safe_write_cell(ws, row: int, col: int, value):
     if isinstance(cell, MergedCell):
         for merged_range in ws.merged_cells.ranges:
             if cell.coordinate in merged_range:
-                ws.cell(
+                anchor = ws.cell(
                     row=merged_range.min_row,
                     column=merged_range.min_col,
-                ).value = value
+                )
+                # マップ先が結合の非先頭セル＝テンプレ側の結合ミスの可能性が高い。
+                # 値は先頭(アンカー)へ書かれるため、先頭が見出しだと上書きで壊れる
+                # （粗利益/セキュリティ行で実際に発生 → v0.2.59 修正）。挙動は従来どおり
+                # アンカーへ書くが、再発検知のため警告を出す（マップがアンカーを直接指す
+                # 正当な結合書込みは通常 Cell 扱いとなりここには来ない）。
+                logger.warning(
+                    f'⚠ テンプレ結合セルへの書込み: {ws.title}!{cell.coordinate} は'
+                    f'結合範囲 {merged_range} 内の非先頭セルです。値は先頭 {anchor.coordinate} '
+                    f'へ書き込まれ、見出しを上書きする恐れがあります。'
+                    f'テンプレの当該セルの結合解除を検討してください'
+                )
+                anchor.value = value
                 return
     cell.value = value
 
