@@ -89,6 +89,7 @@ IT導入補助金の申請書類を、ヒアリングシート・PDF資料・Exc
 - Streamlit Cloud と GitHub の `main` ブランチが連携。push で自動再デプロイ。
 - ロールバックは `git revert` または Streamlit Cloud secrets での機能フラグ切替
 - `USE_AI_WAGE_EXTRACTION=false` で AI 抽出を旧経路（決定論パーサー）に戻せる
+- **Streamlit Cloud のログのタイムスタンプ（`[HH:MM:SS]`）は UTC**。日本時間（JST）はそれ +9時間。ログ時刻を読むときは +9 して換算する（例：ログ `[04:23]` ＝ JST 13:23）
 
 ## テスト方針（暗黙ルール）
 
@@ -107,6 +108,10 @@ IT導入補助金の申請書類を、ヒアリングシート・PDF資料・Exc
 | `USE_AI_WAGE_EXTRACTION` | `true` | 賃金台帳の AI 抽出 ON/OFF。`false` で決定論パーサーのみ |
 | `CLAUDE_MODEL` | `claude-sonnet-4-6` | 抽出（画像/PDF）用モデル |
 | `WRITING_MODEL` | `claude-opus-4-8` | 文章生成（事業内容）用モデル。`claude-sonnet-4-6` にすれば生成も Sonnet に戻る |
+| `USE_STRUCTURED_PL_EXTRACTION` | `true` | PL抽出を構造分解（基本PL/販管費部/原価部の3呼出）にする。`false` で旧1呼出方式 |
+| `USE_PL_PAGE_INVENTORY` | `true` | 構造分解PL抽出で4ページ以上のPDFを先にページ分類し関連ページのみ送信（複数年度混入防止・トークン削減）。3ページ以下はスキップ |
+| `USE_PROMPT_CACHING` | `true` | 賃金台帳PDF抽出で Anthropic Prompt Caching を使う（固定の指示部をキャッシュし入力トークン費用を削減） |
+| `USE_PDF_TEXT_PREPROCESSING` | `false` | 賃金台帳PDFを画像でなくテキスト化してSonnetに渡す。コスト削減狙いだが精度低下リスクで既定OFF（案件ごと確認後に有効化） |
 
 ## 関連ドキュメント
 
