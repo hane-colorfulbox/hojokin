@@ -1580,16 +1580,21 @@ class ClaudeExtractor(BaseExtractor):
         return text
 
     def _parse_json(self, text: str) -> dict | list:
-        """API応答からJSONを抽出・パース"""
+        """API応答からJSONを抽出・パース。
+
+        max_tokens 打ち切りで閉じフェンス（```）が欠落しても ValueError で落ちないよう
+        find（-1 許容）でフェンス終端を探す。閉じが無ければフェンス開始以降全体を json に回す。
+        不正・途中切れ JSON は json.JSONDecodeError を送出するので呼出側でガードすること。
+        """
         # ```json ... ``` ブロックがあれば中身を取り出す
         if '```json' in text:
             start = text.index('```json') + 7
-            end = text.index('```', start)
-            text = text[start:end].strip()
+            end = text.find('```', start)
+            text = (text[start:end] if end != -1 else text[start:]).strip()
         elif '```' in text:
             start = text.index('```') + 3
-            end = text.index('```', start)
-            text = text[start:end].strip()
+            end = text.find('```', start)
+            text = (text[start:end] if end != -1 else text[start:]).strip()
 
         return json.loads(text)
 
@@ -1879,13 +1884,27 @@ class ClaudeExtractor(BaseExtractor):
             temperature=0.5,
             messages=[{'role': 'user', 'content': prompt}],
         )
-        text = response.content[0].text
+        # API 応答の取り出しと JSON パースを防御的に行う。writing_model（Opus）は
+        # トークナイザ差で JSON が途中で切れたり、稀に配列で返ることが本番で観測される。
+        # 失敗しても申請書タスク全体を落とさず、AI 判断項目を既定値（空）にして続行する
+        # （API残高切れ経路と同じ graceful degrade。pipeline はここを APICreditExhaustedError
+        # 以外捕捉しないため、ここで握り潰さないと申請書が出力ゼロでクラッシュする）。
+        try:
+            text = response.content[0].text
+        except (IndexError, AttributeError):
+            text = ''
         logger.warning(
             f'[API成功] caller=generate_ai_judgment '
             f'応答={len(text)}chars '
             f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
         )
-        d = self._parse_json(text)
+        try:
+            d = self._ensure_dict(self._parse_json(text), 'generate_ai_judgment')
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(
+                f'[generate_ai_judgment] JSON 解析に失敗（AI判断項目を既定値で続行）: {e}'
+            )
+            d = {}
 
         # 最低賃金はconfig.pyから取得
         from .config import get_min_wage
@@ -1998,11 +2017,16 @@ class ClaudeExtractor(BaseExtractor):
     ) -> ShortenResult:
         """事業内容が255文字超のとき、Claude に N 案生成させて文字数で機械選択する。
 
-        フロー:
+        フロー（expand_business_description と対称・下限 240 を持つ）:
           1. 同一プロンプトを n_candidates 回送って候補を集める（temperature=0.7 でばらつかせる）
-          2. 255 以内の候補があれば「最長」を採用 → source='ai'
-          3. 全候補が 255 超なら、最短の候補を句点単位で末尾削除して 255 以内に収める → 'mechanical'
-          4. 句点削除でも収まらない/候補ゼロなら 'failed'（呼び出し側で原文残し+強警告）
+          2. [240,255] に収まる候補があれば「最長」を採用 → source='ai'
+          3. 無ければ 255超候補を句点単位で削って [240,255] に収める → 'mechanical'
+             （255以内の短い候補より、255超候補を削った in-range の方が情報量が多い）
+          4. それも無ければ 255以内の最長（240未満もあり得る・最終手段）を採用 → 'ai'
+             （原文>255 を残してセルで切られるより、やや短くても収まる文を出す方が安全。
+               240未満のときは pipeline 側が⚠で人へ要確認を促す）
+          5. 全候補255超で句点削除でも収まらない → 最短候補を可能な限り削る → 'mechanical'
+          6. 候補ゼロ/句点なしで収まらない → 'failed'（呼び出し側で原文残し+強警告）
 
         LLM 単体で文字数を厳守させるのは不安定なため、決定的な後処理を後段に積む構造。
         """
@@ -2040,27 +2064,55 @@ class ClaudeExtractor(BaseExtractor):
             logger.warning(f'shorten_business_description: {reason}（候補ゼロ）')
             return ShortenResult(text=None, source='failed')
 
-        # 段1: 255以内の候補があれば「最長」を採用（情報量を最大化）
+        # 段1: [240,255] に収まる候補があれば「最長」を採用（expand と対称・下限あり）
+        in_range = [
+            c for c in candidates
+            if BIZ_DESC.TARGET_MIN <= len(c) <= BIZ_DESC.HARD_MAX
+        ]
+        if in_range:
+            best = max(in_range, key=len)
+            logger.warning(
+                f'shorten_business_description: AI候補採用 '
+                f'候補数={len(candidates)} '
+                f'範囲内[{BIZ_DESC.TARGET_MIN},{BIZ_DESC.HARD_MAX}]={len(in_range)} '
+                f'採用={len(best)}文字'
+            )
+            return ShortenResult(text=best, source='ai')
+
+        # 段2: 255超候補を句点単位で削って [240,255] に収める
+        # （255以内の短い候補より、255超候補を削った in-range の方が情報量が多いので優先）
+        for c in sorted((c for c in candidates if len(c) > BIZ_DESC.HARD_MAX), key=len):
+            trimmed = _trim_to_period_limit(c, BIZ_DESC.HARD_MAX)
+            if trimmed and BIZ_DESC.TARGET_MIN <= len(trimmed) <= BIZ_DESC.HARD_MAX:
+                logger.warning(
+                    f'shorten_business_description: 機械削除フォールバック '
+                    f'候補数={len(candidates)} ベース={len(c)}文字 → 削除後={len(trimmed)}文字'
+                )
+                return ShortenResult(text=trimmed, source='mechanical')
+
+        # 段3: [240,255] に収められない。255以内の最長（240未満もあり得る・最終手段）を採用。
+        # 原文(>255)を残してセルで切られるより、やや短くても収まる文を出す方が安全。
+        # 240未満なら pipeline 側が⚠で人へ要確認を促す。
         valid = [c for c in candidates if len(c) <= BIZ_DESC.HARD_MAX]
         if valid:
             best = max(valid, key=len)
             logger.warning(
-                f'shorten_business_description: AI候補採用 '
-                f'候補数={len(candidates)} 255以内={len(valid)} 採用={len(best)}文字'
+                f'shorten_business_description: 255以内最長を採用（下限未達の可能性） '
+                f'候補数={len(candidates)} 採用={len(best)}文字'
             )
             return ShortenResult(text=best, source='ai')
 
-        # 段2: 全候補が255超 → 最短候補を句点単位で末尾削除
+        # 段4: 全候補255超で句点削除でも[240,255]に入らない → 最短候補を可能な限り削る
         base = min(candidates, key=len)
         trimmed = _trim_to_period_limit(base, BIZ_DESC.HARD_MAX)
         if trimmed and len(trimmed) <= BIZ_DESC.HARD_MAX:
             logger.warning(
-                f'shorten_business_description: 機械削除フォールバック '
-                f'候補数={len(candidates)} 全候補255超 ベース={len(base)}文字 → 削除後={len(trimmed)}文字'
+                f'shorten_business_description: 機械削除（下限未達許容） '
+                f'候補数={len(candidates)} ベース={len(base)}文字 → 削除後={len(trimmed)}文字'
             )
             return ShortenResult(text=trimmed, source='mechanical')
 
-        # 段3: 句点削除でも収まらない（句点なし等の異常ケース）
+        # 段5: 句点削除でも収まらない（句点なし等の異常ケース）
         logger.warning(
             f'shorten_business_description: 機械削除も失敗 '
             f'候補数={len(candidates)} 最短候補={len(base)}文字'

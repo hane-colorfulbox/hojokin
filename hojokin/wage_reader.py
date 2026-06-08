@@ -223,6 +223,10 @@ class WageEmployee:
     # 賞与額の合計（円）。年間集計表など支給日のない台帳で > 0 になる。非暦年決算では
     # 暦年集計とのズレで R216 がズレ得るため、賃金台帳作成タスクが警告 surfacing に使う。
     bonus_undated_total: float = 0.0
+    # 対象事業年度ウィンドウ外として除外した「支給年月あり」賞与額の合計（円）。
+    # AI が誤った年月を付けた賞与が無言で R216 から落ちるのを変換メモで可視化するための情報。
+    # 多年度台帳での正常な除外でも > 0 になり得る（アラートではなく情報表示用）。
+    bonus_dropped_total: float = 0.0
 
     @property
     def is_full_year(self) -> bool:
@@ -1417,8 +1421,14 @@ def _format_window_note(info: dict) -> str:
 def _sum_window_bonuses(
     bonus_entries: list, fiscal_window: list[tuple[int, int]] | None,
     *, undated_paid_months: list[tuple[int | None, int]] | None = None,
-) -> tuple[float, list[float]]:
-    """賞与を事業年度ウィンドウでフィルタして合算。(合計, 年度判定不能で算入した額) を返す。
+) -> tuple[float, list[float], list[float]]:
+    """賞与を事業年度ウィンドウでフィルタして合算。
+
+    (合計, 年度判定不能で算入した額, 対象年度外として除外した支給年月あり賞与額) を返す。
+    第3要素 dropped は「支給年月が読めたが対象事業年度ウィンドウ外だった」賞与額の一覧。
+    合計(total)の計算には一切影響しない（窓外は元から非算入）。AI の年月誤読による
+    R216 サイレント過少を変換メモで可視化するための情報として返す（多年度台帳の正常な
+    除外でも入る＝アラートではなく情報）。
 
     - (年,月) が窓内 → 算入
     - 年不明だが月が窓内 → 算入（best-effort, undated に記録して警告対象に）
@@ -1436,6 +1446,7 @@ def _sum_window_bonuses(
     """
     total = 0.0
     undated: list[float] = []
+    dropped: list[float] = []  # 支給年月ありだが対象年度ウィンドウ外で除外した賞与額（情報用）
     undated_amounts: list[float] = []  # ym 完全不明の賞与額（後でまとめて判定）
     seen: set = set()
     window_set = set(fiscal_window) if fiscal_window else None
@@ -1463,9 +1474,13 @@ def _sum_window_bonuses(
             if mo in window_months:
                 total += amt
                 undated.append(amt)
+            else:
+                dropped.append(amt)  # 月のみ判明だが窓の月に該当せず除外
             continue
         if (y, mo) in window_set:
             total += amt
+        else:
+            dropped.append(amt)  # 年月判明だが対象事業年度外 → 除外（情報として記録）
 
     # 支給日完全不明バケットの処理
     if undated_amounts:
@@ -1484,7 +1499,7 @@ def _sum_window_bonuses(
         else:
             total += sum(undated_amounts)  # 支給月未指定 → 従来動作
             undated.extend(undated_amounts)
-    return total, undated
+    return total, undated, dropped
 
 
 def _normalize_ai_employee_dict(
@@ -1504,7 +1519,7 @@ def _normalize_ai_employee_dict(
         wages, hours, days = _build_windowed_arrays(monthly_entries, fiscal_window)
     else:
         wages, hours, days = _build_calendar_arrays_recent(monthly_entries)
-    bonus_total, undated = _sum_window_bonuses(
+    bonus_total, undated, dropped = _sum_window_bonuses(
         bonus_entries, fiscal_window, undated_paid_months=undated_paid_months,
     )
     out = dict(emp)
@@ -1514,6 +1529,8 @@ def _normalize_ai_employee_dict(
     out['annual_bonus'] = max(0.0, bonus_total)
     if undated:
         out['_bonus_undated'] = undated
+    if dropped:
+        out['_bonus_dropped'] = dropped
     return out
 
 
@@ -1722,6 +1739,7 @@ def _ai_data_to_wage_employees(
             fiscal_window=fiscal_window,
             fiscal_window_note=window_note,
             bonus_undated_total=float(sum(emp.get('_bonus_undated') or [])),
+            bonus_dropped_total=float(sum(emp.get('_bonus_dropped') or [])),
         ))
     return employees
 
@@ -2047,6 +2065,9 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
         fiscal_window_note=a.fiscal_window_note or b.fiscal_window_note,
         bonus_undated_total=max(
             a.bonus_undated_total or 0.0, b.bonus_undated_total or 0.0
+        ),
+        bonus_dropped_total=max(
+            a.bonus_dropped_total or 0.0, b.bonus_dropped_total or 0.0
         ),
     )
 
@@ -2652,12 +2673,34 @@ def export_wage_ledger_summary(
                 hours_fmt, subtotal_fill_target,
             )
 
-        # 備考: 「集計対象のみ」の年間合計は R216 の母数（給与支給総額・役員除外）
+        # 備考: 「集計対象のみ」の年間合計＝R216 母数。ただし R列(年間合計)は月次課税給与のみで、
+        # R216（給与支給総額）は「月次年計＋年間賞与」。賞与は月次セルに混ぜない設計（年間賞与は
+        # WageEmployee.annual_bonus に隔離）のため、R列だけを R216 母数と書くと申請書 R216
+        # （賞与込み）とダブルチェックで賞与額ぶん食い違う。集計対象の年間賞与額と R216 実値を
+        # 備考に明示し、申請書 R216 と突合できるようにする。
         wage_total_letter = get_column_letter(wage_total_col)
+        included_emps = [e for e in employees if not _is_excluded_from_wage_total(e)]
+        target_wage_sum = sum(
+            sum(w for w in e.monthly_wages if w is not None) for e in included_emps
+        )
+        target_bonus_sum = sum(
+            (getattr(e, 'annual_bonus', 0.0) or 0.0) for e in included_emps
+        )
+        if target_bonus_sum > 0:
+            note_value = (
+                f'※「合計（集計対象のみ）」年間合計（{wage_total_letter}列）'
+                f'＝月次課税給与の年計 {target_wage_sum:,.0f}円。'
+                f'R216 給与支給総額＝これ＋年間賞与 {target_bonus_sum:,.0f}円'
+                f'＝ {target_wage_sum + target_bonus_sum:,.0f}円'
+                f'（賞与は月次セルに含めない設計のため別途加算）'
+            )
+        else:
+            note_value = (
+                f'※「合計（集計対象のみ）」の年間合計（{wage_total_letter}列）'
+                f'＝ R216 給与支給総額の母数 {target_wage_sum:,.0f}円（賞与なし）'
+            )
         note_cell = ws.cell(
-            row=total_target_row, column=source_col,
-            value=f'※「合計（集計対象のみ）」の年間合計（{wage_total_letter}列）'
-                  f'＝ R216 給与支給総額の母数',
+            row=total_target_row, column=source_col, value=note_value,
         )
         note_cell.font = Font(size=9, color='666666')
         note_cell.fill = subtotal_fill_target

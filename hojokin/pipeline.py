@@ -849,12 +849,25 @@ def run_application_transfer(
                 # 最終案を採用 → その案に対して1回だけ文字数判定して警告を分岐
                 if result and result.text and result.source == 'ai':
                     extraction.ai_judgment.business_description = result.text
-                    biz_desc_warning = (
-                        f' ℹ 事業内容が文字数制限超過（原文{n_orig}文字）だったため、'
-                        f'AI で再生成した3案から最適なもの（{result.length}文字）を採用しました。'
-                        f'提出前に内容を必ず目視確認してください。'
-                    )
-                    logger.warning(f'事業内容を自動短縮(AI採用): {n_orig}文字 → {result.length}文字')
+                    if result.length < BIZ_DESC.TARGET_MIN:
+                        # 短縮できたが推奨下限(240)を割った（全候補が短い等）。
+                        # 黙って採用せず⚠で人へ厚み追加を促す（silent な過少を防ぐ）。
+                        biz_desc_warning = (
+                            f' ⚠ 事業内容が文字数制限超過（原文{n_orig}文字）のため AI 再生成で'
+                            f'短縮しましたが、結果が{result.length}文字と推奨下限（240文字）を下回りました。'
+                            f'4要素（現状・課題・解決策・期待効果）が書き切れているか、'
+                            f'ヒアリング情報を追記して厚みを出してください。'
+                        )
+                        logger.warning(
+                            f'事業内容を自動短縮(AI採用)したが下限未達: {n_orig}文字 → {result.length}文字'
+                        )
+                    else:
+                        biz_desc_warning = (
+                            f' ℹ 事業内容が文字数制限超過（原文{n_orig}文字）だったため、'
+                            f'AI で再生成した3案から最適なもの（{result.length}文字）を採用しました。'
+                            f'提出前に内容を必ず目視確認してください。'
+                        )
+                        logger.warning(f'事業内容を自動短縮(AI採用): {n_orig}文字 → {result.length}文字')
                 elif result and result.text and result.source == 'mechanical':
                     extraction.ai_judgment.business_description = result.text
                     biz_desc_warning = (
@@ -2443,6 +2456,45 @@ def _bonus_period_shift_warning(
     )
 
 
+def _bonus_dropped_info_note(employees) -> str | None:
+    """対象事業年度ウィンドウ外として除外した賞与（支給年月あり）を情報表示（③の補足）。
+
+    多年度分が載った台帳では正常な除外でも出るため、アラート（⚠）ではなく情報（ℹ）。
+    AI の年月誤読で本来年度内の賞与が落ちていないかを人手確認する導線として surface する。
+    WageEmployee.bonus_dropped_total（_sum_window_bonuses が窓外で除外した dated 賞与額）を集計。
+    """
+    rows = [
+        (getattr(e, 'name', '?'), float(getattr(e, 'bonus_dropped_total', 0.0) or 0.0))
+        for e in (employees or [])
+        if (getattr(e, 'bonus_dropped_total', 0.0) or 0.0) > 0
+    ]
+    if not rows:
+        return None
+    total = sum(amt for _n, amt in rows)
+    names = '、'.join(f'{n}({amt:,.0f}円)' for n, amt in rows)
+    return (
+        f'ℹ 対象事業年度外として除外した賞与: {len(rows)}名・計{total:,.0f}円。'
+        '多年度分が載った台帳なら正常です。年月の誤読で本来年度内の賞与が落ちていないか、'
+        f'賞与明細・PDF原本でご確認ください。対象: {names}'
+    )
+
+
+def _officer_autodetect_skipped_warning(registry_path) -> str | None:
+    """履歴事項PDF未添付で役員の自動確定（氏名照合）が走らないときの注意（G）。
+
+    registry_path が無いと officer_names=[] となり、役員の雇用形態上書き照合がスキップされる。
+    役員が従業員に混在しているとR216（給与支給総額）が過大になり補助率判定に不利方向へ
+    ズレ得るため、原本での雇用形態確認を促す。registry_path があれば None。
+    """
+    if registry_path:
+        return None
+    return (
+        '⚠ 履歴事項全部証明書PDFが未添付のため、役員の自動確定（氏名照合）を実施していません。'
+        '役員が従業員に混在しているとR216（給与支給総額）が過大になります。'
+        '役員に該当する人の雇用形態を原本で確認してください。'
+    )
+
+
 def _recon_name_key(name: str) -> str:
     """氏名照合キー: NFKC正規化＋空白除去。"""
     return re.sub(r'\s+', '', unicodedata.normalize('NFKC', str(name or '')))
@@ -2779,6 +2831,14 @@ def run_wage_ledger_conversion(
         _bonus_note = _bonus_period_shift_warning(employees, fiscal_month_override)
         if _bonus_note:
             window_notes.append(_bonus_note)
+        # 対象年度外として除外した「支給年月あり」賞与の情報表示（E1）。AI 年月誤読の見逃し防止。
+        _dropped_note = _bonus_dropped_info_note(employees)
+        if _dropped_note:
+            window_notes.append(_dropped_note)
+        # 履歴事項PDF未添付時は役員の自動確定がスキップされる旨を可視化（G）。
+        _officer_skip_note = _officer_autodetect_skipped_warning(registry_path)
+        if _officer_skip_note:
+            window_notes.append(_officer_skip_note)
 
         # テンプレートに書込
         write_result = write_wage_ledger_to_template(

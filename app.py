@@ -363,20 +363,94 @@ def _parse_app_month_input(s: str) -> tuple[int, int] | None:
     return None
 
 
-def _parse_bonus_months_input(s: str) -> list[tuple[int, int]] | None:
-    """賞与の支給月入力（yyyy/mm のカンマ区切り）を [(年, 月), ...] に解釈する。
+def _parse_bonus_token(tok: str) -> tuple[int | None, int] | None:
+    """賞与支給月トークン1個を解釈する。
+
+    yyyy/mm → (西暦年, 月)。年が分からない「月のみ(1-12)」→ (None, 月)。失敗時 None。
+    事業年度ウィンドウは台帳実データで自動シフトし得るため、絶対年が不確かなら
+    月のみ入力を許容する（_sum_window_bonuses._in_window が (None, 月) を月一致で扱う）。
+    交付申請月用の _parse_app_month_input は年必須のまま変更しない（別用途）。
+    """
+    t = (tok or '').strip()
+    if not t:
+        return None
+    ym = _parse_app_month_input(t)
+    if ym:
+        return ym
+    m = re.fullmatch(r'(\d{1,2})\s*月?', t)
+    if m and 1 <= int(m.group(1)) <= 12:
+        return (None, int(m.group(1)))
+    return None
+
+
+def _parse_bonus_months_input(s: str) -> list[tuple[int | None, int]] | None:
+    """賞与の支給月入力（yyyy/mm または 月のみ のカンマ区切り）を [(年 or None, 月), ...] に。
 
     空入力や全トークン不正なら None（＝指定なし扱い）。一部だけ解釈できた場合は
-    解釈できた分のみ返す。各トークンは _parse_app_month_input を再利用して解釈する。
+    解釈できた分のみ返す（未解釈分は _unparsed_bonus_tokens で別途 surface する）。
     """
     if not s or not s.strip():
         return None
-    months: list[tuple[int, int]] = []
+    months: list[tuple[int | None, int]] = []
     for tok in re.split(r'[,、，]', s):
-        parsed = _parse_app_month_input(tok.strip())
+        parsed = _parse_bonus_token(tok)
         if parsed:
             months.append(parsed)
     return months or None
+
+
+def _unparsed_bonus_tokens(s: str) -> list[str]:
+    """賞与支給月入力のうち解釈できなかったトークン一覧。部分失敗の可視化用。"""
+    if not s or not s.strip():
+        return []
+    bad: list[str] = []
+    for tok in re.split(r'[,、，]', s):
+        t = tok.strip()
+        if t and _parse_bonus_token(t) is None:
+            bad.append(t)
+    return bad
+
+
+def _kojin_fiscal_month_warning(
+    template_type: str, fiscal_month_override: int | None,
+) -> str | None:
+    """個人事業主テンプレで決算月が12月以外のとき警告文を返す（非破壊・注意喚起のみ）。
+
+    個人事業の会計期間は暦年（1〜12月）固定で、申請書も決算月12月で出力される。
+    賃金台帳の対象期間に12月以外を選ぶと両者が食い違うため、12月選択を促す。
+    """
+    if template_type == 'インボイス枠_個人_2026' and fiscal_month_override not in (None, 12):
+        return (
+            '個人事業主は会計期間が暦年（1〜12月）固定です。決算月は「12月」を選択してください。'
+            '申請書は12月で出力されるため、12月以外を選ぶと賃金台帳の対象期間と食い違います。'
+        )
+    return None
+
+
+def _download_drive_files(client, files, work_dir):
+    """Drive ファイルを work_dir にダウンロードし (saved, skipped, errors) を返す。
+
+    対応外 Google 形式（フォーム/図面/サイト等）は skipped、ネット断・権限・容量制限等の
+    一般例外は errors に集約して例外を伝播させない（顧客画面に raw traceback を出さない）。
+    アップロード側（except Exception → 警告）と対称にするための切り出し。
+    """
+    from hojokin.drive_client import GoogleFormatNotSupportedError
+    saved: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    errors: list[tuple[str, str]] = []
+    for f in files:
+        name = _nfc_filename(f['name'])
+        dest = work_dir / name
+        try:
+            saved_path = client.download_file(f['id'], dest, mime_type=f.get('mimeType'))
+            saved.append(saved_path.name)
+        except GoogleFormatNotSupportedError as e:
+            skipped.append((name, str(e)))
+            logger.warning(f'Drive ダウンロードスキップ: {name} ({e})')
+        except Exception as e:  # noqa: BLE001 - 顧客前の raw traceback を防ぐため広く捕捉
+            errors.append((name, str(e)))
+            logger.warning(f'Drive ダウンロード失敗: {name} ({e})', exc_info=True)
+    return saved, skipped, errors
 
 
 def find_template(base_dir: Path, template_type: str) -> Path | None:
@@ -813,20 +887,33 @@ with st.sidebar:
     if fiscal_month_label != _FISCAL_MONTH_OPTIONS[0]:
         fiscal_month_override = int(fiscal_month_label.replace('月', ''))
 
+    # 個人事業主は会計期間が暦年固定。決算月12月以外を選ぶと申請書(12月固定)と食い違う。
+    _kojin_warn = _kojin_fiscal_month_warning(template_type, fiscal_month_override)
+    if _kojin_warn:
+        st.warning(_kojin_warn)
+
     # 賞与の支給月（任意）— 「賃金台帳の作成」タスクで非暦年決算のときだけ表示。
     # 年間集計表など「支給日の無い賞与」を対象事業年度の12ヶ月で正しく絞り込むためのヒント。
-    bonus_paid_months: list[tuple[int, int]] | None = None
+    bonus_paid_months: list[tuple[int | None, int]] | None = None
     if task_type == 'wage_ledger_creation' and fiscal_month_override not in (None, 12):
         _bonus_str = st.text_input(
             '賞与の支給月（任意・yyyy/mm カンマ区切り）',
             value='',
             help='台帳に賞与の支給年月が無い（年間集計表など）非暦年決算のとき、'
                  '夏・冬など各回の支給年月を入力すると対象事業年度で自動補正します。'
-                 '例: 2024/12, 2025/07。空欄なら従来どおり（支給日不明なら要確認の警告を表示）。',
+                 '例: 2024/12, 2025/07。年が分からなければ月だけ（例: 12, 7）でも可'
+                 '（対象年度は台帳実データで自動補正）。空欄なら従来どおり。',
         )
         bonus_paid_months = _parse_bonus_months_input(_bonus_str)
         if _bonus_str and not bonus_paid_months:
-            st.warning('賞与の支給月は yyyy/mm をカンマ区切りで入力してください（例: 2024/12, 2025/07）')
+            st.warning('賞与の支給月は yyyy/mm か月のみ（例: 2024/12, 2025/07 もしくは 12, 7）で入力してください')
+        else:
+            _bad_tokens = _unparsed_bonus_tokens(_bonus_str)
+            if _bad_tokens:
+                st.warning(
+                    f'次の支給月を解釈できませんでした（無視されます）: {"、".join(_bad_tokens)}。'
+                    'yyyy/mm か月のみ（例: 2024/12, 12）で入力してください。'
+                )
 
     # 製造原価ありフラグ — 製造業向け。チェック時、AI に「製造原価報告書が存在する」ヒントを注入
     # 決算書PDFを参照しないタスクでは非表示
@@ -2059,28 +2146,18 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
         # ファイル保存（データソースに応じて）— 保存名は NFC 統一
         if data_source == 'Google Drive' and drive_files_to_download:
             with st.spinner('Google Driveからファイルをダウンロード中...'):
-                from hojokin.drive_client import GoogleFormatNotSupportedError
                 client = _get_drive_client()
-                saved = []
-                skipped: list[tuple[str, str]] = []
-                for f in drive_files_to_download:
-                    name = _nfc_filename(f['name'])
-                    dest = work_dir / name
-                    try:
-                        saved_path = client.download_file(
-                            f['id'], dest, mime_type=f.get('mimeType'),
-                        )
-                        saved.append(saved_path.name)
-                    except GoogleFormatNotSupportedError as e:
-                        # 対応外のGoogle形式（フォーム/図面/サイト/解決失敗ショートカット等）は
-                        # スキップして処理続行。Excel/PDF 等の主要書類が揃っていれば申請書は作れる。
-                        skipped.append((name, str(e)))
-                        logger.warning(f'Drive ダウンロードスキップ: {name} ({e})')
+                saved, skipped, dl_errors = _download_drive_files(
+                    client, drive_files_to_download, work_dir,
+                )
                 st.caption(
                     f'{len(saved)}件のファイルをダウンロードしました'
                     + (f'（{len(skipped)}件スキップ）' if skipped else '')
+                    + (f'（{len(dl_errors)}件失敗）' if dl_errors else '')
                 )
                 if skipped:
+                    # 対応外のGoogle形式（フォーム/図面/サイト/解決失敗ショートカット等）は
+                    # スキップして処理続行。Excel/PDF 等の主要書類が揃っていれば申請書は作れる。
                     with st.expander(
                         f'⚠ ダウンロードできなかったファイル {len(skipped)}件',
                         expanded=False,
@@ -2091,6 +2168,16 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                             '上記は Google フォーム / 図面 / サイト等の対応外形式です。'
                             '主要書類（Excel/PDF）が揃っていれば申請書は作成できます。'
                         )
+                if dl_errors:
+                    # ネット断・権限・容量制限等の一般例外。raw traceback を出さず警告で続行。
+                    st.warning(
+                        f'⚠ {len(dl_errors)}件のファイルをダウンロードできませんでした'
+                        '（ネットワーク／権限／容量制限の可能性）。不足書類があれば'
+                        '申請書に反映されません。少し待って再実行すると解消することがあります。'
+                    )
+                    with st.expander('失敗したファイルの詳細', expanded=False):
+                        for name, reason in dl_errors:
+                            st.text(f'  {name}  — {reason}')
         else:
             saved = save_uploaded_files(uploaded_files, work_dir)
 
@@ -2474,4 +2561,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.56 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.57 | カラフルボックス株式会社')
