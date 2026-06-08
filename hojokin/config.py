@@ -60,7 +60,7 @@ _USE_DOCUMENT_AI_OCR_RAW = os.getenv('USE_DOCUMENT_AI_OCR', 'false').strip().low
 # - Document AI で画像PDFをテキスト化（無料トライアル中は無料、その後 $0.0015/ページ）
 # - 抽出モデルを Sonnet 4.6 から Haiku 4.5 ($1/MTok) に切替えて入力コスト 1/3
 # - 1案件 約46円 → 約18円 (無料中) / 約27円 (90日後) と試算
-# 精度検証: クリーンニイガタ・後藤造園・Kデザインの3社で
+# 精度検証: 実案件3社で
 #           Sonnet ベースラインと同等以上 (むしろ漏れが減る方向) を確認済。
 # 失敗時は通常の Sonnet 画像経路にフォールバック (既存挙動維持)。
 USE_OCR_HAIKU_EXTRACTION = os.getenv('USE_OCR_HAIKU_EXTRACTION', 'false').strip().lower() in ('true', '1', 'on', 'yes')
