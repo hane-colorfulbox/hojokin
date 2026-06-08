@@ -1924,6 +1924,62 @@ class ClaudeExtractor(BaseExtractor):
             expected_effect=d.get('expected_effect', ''),
         )
 
+    def _generate_business_description_candidates(
+        self,
+        *,
+        prompt: str,
+        stats_base: str,
+        caller_label: str,
+        n_candidates: int,
+    ) -> tuple[list[str], bool]:
+        """事業内容の再生成候補を n_candidates 件生成し (候補リスト, クレジット切れか) を返す。
+
+        shorten/expand 共通の「N案ループ＋応答パース＋フェンス/引用符/改行のクレンジング＋
+        送受信ログ」を集約する。どのレンジを採用するかの選別は呼び出し側に残す。
+        writing_model + temperature(BIZ_DESC.GEN_TEMPERATURE) で呼ぶ。temperature は
+        非対応モデル時に _messages_create_with_retry が落とす（既存契約を維持）。
+        """
+        candidates: list[str] = []
+        credit_exhausted = False
+        for i in range(n_candidates):
+            caller = f'{caller_label}_{i+1}/{n_candidates}'
+            try:
+                response = self._messages_create_with_retry(
+                    caller=caller,
+                    stats=stats_base,
+                    model=self.writing_model,
+                    max_tokens=BIZ_DESC.GEN_MAX_TOKENS,
+                    temperature=BIZ_DESC.GEN_TEMPERATURE,
+                    messages=[{'role': 'user', 'content': prompt}],
+                )
+            except APICreditExhaustedError as e:
+                logger.warning(f'[API失敗] caller={caller} APIクレジット切れ: {e}')
+                credit_exhausted = True
+                break  # 残高切れなら以降の候補生成も無駄
+            except Exception as e:
+                logger.warning(f'[API失敗] caller={caller} {type(e).__name__}: {e}')
+                continue
+
+            try:
+                cand = (response.content[0].text or '').strip()
+            except (IndexError, AttributeError) as e:
+                logger.warning(f'[API失敗] caller={caller} 応答パース失敗: {e}')
+                continue
+
+            # 引用符・コードフェンス・改行で囲まれて返ってきた場合の保険処理
+            for fence in ('```', '"""', "'''"):
+                if cand.startswith(fence) and cand.endswith(fence):
+                    cand = cand[len(fence):-len(fence)].strip()
+            cand = cand.strip('「」"\'').replace('\n', '').strip()
+
+            if cand:
+                candidates.append(cand)
+                logger.warning(
+                    f'[API成功] caller={caller} 候補{i+1}={len(cand)}文字 '
+                    f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
+                )
+        return candidates, credit_exhausted
+
     def shorten_business_description(
         self,
         text: str,
@@ -1964,45 +2020,10 @@ class ClaudeExtractor(BaseExtractor):
             f'{stats_base} 原文={len(text)}文字 目標={target}文字 n_candidates={n_candidates}'
         )
 
-        candidates: list[str] = []
-        credit_exhausted = False
-        for i in range(n_candidates):
-            caller = f'shorten_business_description_{i+1}/{n_candidates}'
-            try:
-                response = self._messages_create_with_retry(
-                    caller=caller,
-                    stats=stats_base,
-                    model=self.writing_model,
-                    max_tokens=BIZ_DESC.GEN_MAX_TOKENS,
-                    temperature=BIZ_DESC.GEN_TEMPERATURE,
-                    messages=[{'role': 'user', 'content': prompt}],
-                )
-            except APICreditExhaustedError as e:
-                logger.warning(f'[API失敗] caller={caller} APIクレジット切れ: {e}')
-                credit_exhausted = True
-                break  # 残高切れなら以降の候補生成も無駄
-            except Exception as e:
-                logger.warning(f'[API失敗] caller={caller} {type(e).__name__}: {e}')
-                continue
-
-            try:
-                cand = (response.content[0].text or '').strip()
-            except (IndexError, AttributeError) as e:
-                logger.warning(f'[API失敗] caller={caller} 応答パース失敗: {e}')
-                continue
-
-            # 引用符・コードフェンス・改行で囲まれて返ってきた場合の保険処理
-            for fence in ('```', '"""', "'''"):
-                if cand.startswith(fence) and cand.endswith(fence):
-                    cand = cand[len(fence):-len(fence)].strip()
-            cand = cand.strip('「」"\'').replace('\n', '').strip()
-
-            if cand:
-                candidates.append(cand)
-                logger.warning(
-                    f'[API成功] caller={caller} 候補{i+1}={len(cand)}文字 '
-                    f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
-                )
+        candidates, credit_exhausted = self._generate_business_description_candidates(
+            prompt=prompt, stats_base=stats_base,
+            caller_label='shorten_business_description', n_candidates=n_candidates,
+        )
 
         if not candidates:
             reason = 'APIクレジット切れ' if credit_exhausted else '全候補の生成に失敗'
@@ -2077,44 +2098,10 @@ class ClaudeExtractor(BaseExtractor):
             f'{stats_base} 原文={len(text)}文字 目標={target_min}〜{target}文字 n_candidates={n_candidates}'
         )
 
-        candidates: list[str] = []
-        credit_exhausted = False
-        for i in range(n_candidates):
-            caller = f'expand_business_description_{i+1}/{n_candidates}'
-            try:
-                response = self._messages_create_with_retry(
-                    caller=caller,
-                    stats=stats_base,
-                    model=self.writing_model,
-                    max_tokens=BIZ_DESC.GEN_MAX_TOKENS,
-                    temperature=BIZ_DESC.GEN_TEMPERATURE,
-                    messages=[{'role': 'user', 'content': prompt}],
-                )
-            except APICreditExhaustedError as e:
-                logger.warning(f'[API失敗] caller={caller} APIクレジット切れ: {e}')
-                credit_exhausted = True
-                break
-            except Exception as e:
-                logger.warning(f'[API失敗] caller={caller} {type(e).__name__}: {e}')
-                continue
-
-            try:
-                cand = (response.content[0].text or '').strip()
-            except (IndexError, AttributeError) as e:
-                logger.warning(f'[API失敗] caller={caller} 応答パース失敗: {e}')
-                continue
-
-            for fence in ('```', '"""', "'''"):
-                if cand.startswith(fence) and cand.endswith(fence):
-                    cand = cand[len(fence):-len(fence)].strip()
-            cand = cand.strip('「」"\'').replace('\n', '').strip()
-
-            if cand:
-                candidates.append(cand)
-                logger.warning(
-                    f'[API成功] caller={caller} 候補{i+1}={len(cand)}文字 '
-                    f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
-                )
+        candidates, credit_exhausted = self._generate_business_description_candidates(
+            prompt=prompt, stats_base=stats_base,
+            caller_label='expand_business_description', n_candidates=n_candidates,
+        )
 
         if not candidates:
             reason = 'APIクレジット切れ' if credit_exhausted else '全候補の生成に失敗'
