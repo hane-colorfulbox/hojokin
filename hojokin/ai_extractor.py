@@ -79,6 +79,21 @@ RETRYABLE_STATUS_CODES = {422, 429, 500, 502, 503, 504, 529}
 # 残高切れ判定用の文字列（400 invalid_request_error の message に含まれる）
 CREDIT_BALANCE_MARKER = 'credit balance is too low'
 
+# サンプリングパラメータ（temperature/top_p/top_k）を受け付けないモデル。
+# Opus 4.7 系以降で廃止され、送ると 400「is deprecated for this model.」。
+# 抽出用 Sonnet 4.6 / ロールバック先 Sonnet は引き続きサポートするため、
+# 「全モデルから消す」のではなく「非対応モデルのときだけ落とす」方針。
+# 前方一致なので claude-opus-4-8-fast 等の派生IDも拾う。
+SAMPLING_PARAM_UNSUPPORTED_PREFIXES = ('claude-opus-4-7', 'claude-opus-4-8')
+SAMPLING_PARAM_KEYS = ('temperature', 'top_p', 'top_k')
+# 400 message に含まれる廃止マーカー（既知リスト漏れの将来版モデルを自己修復するため）
+SAMPLING_PARAM_DEPRECATED_MARKER = 'deprecated for this model'
+
+
+def _model_supports_sampling_params(model: str) -> bool:
+    """temperature 等のサンプリングパラメータを受け付けるモデルか判定する。"""
+    return not any(model.startswith(p) for p in SAMPLING_PARAM_UNSUPPORTED_PREFIXES)
+
 # 賃金台帳PDFの事前分割閾値（ページ数 / バイト数）
 # どちらかを超えたら 1 PDF を半分に分割して送信する。
 # 経験則:
@@ -1390,6 +1405,18 @@ class ClaudeExtractor(BaseExtractor):
         """
         import anthropic
 
+        # サンプリングパラメータ非対応モデル（Opus 4.7系以降）には送らない。
+        # 送ると 400 になるため、API に届く前に落とす（既知モデルはここで確実に除去）。
+        model = kwargs.get('model', '')
+        if not _model_supports_sampling_params(model):
+            dropped = [k for k in SAMPLING_PARAM_KEYS if k in kwargs]
+            if dropped:
+                for k in dropped:
+                    kwargs.pop(k, None)
+                logger.info(
+                    f'[API] caller={caller} model={model} は {dropped} 非対応のため除外'
+                )
+
         last_error: Optional[Exception] = None
         for attempt in range(1, MAX_API_ATTEMPTS + 1):
             try:
@@ -1406,11 +1433,25 @@ class ClaudeExtractor(BaseExtractor):
 
             except anthropic.BadRequestError as e:
                 # 400: 残高切れだけは専用例外に、それ以外は即失敗（リトライしても無駄）
-                if CREDIT_BALANCE_MARKER in str(e).lower():
+                msg = str(e).lower()
+                if CREDIT_BALANCE_MARKER in msg:
                     logger.error(f'[API残高切れ] caller={caller} {stats}')
                     raise APICreditExhaustedError(
                         'APIの残高が不足しています。APIキー管理担当者にチャージを依頼してください。'
                     ) from e
+                # サンプリングパラメータ廃止モデル（既知リスト漏れの将来版等）を自己修復。
+                # 既知モデルはループ前に除去済みなので、ここに来るのは未知IDのとき。
+                if (SAMPLING_PARAM_DEPRECATED_MARKER in msg
+                        and any(k in kwargs for k in SAMPLING_PARAM_KEYS)
+                        and attempt < MAX_API_ATTEMPTS):
+                    dropped = [k for k in SAMPLING_PARAM_KEYS if k in kwargs]
+                    for k in dropped:
+                        kwargs.pop(k, None)
+                    logger.warning(
+                        f'[API自己修復] caller={caller} model={model} {dropped} 廃止検知 '
+                        f'→ 除外して再試行'
+                    )
+                    continue
                 logger.error(f'[API失敗/400] caller={caller} {stats} error={e}')
                 raise
 
