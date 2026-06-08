@@ -99,6 +99,26 @@ BASE_DIR = Path(os.getenv('HOJOKIN_BASE_DIR', '.'))
 # ── 定数 ──
 STANDARD_ANNUAL_HOURS = 2080  # 標準年間労働時間 (40h/週 × 52週)
 
+
+# ── 事業内容(business_description)の文字数しきい値・生成パラメータ ──
+# 申請書セルの上限・目標レンジ・候補生成パラメータを1箇所に集約する。
+# 旧来は pipeline.py / ai_extractor.py に 255/252/240/250/3 等が散在しており、
+# セル上限の変更などで複数箇所を直す必要があった。分岐に効く数値のみここに集約し、
+# プロンプト本文・警告文言の表示数字は各所のリテラルのまま（文章は機械的に追従させない）。
+@dataclass(frozen=True)
+class BusinessDescriptionLimits:
+    HARD_MAX: int = 255            # 申請書セルの上限（超えると切られる）。比較・トリムの絶対基準
+    TARGET_MAX: int = 252          # 目標上限（バッファ込み）
+    TARGET_MIN: int = 240          # 目標下限（4要素を書き切る最小）。これ未満なら増量再生成
+    SHORTEN_MAX_DEFAULT: int = 250  # shorten_business_description の max_len 既定
+    SHORTEN_TARGET_FLOOR: int = 200  # shorten target の下限クランプ
+    N_CANDIDATES: int = 3          # N案生成の本数
+    GEN_TEMPERATURE: float = 0.7   # 候補生成の temperature（ばらつき用）
+    GEN_MAX_TOKENS: int = 1024     # 候補生成の max_tokens
+
+
+BIZ_DESC = BusinessDescriptionLimits()
+
 # ── 最低賃金マスタ (R7年度改定後) ──
 MIN_WAGE_MAP = {
     '北海道': 1075, '青森県': 1029, '岩手県': 1031, '宮城県': 1038,

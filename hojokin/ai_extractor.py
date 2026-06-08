@@ -18,6 +18,7 @@ from .models import (
     CompanyInfo, FinancialData, TaxCertificate,
     Employee, MonthlyWageData, EstimateData, AIJudgment,
 )
+from .config import BIZ_DESC
 
 logger = logging.getLogger(__name__)
 
@@ -1216,8 +1217,8 @@ class BaseExtractor(ABC):
     def shorten_business_description(
         self,
         text: str,
-        max_len: int = 250,
-        n_candidates: int = 3,
+        max_len: int = BIZ_DESC.SHORTEN_MAX_DEFAULT,
+        n_candidates: int = BIZ_DESC.N_CANDIDATES,
     ) -> 'ShortenResult':
         """事業内容（business_description）が255文字制限を超えた場合の救済短縮。
 
@@ -1229,9 +1230,9 @@ class BaseExtractor(ABC):
     def expand_business_description(
         self,
         text: str,
-        target_min: int = 240,
-        target_max: int = 252,
-        n_candidates: int = 3,
+        target_min: int = BIZ_DESC.TARGET_MIN,
+        target_max: int = BIZ_DESC.TARGET_MAX,
+        n_candidates: int = BIZ_DESC.N_CANDIDATES,
     ) -> 'ShortenResult':
         """事業内容が240文字未満のとき、4要素を保ったまま厚みを出して 240〜252 字に増やす。
 
@@ -1926,8 +1927,8 @@ class ClaudeExtractor(BaseExtractor):
     def shorten_business_description(
         self,
         text: str,
-        max_len: int = 250,
-        n_candidates: int = 3,
+        max_len: int = BIZ_DESC.SHORTEN_MAX_DEFAULT,
+        n_candidates: int = BIZ_DESC.N_CANDIDATES,
     ) -> ShortenResult:
         """事業内容が255文字超のとき、Claude に N 案生成させて文字数で機械選択する。
 
@@ -1942,7 +1943,7 @@ class ClaudeExtractor(BaseExtractor):
         if not text:
             return ShortenResult(text=None, source='failed')
 
-        target = max(200, min(max_len, 252))  # 200〜252の範囲にクランプ
+        target = max(BIZ_DESC.SHORTEN_TARGET_FLOOR, min(max_len, BIZ_DESC.TARGET_MAX))  # 200〜252の範囲にクランプ
         prompt = (
             '以下の事業内容を、意味と4要素（現状/課題/解決策/期待効果）を維持しつつ'
             f'**{target}文字以内**に短縮してください。\n'
@@ -1955,8 +1956,8 @@ class ClaudeExtractor(BaseExtractor):
         )
 
         stats_base = (
-            f'images=0枚 prompt={len(prompt)}chars max_tokens=1024 '
-            f'temperature=0.7 model={self.writing_model}'
+            f'images=0枚 prompt={len(prompt)}chars max_tokens={BIZ_DESC.GEN_MAX_TOKENS} '
+            f'temperature={BIZ_DESC.GEN_TEMPERATURE} model={self.writing_model}'
         )
         logger.warning(
             f'[API送信] caller=shorten_business_description '
@@ -1972,8 +1973,8 @@ class ClaudeExtractor(BaseExtractor):
                     caller=caller,
                     stats=stats_base,
                     model=self.writing_model,
-                    max_tokens=1024,
-                    temperature=0.7,
+                    max_tokens=BIZ_DESC.GEN_MAX_TOKENS,
+                    temperature=BIZ_DESC.GEN_TEMPERATURE,
                     messages=[{'role': 'user', 'content': prompt}],
                 )
             except APICreditExhaustedError as e:
@@ -2009,7 +2010,7 @@ class ClaudeExtractor(BaseExtractor):
             return ShortenResult(text=None, source='failed')
 
         # 段1: 255以内の候補があれば「最長」を採用（情報量を最大化）
-        valid = [c for c in candidates if len(c) <= 255]
+        valid = [c for c in candidates if len(c) <= BIZ_DESC.HARD_MAX]
         if valid:
             best = max(valid, key=len)
             logger.warning(
@@ -2020,8 +2021,8 @@ class ClaudeExtractor(BaseExtractor):
 
         # 段2: 全候補が255超 → 最短候補を句点単位で末尾削除
         base = min(candidates, key=len)
-        trimmed = _trim_to_period_limit(base, 255)
-        if trimmed and len(trimmed) <= 255:
+        trimmed = _trim_to_period_limit(base, BIZ_DESC.HARD_MAX)
+        if trimmed and len(trimmed) <= BIZ_DESC.HARD_MAX:
             logger.warning(
                 f'shorten_business_description: 機械削除フォールバック '
                 f'候補数={len(candidates)} 全候補255超 ベース={len(base)}文字 → 削除後={len(trimmed)}文字'
@@ -2038,9 +2039,9 @@ class ClaudeExtractor(BaseExtractor):
     def expand_business_description(
         self,
         text: str,
-        target_min: int = 240,
-        target_max: int = 252,
-        n_candidates: int = 3,
+        target_min: int = BIZ_DESC.TARGET_MIN,
+        target_max: int = BIZ_DESC.TARGET_MAX,
+        n_candidates: int = BIZ_DESC.N_CANDIDATES,
     ) -> ShortenResult:
         """事業内容が240文字未満のとき、Claude に N 案生成させて文字数で機械選択する。
 
@@ -2055,7 +2056,7 @@ class ClaudeExtractor(BaseExtractor):
         if not text:
             return ShortenResult(text=None, source='failed')
 
-        target = max(240, min(target_max, 252))  # 目標上限を240〜252にクランプ
+        target = max(BIZ_DESC.TARGET_MIN, min(target_max, BIZ_DESC.TARGET_MAX))  # 目標上限を240〜252にクランプ
         prompt = (
             '以下の事業内容を、意味と4要素（現状/課題/解決策/期待効果）を維持したまま'
             f'**{target_min}〜{target}文字**に増やして厚みを出してください。\n'
@@ -2068,8 +2069,8 @@ class ClaudeExtractor(BaseExtractor):
         )
 
         stats_base = (
-            f'images=0枚 prompt={len(prompt)}chars max_tokens=1024 '
-            f'temperature=0.7 model={self.writing_model}'
+            f'images=0枚 prompt={len(prompt)}chars max_tokens={BIZ_DESC.GEN_MAX_TOKENS} '
+            f'temperature={BIZ_DESC.GEN_TEMPERATURE} model={self.writing_model}'
         )
         logger.warning(
             f'[API送信] caller=expand_business_description '
@@ -2085,8 +2086,8 @@ class ClaudeExtractor(BaseExtractor):
                     caller=caller,
                     stats=stats_base,
                     model=self.writing_model,
-                    max_tokens=1024,
-                    temperature=0.7,
+                    max_tokens=BIZ_DESC.GEN_MAX_TOKENS,
+                    temperature=BIZ_DESC.GEN_TEMPERATURE,
                     messages=[{'role': 'user', 'content': prompt}],
                 )
             except APICreditExhaustedError as e:
@@ -2121,7 +2122,7 @@ class ClaudeExtractor(BaseExtractor):
             return ShortenResult(text=None, source='failed')
 
         # 段1: [240,255] に収まる候補があれば「最長」を採用
-        in_range = [c for c in candidates if target_min <= len(c) <= 255]
+        in_range = [c for c in candidates if target_min <= len(c) <= BIZ_DESC.HARD_MAX]
         if in_range:
             best = max(in_range, key=len)
             logger.warning(
@@ -2131,9 +2132,9 @@ class ClaudeExtractor(BaseExtractor):
             return ShortenResult(text=best, source='ai')
 
         # 段2: 全候補が255超 → 過剰候補を句点削除して [240,255] に収める
-        for c in sorted((c for c in candidates if len(c) > 255), key=len):
-            trimmed = _trim_to_period_limit(c, 255)
-            if trimmed and target_min <= len(trimmed) <= 255:
+        for c in sorted((c for c in candidates if len(c) > BIZ_DESC.HARD_MAX), key=len):
+            trimmed = _trim_to_period_limit(c, BIZ_DESC.HARD_MAX)
+            if trimmed and target_min <= len(trimmed) <= BIZ_DESC.HARD_MAX:
                 logger.warning(
                     f'expand_business_description: 機械削除フォールバック '
                     f'候補数={len(candidates)} ベース={len(c)}文字 → 削除後={len(trimmed)}文字'

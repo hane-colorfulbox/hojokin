@@ -8,7 +8,7 @@ import tempfile
 import unicodedata
 from pathlib import Path
 
-from .config import get_mapping, CLAUDE_API_KEY
+from .config import get_mapping, CLAUDE_API_KEY, BIZ_DESC
 from .models import ExtractionResult, ProcessingStatus, CompanyInfo
 from .ai_extractor import create_extractor, BaseExtractor, StubExtractor
 from .hearing_reader import read_hearing_sheet
@@ -835,11 +835,13 @@ def run_application_transfer(
         biz_desc = (extraction.ai_judgment.business_description or '').strip()
         if biz_desc:
             n_orig = len(biz_desc)
-            if n_orig > 255:
+            if n_orig > BIZ_DESC.HARD_MAX:
                 result = None
                 if extractor is not None:
                     try:
-                        result = extractor.shorten_business_description(biz_desc, max_len=250)
+                        result = extractor.shorten_business_description(
+                            biz_desc, max_len=BIZ_DESC.SHORTEN_MAX_DEFAULT,
+                        )
                     except Exception as e:
                         logger.warning(f'事業内容の自動短縮に失敗（警告にフォールバック）: {e}', exc_info=True)
                         result = None
@@ -869,7 +871,7 @@ def run_application_transfer(
                         f'原稿を手動で短縮してください。'
                     )
                     logger.warning(f'事業内容の自動短縮に失敗: {n_orig}文字のまま残置')
-            elif n_orig < 240:
+            elif n_orig < BIZ_DESC.TARGET_MIN:
                 # 240字未満は Opus(writing_model) で 4要素を厚くして 240〜252 字に増量する。
                 # 成否で >255 短縮と同じ3パターン警告構造に揃える。
                 result = None
