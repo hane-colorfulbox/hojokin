@@ -1351,16 +1351,24 @@ def run_wage_calculation(
                     f'パート・契約{part_count}'
                 )
 
-        # 給与データPDFから読取（APIが必要）
-        wage_pdfs = detector.get_all('wage_data')
-        if wage_pdfs and not employees_detail:
-            # PDFからの読取はAPI必須
-            wages_list = []
-            for wp in sorted(wage_pdfs):
-                images = pdf_to_images(wp)
-                wages = extractor.extract_wages(images, wp.stem)
-                wages_list.append(wages)
-            # TODO: wages_listからemployees_detailを構築
+        # 支給控除一覧/給与データの PDF が唯一の賃金ソースのケース。
+        # PDF からの直接読取は未対応（正規ルートは「賃金台帳の作成」タスクで
+        # 標準テンプレ形式の Excel に変換してから投入する）。ここで AI 抽出を
+        # 呼んでも結果を employees_detail に組み込む経路が無く、API 課金だけが
+        # 無駄に走って無言で R215/R216 が空になる。呼び出さず明示警告で変換を促す。
+        wage_data_pdf_warning = ''
+        wage_data_pdfs = detector.get_all('wage_data')
+        if wage_data_pdfs and not employees_detail:
+            _names = [p.name for p in sorted(wage_data_pdfs)]
+            wage_data_pdf_warning = (
+                f' ⚠ 支給控除一覧/給与データのPDF（{len(_names)}件: '
+                f'{", ".join(_names[:3])}{"…" if len(_names) > 3 else ""}）は'
+                f'直接読み取れません。「賃金台帳の作成」タスクで標準テンプレ形式の'
+                f'Excelに変換してから投入してください。'
+            )
+            logger.warning(
+                f'wage_data PDF を検出したが直接読取は未対応のためスキップ（API未呼出）: {_names}'
+            )
 
         # 表示用の期間ラベル。ユーザーが決算月を指定 + AI 推定と不一致なら
         # override 反映後の期間を表示（賃金計算と帳票表示の整合を取る）
@@ -1491,7 +1499,10 @@ def run_wage_calculation(
         status.status = '完了'
         status.output_files = [output_path.name]
         task_label = '一人当たり給与支給総額計算' if per_employee_only else '給与支給総額計算'
-        status.message = f'{task_label} 完了' + fiscal_month_warning + pl_period_warning
+        status.message = (
+            f'{task_label} 完了'
+            + fiscal_month_warning + pl_period_warning + wage_data_pdf_warning
+        )
         logger.info(f'{task_label} 完了: {output_path.name}')
 
     except Exception as e:
