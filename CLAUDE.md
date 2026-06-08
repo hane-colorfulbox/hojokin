@@ -94,8 +94,10 @@ IT導入補助金の申請書類を、ヒアリングシート・PDF資料・Exc
 
 - **テスト実行時に Anthropic API は絶対に呼ばない**（API課金ゼロが原則）。
   `_debug/test_*.py` は `StubExtractor` / `MagicMock` / Sonnet サブエージェント代用で動くこと
-- AI モデルは **Sonnet 4.6** を仮定（コードのデフォルト `claude-sonnet-4-6` 通り）。
-  Haiku 等への切替は別途検討。現状は **Sonnet 統一方針**
+- AI モデルは **2系統（v0.2.49〜）**：**抽出（登記簿/PL/見積/賃金台帳）= Sonnet 4.6**（`CLAUDE_MODEL` 既定 `claude-sonnet-4-6`）、
+  **文章生成（事業内容255字を含む判断生成・短縮・増量）= Opus 4.8**（`WRITING_MODEL` 既定 `claude-opus-4-8`）。
+  「文章を書く処理だけ Opus」が方針。抽出は Sonnet+画像(Vision)維持（レイアウト命の財務書類で実績・回帰回避）。
+  テストは `StubExtractor`/`MagicMock` で API を呼ばないため、この既定変更の影響を受けない。
 - 大規模変更後は `_debug/` 配下のテストを全件回し、回帰なしを確認してから push
 
 ## ロールバック・運用フラグ
@@ -103,6 +105,8 @@ IT導入補助金の申請書類を、ヒアリングシート・PDF資料・Exc
 | フラグ | デフォルト | 役割 |
 |---|---|---|
 | `USE_AI_WAGE_EXTRACTION` | `true` | 賃金台帳の AI 抽出 ON/OFF。`false` で決定論パーサーのみ |
+| `CLAUDE_MODEL` | `claude-sonnet-4-6` | 抽出（画像/PDF）用モデル |
+| `WRITING_MODEL` | `claude-opus-4-8` | 文章生成（事業内容）用モデル。`claude-sonnet-4-6` にすれば生成も Sonnet に戻る |
 
 ## 関連ドキュメント
 

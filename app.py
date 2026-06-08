@@ -869,9 +869,9 @@ with st.sidebar:
 
     st.markdown('**処理の目安**')
     st.caption('所要時間: 約1〜3分（PDF量により変動）')
-    st.caption('API利用料: 約20〜80円/社（PDF量により変動）')
+    st.caption('API利用料: 約20〜90円/社（PDF量により変動）')
     st.caption('└ 賃金台帳は Excel / CSV のみ対応（PDF は受け付けません）')
-    st.caption('└ Sonnet 4.6 の従量課金。確定額は Anthropic の請求でご確認ください')
+    st.caption('└ Opus 4.8（文章生成）＋ Sonnet 4.6（PDF抽出）の従量課金。確定額は Anthropic の請求でご確認ください')
     st.caption('実行前に「案件規模の予想」で詳細目安が表示されます')
 
 # ── ファイル判別ヘルパー（ローカル/Drive 共通） ──
@@ -2440,4 +2440,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.48 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.49 | カラフルボックス株式会社')

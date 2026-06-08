@@ -8,7 +8,13 @@ from dataclasses import dataclass, field
 
 # ── 環境変数から読み込み ──
 CLAUDE_API_KEY = os.getenv('CLAUDE_API_KEY', '')
+# 抽出（登記簿/PL/見積/賃金台帳）用モデル。既定 Sonnet 4.6。
+# レイアウト命の財務書類は Sonnet+画像(Vision)で実績十分。Opus化は精度向上が薄く回帰リスク大。
 CLAUDE_MODEL = os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-6')
+# 文章生成（事業内容255字を含む申請書の判断生成・短縮）用モデル。既定 Opus 4.8。
+# "文章を書く" 処理だけ Opus にして事業内容の精度を上げる。抽出は CLAUDE_MODEL（Sonnet）のまま。
+# ロールバックは WRITING_MODEL=claude-sonnet-4-6 を環境変数 / Streamlit Secrets に置くだけ。
+WRITING_MODEL = os.getenv('WRITING_MODEL', 'claude-opus-4-8')
 GOOGLE_CREDENTIALS_PATH = os.getenv('GOOGLE_CREDENTIALS_PATH', 'credentials/service_account.json')
 MANAGEMENT_SHEET_ID = os.getenv('MANAGEMENT_SHEET_ID', '')
 

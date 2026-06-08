@@ -1211,6 +1211,20 @@ class BaseExtractor(ABC):
         """
         return ShortenResult(text=None, source='failed')
 
+    def expand_business_description(
+        self,
+        text: str,
+        target_min: int = 240,
+        target_max: int = 252,
+        n_candidates: int = 3,
+    ) -> 'ShortenResult':
+        """事業内容が240文字未満のとき、4要素を保ったまま厚みを出して 240〜252 字に増やす。
+
+        実装は ClaudeExtractor で N 案生成 + 文字数で機械選択。
+        既定実装は failed を返す（API 非利用環境向けの no-op）。
+        """
+        return ShortenResult(text=None, source='failed')
+
 
 class StubExtractor(BaseExtractor):
     """
@@ -1295,6 +1309,9 @@ class ClaudeExtractor(BaseExtractor):
     # 録画/再生 recorder のクラス既定値。__init__ を通さずに組み立てる
     # テストダブルでも self.recorder 参照が AttributeError にならないよう既定を None に。
     recorder = None
+    # 文章生成用モデルのクラス既定値。__new__ で __init__ を通さず組むテストダブルでも
+    # self.writing_model 参照が AttributeError にならないよう既定を持たせる（recorder と同じ事情）。
+    writing_model = 'claude-opus-4-8'
 
     def __init__(
         self,
@@ -1303,6 +1320,7 @@ class ClaudeExtractor(BaseExtractor):
         retry_callback: Optional[RetryCallback] = None,
         timeout: float = 480.0,
         recorder=None,
+        writing_model: str = 'claude-opus-4-8',
     ):
         try:
             import anthropic
@@ -1313,7 +1331,8 @@ class ClaudeExtractor(BaseExtractor):
         # 480秒応答なしで例外 → _messages_create_with_retry が指数バックオフで再試行。
         # （事前分割で 15P/4MB 超は分割送信するため、1チャンクあたりは確実にこの範囲内に収まる）
         self.client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
-        self.model = model
+        self.model = model              # 抽出（画像/PDF）用。既定 Sonnet。
+        self.writing_model = writing_model  # 文章生成（事業内容）用。既定 Opus。
         self.retry_callback = retry_callback
         # 録画/再生 recorder（hojokin.api_recorder）。None=本番（実APIを直接叩く）。
         # ReplayRecorder を渡すと回帰テストが課金ゼロで過去の抽出結果を再生できる。
@@ -1323,7 +1342,9 @@ class ClaudeExtractor(BaseExtractor):
         # 上位の信頼度判定（_extract_pl_structured）が confidence.reason に転記する。
         # 結果として pipeline._build_confidence_warnings → UI「📋 確認キュー」まで届く。
         self._extraction_errors: dict[str, str] = {}
-        logger.info(f'Claude API 初期化完了 (model={model}, timeout={timeout}s)')
+        logger.info(
+            f'Claude API 初期化完了 (model={model}, writing_model={writing_model}, timeout={timeout}s)'
+        )
 
     def _format_api_error(self, e: Exception) -> str:
         """API例外をユーザー向けの分かりやすい日本語メッセージに変換する。
@@ -1793,14 +1814,17 @@ class ClaudeExtractor(BaseExtractor):
             **hearing_fields,
         )
 
-        # AI判断はテキストのみ（画像なし）
-        stats = f'images=0枚 prompt={len(prompt)}chars max_tokens=4096'
+        # AI判断はテキストのみ（画像なし）。文章生成なので writing_model（既定 Opus）を使う。
+        # max_tokens は Opus 新トークナイザ(+最大35%)でのJSON切れ防止に 6000 へ余裕を持たせる。
+        # temperature=0.5 で長さ・文体の暴れを抑える（未指定=既定1.0だと255字超過/過少が出やすい）。
+        stats = f'images=0枚 prompt={len(prompt)}chars max_tokens=6000 model={self.writing_model}'
         logger.warning(f'[API送信] caller=generate_ai_judgment {stats}')
         response = self._messages_create_with_retry(
             caller='generate_ai_judgment',
             stats=stats,
-            model=self.model,
-            max_tokens=4096,
+            model=self.writing_model,
+            max_tokens=6000,
+            temperature=0.5,
             messages=[{'role': 'user', 'content': prompt}],
         )
         text = response.content[0].text
@@ -1889,7 +1913,10 @@ class ClaudeExtractor(BaseExtractor):
             f'【原文（{len(text)}文字）】\n{text}'
         )
 
-        stats_base = f'images=0枚 prompt={len(prompt)}chars max_tokens=1024 temperature=0.7'
+        stats_base = (
+            f'images=0枚 prompt={len(prompt)}chars max_tokens=1024 '
+            f'temperature=0.7 model={self.writing_model}'
+        )
         logger.warning(
             f'[API送信] caller=shorten_business_description '
             f'{stats_base} 原文={len(text)}文字 目標={target}文字 n_candidates={n_candidates}'
@@ -1903,7 +1930,7 @@ class ClaudeExtractor(BaseExtractor):
                 response = self._messages_create_with_retry(
                     caller=caller,
                     stats=stats_base,
-                    model=self.model,
+                    model=self.writing_model,
                     max_tokens=1024,
                     temperature=0.7,
                     messages=[{'role': 'user', 'content': prompt}],
@@ -1964,6 +1991,118 @@ class ClaudeExtractor(BaseExtractor):
         logger.warning(
             f'shorten_business_description: 機械削除も失敗 '
             f'候補数={len(candidates)} 最短候補={len(base)}文字'
+        )
+        return ShortenResult(text=None, source='failed')
+
+    def expand_business_description(
+        self,
+        text: str,
+        target_min: int = 240,
+        target_max: int = 252,
+        n_candidates: int = 3,
+    ) -> ShortenResult:
+        """事業内容が240文字未満のとき、Claude に N 案生成させて文字数で機械選択する。
+
+        フロー（shorten_business_description と対構造）:
+          1. 同一プロンプトを n_candidates 回送って候補を集める（temperature=0.7）
+          2. [240,255] に収まる候補があれば「最長」を採用 → source='ai'
+          3. 全候補が255超なら、過剰候補を句点削除して [240,255] に収める → 'mechanical'
+          4. それも無理（全候補が240未満等）なら 'failed'（呼び出し側で原文残し+警告）
+
+        文章を「水増し」せず固有名詞・数値で厚みを出すよう指示する。
+        """
+        if not text:
+            return ShortenResult(text=None, source='failed')
+
+        target = max(240, min(target_max, 252))  # 目標上限を240〜252にクランプ
+        prompt = (
+            '以下の事業内容を、意味と4要素（現状/課題/解決策/期待効果）を維持したまま'
+            f'**{target_min}〜{target}文字**に増やして厚みを出してください。\n'
+            '制約:\n'
+            '・本文のみを返す（前置き・説明・引用符・コードブロック・改行を入れない）\n'
+            f'・句読点・記号も1文字としてカウントし、必ず{target}文字以内に収める\n'
+            '・語尾は「〜である」調を維持\n'
+            '・固有の業務名・数値（時間・%・金額等）で具体性を足す。一般論の水増しは禁止\n\n'
+            f'【原文（{len(text)}文字）】\n{text}'
+        )
+
+        stats_base = (
+            f'images=0枚 prompt={len(prompt)}chars max_tokens=1024 '
+            f'temperature=0.7 model={self.writing_model}'
+        )
+        logger.warning(
+            f'[API送信] caller=expand_business_description '
+            f'{stats_base} 原文={len(text)}文字 目標={target_min}〜{target}文字 n_candidates={n_candidates}'
+        )
+
+        candidates: list[str] = []
+        credit_exhausted = False
+        for i in range(n_candidates):
+            caller = f'expand_business_description_{i+1}/{n_candidates}'
+            try:
+                response = self._messages_create_with_retry(
+                    caller=caller,
+                    stats=stats_base,
+                    model=self.writing_model,
+                    max_tokens=1024,
+                    temperature=0.7,
+                    messages=[{'role': 'user', 'content': prompt}],
+                )
+            except APICreditExhaustedError as e:
+                logger.warning(f'[API失敗] caller={caller} APIクレジット切れ: {e}')
+                credit_exhausted = True
+                break
+            except Exception as e:
+                logger.warning(f'[API失敗] caller={caller} {type(e).__name__}: {e}')
+                continue
+
+            try:
+                cand = (response.content[0].text or '').strip()
+            except (IndexError, AttributeError) as e:
+                logger.warning(f'[API失敗] caller={caller} 応答パース失敗: {e}')
+                continue
+
+            for fence in ('```', '"""', "'''"):
+                if cand.startswith(fence) and cand.endswith(fence):
+                    cand = cand[len(fence):-len(fence)].strip()
+            cand = cand.strip('「」"\'').replace('\n', '').strip()
+
+            if cand:
+                candidates.append(cand)
+                logger.warning(
+                    f'[API成功] caller={caller} 候補{i+1}={len(cand)}文字 '
+                    f'tokens={response.usage.input_tokens}in+{response.usage.output_tokens}out'
+                )
+
+        if not candidates:
+            reason = 'APIクレジット切れ' if credit_exhausted else '全候補の生成に失敗'
+            logger.warning(f'expand_business_description: {reason}（候補ゼロ）')
+            return ShortenResult(text=None, source='failed')
+
+        # 段1: [240,255] に収まる候補があれば「最長」を採用
+        in_range = [c for c in candidates if target_min <= len(c) <= 255]
+        if in_range:
+            best = max(in_range, key=len)
+            logger.warning(
+                f'expand_business_description: AI候補採用 '
+                f'候補数={len(candidates)} 範囲内={len(in_range)} 採用={len(best)}文字'
+            )
+            return ShortenResult(text=best, source='ai')
+
+        # 段2: 全候補が255超 → 過剰候補を句点削除して [240,255] に収める
+        for c in sorted((c for c in candidates if len(c) > 255), key=len):
+            trimmed = _trim_to_period_limit(c, 255)
+            if trimmed and target_min <= len(trimmed) <= 255:
+                logger.warning(
+                    f'expand_business_description: 機械削除フォールバック '
+                    f'候補数={len(candidates)} ベース={len(c)}文字 → 削除後={len(trimmed)}文字'
+                )
+                return ShortenResult(text=trimmed, source='mechanical')
+
+        # 段3: 240に届かない（増量不足）等 → 失敗（原文残し）
+        logger.warning(
+            f'expand_business_description: 範囲内に収められず '
+            f'候補数={len(candidates)} 最長候補={max(len(c) for c in candidates)}文字'
         )
         return ShortenResult(text=None, source='failed')
 
@@ -2730,20 +2869,26 @@ def create_extractor(
     api_key: str = '',
     retry_callback: Optional[RetryCallback] = None,
     model: str | None = None,
+    writing_model: str | None = None,
 ) -> BaseExtractor:
     """APIキーの有無に応じて適切なExtractorを返す。
 
-    model を省略した場合は config.CLAUDE_MODEL（環境変数 CLAUDE_MODEL で
-    上書き可能）を使う。Cloud Secrets / .env でモデル切替できるようにする。
+    model（抽出用）を省略した場合は config.CLAUDE_MODEL（既定 Sonnet）、
+    writing_model（文章生成用）を省略した場合は config.WRITING_MODEL（既定 Opus）を使う。
+    いずれも環境変数 / Streamlit Secrets で上書き可能。
     """
     if api_key:
-        from .config import CLAUDE_MODEL
+        from .config import CLAUDE_MODEL, WRITING_MODEL
         selected_model = model or CLAUDE_MODEL
-        logger.info(f'Claude API Extractor を使用 (model={selected_model})')
+        selected_writing = writing_model or WRITING_MODEL
+        logger.info(
+            f'Claude API Extractor を使用 (model={selected_model}, writing_model={selected_writing})'
+        )
         return ClaudeExtractor(
             api_key,
             model=selected_model,
             retry_callback=retry_callback,
+            writing_model=selected_writing,
         )
     else:
         logger.warning('APIキー未設定 → StubExtractor を使用（PDF読取不可）')
