@@ -76,6 +76,13 @@ def _parse_fiscal_end_from_filename(
             return (y, m)
         return None
 
+    # 期間レンジ「RX.M〜RY.N」「YYYY/M〜YYYY/N」形式は末尾(=期末)を採る。
+    # 単一日付パターンは先頭の日付にマッチして期首を返してしまうため、
+    # レンジ判定を最優先する（例:「決算書37期（R6.9〜R7.8）」→ 期末2025-08）。
+    period = _parse_wage_ledger_period(s)
+    if period is not None:
+        return _valid(*period[1])
+
     # 令和元年 (=2019)
     m = _REIWA_GANNEN_RE.search(s)
     if m:

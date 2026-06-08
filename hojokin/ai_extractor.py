@@ -2034,12 +2034,17 @@ class ClaudeExtractor(BaseExtractor):
             return ShortenResult(text=None, source='failed')
 
         target = max(BIZ_DESC.SHORTEN_TARGET_FLOOR, min(max_len, BIZ_DESC.TARGET_MAX))  # 200〜252の範囲にクランプ
+        # 下限を明示してバンド指定する（expand と対称）。上限のみ指示すると Opus が
+        # 安全側に短く振り、全候補が下限 240 未満に落ちて undershoot する（実測 224字）。
+        # target が下限未満（小さな max_len 指定時）でもレンジが反転しないようクランプ。
+        lo = min(BIZ_DESC.TARGET_MIN, target)
         prompt = (
             '以下の事業内容を、意味と4要素（現状/課題/解決策/期待効果）を維持しつつ'
-            f'**{target}文字以内**に短縮してください。\n'
+            f'**{lo}〜{target}文字**に短縮してください。\n'
             '制約:\n'
             '・本文のみを返す（前置き・説明・引用符・コードブロック・改行を入れない）\n'
-            f'・句読点・記号も1文字としてカウントし、必ず{target}文字以内に収める\n'
+            f'・句読点・記号も1文字としてカウントし、{lo}文字を下回らず、'
+            f'できるだけ{target}文字に近づける（{BIZ_DESC.HARD_MAX}文字は絶対に超えない）\n'
             '・語尾は「〜である」調を維持\n'
             '・固有の業務名・数値（時間・%・金額等）は削らない\n\n'
             f'【原文（{len(text)}文字）】\n{text}'
