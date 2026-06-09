@@ -1000,6 +1000,9 @@ _FILE_CATEGORIES = [
     # 登記書類は通称が割れる（履歴事項全部証明書／登記簿謄本／登記事項証明書）。
     # pipeline.FileDetector.PATTERNS['registry'] と必ず同期すること。
     ('registry',    '履歴事項全部証明書',      ['履歴事項', '登記簿', '登記事項']),
+    # ↑ registry のうち「確実に履歴事項」と言えるキーワード。これ以外（登記簿/登記事項）
+    #   だけで当たった登記書類は補助金要件の履歴事項全部証明書とは限らない（現在事項等の
+    #   可能性）ため、提出前に種別確認を促す（_REGISTRY_CONFIRMED_KEYWORD / registry_verify）。
     ('pl',          '損益計算書 / 決算報告書', ['損益計算書', '決算報告書', '決算書']),
     ('cost_report', '製造原価報告書',          ['製造原価報告書', '原価報告書']),
     ('tax',         '納税証明書',              ['納税証明']),
@@ -1008,6 +1011,11 @@ _FILE_CATEGORIES = [
     # pipeline.FileDetector.PATTERNS と整合: 給与ソフト出力は「給与台帳」表記が多いため両対応
     ('wage_ledger', '賃金台帳 / 給与台帳',     ['賃金台帳', '給与台帳']),
 ]
+
+# registry を「確実に履歴事項全部証明書」と判断できる正準キーワード。
+# detected['registry'] のうちこれを含まない名前（登記簿謄本/登記事項証明書）は、
+# 補助金要件の履歴事項とは限らないため UI で要確認表示にする（緑✓にしない）。
+_REGISTRY_CONFIRMED_KEYWORD = '履歴事項'
 
 _REQUIRED_CATS_BY_TASK = {
     'application':           {'hearing', 'registry', 'pl'},
@@ -1087,12 +1095,20 @@ def _analyze_files(file_names, task):
         display for cat, display, _, required in checks
         if required and not detected[cat]
     ]
+    # 登記書類が「履歴事項」以外の名前（登記簿謄本/登記事項証明書）で当たった場合、
+    # 補助金が要求する履歴事項全部証明書とは限らないため要確認対象として拾う。
+    # 必須充足（all_required_ok）には影響させない＝処理は進められる。
+    registry_verify = [
+        n for n in detected['registry']
+        if _REGISTRY_CONFIRMED_KEYWORD not in unicodedata.normalize('NFC', n)
+    ]
     return {
         'checks': checks,
         'detected': detected,
         'unmatched': unmatched,
         'missing_required': missing_required,
         'all_required_ok': len(missing_required) == 0,
+        'registry_verify': registry_verify,
     }
 
 
@@ -1350,11 +1366,28 @@ def _render_file_check_result(result, total_count):
             f'**{"、".join(result["missing_required"])}**'
         )
 
+    # 登記書類が「登記簿謄本／登記事項証明書」表記で当たった場合の種別確認喚起。
+    # 詳細expanderは必須充足時に畳まれるため、埋もれないようバナー直後に出す。
+    registry_verify = result.get('registry_verify') or []
+    if registry_verify:
+        st.warning(
+            '🟡 登記書類を「登記簿謄本／登記事項証明書」の名前で検出しました。'
+            '補助金の提出書類は **履歴事項全部証明書** が必要です。'
+            '中身が履歴事項（現在事項ではない）か、提出前にご確認ください。'
+            'ツールの処理はこのまま進めて問題ありません。'
+        )
+
     with st.expander('ファイル判別結果（詳細）', expanded=not result['all_required_ok']):
         for cat, display, _, required in result['checks']:
             files = result['detected'][cat]
             if files:
-                st.markdown(f'✅ **{display}** → `{"`, `".join(files)}`')
+                if cat == 'registry' and registry_verify:
+                    st.markdown(
+                        f'🟡 **{display}** → `{"`, `".join(files)}`'
+                        '（登記書類として検出。履歴事項か要確認）'
+                    )
+                else:
+                    st.markdown(f'✅ **{display}** → `{"`, `".join(files)}`')
             elif required:
                 st.markdown(
                     f'❌ **{display}** — **未検出（必須）** '
@@ -2563,4 +2596,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.62 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.63 | カラフルボックス株式会社')
