@@ -2845,7 +2845,11 @@ def run_wage_ledger_conversion(
         if _dropped_note:
             window_notes.append(_dropped_note)
         # 履歴事項PDF未添付時は役員の自動確定がスキップされる旨を可視化（G）。
-        _officer_skip_note = _officer_autodetect_skipped_warning(registry_path)
+        # 個人事業主には役員概念も履歴事項も無いため、この警告は出さない。
+        _officer_skip_note = (
+            None if is_kojin
+            else _officer_autodetect_skipped_warning(registry_path)
+        )
         if _officer_skip_note:
             window_notes.append(_officer_skip_note)
 

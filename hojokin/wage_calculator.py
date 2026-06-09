@@ -123,6 +123,11 @@ def calculate_per_capita_wage(
 
         # 給与支給総額（R216）= 月次課税給与の年計 ＋ 年間賞与（公募要領 p.10: 賞与も対象）
         annual = sum(emp.monthly_salary) + (emp.annual_bonus or 0.0)
+        # 年計0円の人は給与を受けていない（個人事業主本人・退職済み行など）。分子に0を足し
+        # 分母（FTE）に+1すると1人当たりが不当に下がるため、計算対象から除外する。
+        if annual <= 0:
+            result.excluded_names.append(emp.name)
+            continue
         result.total_salary += annual
         fte = _calc_fte(emp, regular_annual_hours)
         result.employee_count_fte += fte

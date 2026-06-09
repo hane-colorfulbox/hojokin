@@ -168,10 +168,19 @@ def _cached_list_drive_files_recursive(folder_id: str) -> list[dict]:
 
 
 # ── 定数 ──
+# 個人事業主テンプレの種別値。is_kojin 判定の単一の真実（複数箇所での文字列重複を防ぐ）。
+_KOJIN_TEMPLATE_TYPE = 'インボイス枠_個人_2026'
+
+
+def _derive_is_kojin(template_type: str | None) -> bool:
+    """テンプレ種別から個人事業主フラグを導出する単一経路。"""
+    return template_type == _KOJIN_TEMPLATE_TYPE
+
+
 TEMPLATE_OPTIONS = {
     '通常枠 2026（法人）': '通常枠_2026',
     'インボイス枠 2026（法人）': 'インボイス枠_2026',
-    'インボイス枠 2026（個人）': 'インボイス枠_個人_2026',
+    'インボイス枠 2026（個人）': _KOJIN_TEMPLATE_TYPE,
 }
 
 TASK_OPTIONS = {
@@ -418,6 +427,10 @@ def _kojin_fiscal_month_warning(
 
     個人事業の会計期間は暦年（1〜12月）固定で、申請書も決算月12月で出力される。
     賃金台帳の対象期間に12月以外を選ぶと両者が食い違うため、12月選択を促す。
+
+    注: この関数は test_kojin_fiscal_guard.py が AST 抽出して単体 exec するため、
+    モジュール定数/ヘルパー（_KOJIN_TEMPLATE_TYPE / _derive_is_kojin）に依存させず
+    リテラル比較のまま自己完結させる（_check_size_warnings と同じ運用）。
     """
     if template_type == 'インボイス枠_個人_2026' and fiscal_month_override not in (None, 12):
         return (
@@ -690,7 +703,7 @@ def run_processing(
             }
         else:
             # 個人事業主テンプレ選択時の雇用形態正規化を切り替え
-            is_kojin = (template_type == 'インボイス枠_個人_2026')
+            is_kojin = _derive_is_kojin(template_type)
             output_path = work_dir / f'{company_name}_賃金台帳一覧.xlsx'
             status = run_wage_ledger_conversion(
                 resource_folder=work_dir,
@@ -1027,6 +1040,20 @@ _REQUIRED_CATS_BY_TASK = {
     'all':                   {'hearing', 'registry', 'pl'},
 }
 
+# 個人事業主の申請書は履歴事項全部証明書を持たない（本人確認資料を事務局に別途提出）。
+# ツールは本人確認資料の中身を使わないため、必須から履歴事項を外すだけにする。
+_REQUIRED_CATS_APPLICATION_KOJIN = {'hearing', 'pl'}
+
+
+def _get_required_cats(task, template_type=None) -> set[str]:
+    """タスク + テンプレ種別に応じた必須ファイルカテゴリを返す。
+
+    個人事業主の申請書のみ履歴事項を必須から外す。他は従来どおり。
+    """
+    if task == 'application' and _derive_is_kojin(template_type):
+        return _REQUIRED_CATS_APPLICATION_KOJIN
+    return _REQUIRED_CATS_BY_TASK.get(task, set())
+
 # カテゴリ別の許可拡張子（pipeline.FileDetector.ALLOWED_EXTS と整合）。
 # UI 側でも事前にこのフィルタを適用しないと、PDF だけアップした賃金台帳が
 # 「必須あり」判定で通って実行後に skipped → 給与/加点が無データで失敗する。
@@ -1060,9 +1087,9 @@ def _get_ui_allowed_exts(task: str | None) -> dict:
     return _UI_ALLOWED_EXTS
 
 
-def _analyze_files(file_names, task):
+def _analyze_files(file_names, task, template_type=None):
     """ファイル名リストからタスク別の判別結果を計算"""
-    required_cats = _REQUIRED_CATS_BY_TASK.get(task, set())
+    required_cats = _get_required_cats(task, template_type)
     allowed_table = _get_ui_allowed_exts(task)
 
     detected = {cat: [] for cat, _, _ in _FILE_CATEGORIES}
@@ -1417,11 +1444,15 @@ def _render_file_check_result(result, total_count):
 _OVERRIDE_UI_CATS = {'pl', 'wage_ledger'}
 # 「賃金台帳の作成」タスクでは決算書は使わず、賃金台帳PDFと履歴事項PDFを差し替え対象にする
 _OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION = {'wage_ledger', 'registry'}
+# 個人事業主には履歴事項が存在しないため、賃金台帳のみを差し替え対象にする（registry を出さない）
+_OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION_KOJIN = {'wage_ledger'}
 
 
-def _get_override_ui_cats(task: str | None) -> set[str]:
-    """タスクに応じた差し替え UI 対象カテゴリを返す。"""
+def _get_override_ui_cats(task: str | None, template_type=None) -> set[str]:
+    """タスク + テンプレ種別に応じた差し替え UI 対象カテゴリを返す。"""
     if task == 'wage_ledger_creation':
+        if _derive_is_kojin(template_type):
+            return _OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION_KOJIN
         return _OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION
     return _OVERRIDE_UI_CATS
 
@@ -1487,13 +1518,20 @@ def _categorize_for_ui(
 _OVERRIDE_EXCLUDE_LABEL = '─ 使わない（対象外）─'
 _OVERRIDE_SEP_RECOMMENDED = '── 推奨候補（自動検出ヒット）──'
 _OVERRIDE_SEP_OTHERS = '── その他のファイル（タイポ救済用）──'
+# PL 候補が2件以上で年・年月いずれも判別できない（pipeline 側は mtime 最新で選ぶ）状態。
+# UI は mtime を持たないため特定ファイルを断定せず、手動選択を促す曖昧センチネルを返す。
+_PL_AUTO_AMBIGUOUS = '__PL_AMBIGUOUS__'
 
 
-def _auto_selected_for_display(category: str, recommended: list[str]) -> str | None:
+def _auto_selected_for_display(
+    category: str, recommended: list[str], fiscal_month_override=None,
+) -> str | None:
     """カテゴリの自動選定結果（UI 表示用）を 1 件返す。
 
     pipeline の選定ロジックを完全再現はしない（DRY 違反になるため簡易版）。
-    PL は「ファイル名から期末年月を抽出して最新」、それ以外は recommended[0]。
+    PL は「ファイル名から期末年月（または年）を抽出して最新」、それ以外は recommended[0]。
+    PL で年・年月いずれも判別できず候補が2件以上のときは、pipeline が mtime 最新で
+    選ぶ（UI からは再現不能）ため _PL_AUTO_AMBIGUOUS を返し、手動選択を促す。
     候補が無ければ None。
     """
     if not recommended:
@@ -1506,27 +1544,32 @@ def _auto_selected_for_display(category: str, recommended: list[str]) -> str | N
             )
         except Exception:
             return recommended[0]
-        # 月ありで取れるものは (年,月) で最新を選ぶ
+        # 月ありで取れるものは (年,月) で最新を選ぶ。決算月指定があれば年のみ名も救済され、
+        # pipeline の get_pl_latest と表示が一致する。
         with_date = [
-            (name, _parse_fiscal_end_from_filename(name))
+            (name, _parse_fiscal_end_from_filename(
+                name, fiscal_month_override=fiscal_month_override))
             for name in recommended
         ]
         valid = [(n, ym) for n, ym in with_date if ym is not None]
         if valid:
             return max(valid, key=lambda t: t[1])[0]
         # 「令和N年度」のような月なし名は年だけで順位付け（前年度を先頭に出さない）。
-        # pipeline の get_pl_latest（決算月指定時）の実選択と表示を一致させる。
         with_year = [
             (n, _parse_fiscal_year_from_filename(n)) for n in recommended
         ]
         valid_year = [(n, y) for n, y in with_year if y is not None]
         if valid_year:
             return max(valid_year, key=lambda t: t[1])[0]
+        # 年・年月いずれも不明 + 複数候補 → 断定せず曖昧（pipeline は mtime 最新で決める）
+        if len(recommended) >= 2:
+            return _PL_AUTO_AMBIGUOUS
     return recommended[0]
 
 
 def _render_file_selection_override(
     file_names: list[str], case_key: str, task: str | None = None,
+    template_type=None, fiscal_month_override=None,
 ) -> dict[str, list[str] | None]:
     """検出カテゴリ別の候補ファイルを差し替え可能な UI で表示し、選択結果を返す。
 
@@ -1542,8 +1585,9 @@ def _render_file_selection_override(
     cat_info = _categorize_for_ui(file_names, task=task)
     # 差し替え UI 表示対象はタスクごとに変える:
     #   - 通常: pl と wage_ledger
-    #   - 賃金台帳の作成: wage_ledger と registry（履歴事項PDF も差し替え可能に）
-    override_cats = _get_override_ui_cats(task)
+    #   - 賃金台帳の作成（法人）: wage_ledger と registry（履歴事項PDF も差し替え可能に）
+    #   - 賃金台帳の作成（個人）: wage_ledger のみ（個人に履歴事項は無い）
+    override_cats = _get_override_ui_cats(task, template_type)
     visible = [
         (cat, display)
         for cat, display, _ in _FILE_CATEGORIES
@@ -1556,9 +1600,14 @@ def _render_file_selection_override(
     # selectbox の「セパレータ行」をユーザーが選べないよう、選ばれたら自動扱いに戻す
     SEP_LABELS = {_OVERRIDE_SEP_RECOMMENDED, _OVERRIDE_SEP_OTHERS}
 
-    # タスクに応じてタイトルを変える（決算書を使わないタスクで「決算書」と表示しない）
+    # タスクに応じてタイトルを変える（決算書を使わないタスクで「決算書」と表示しない／
+    # 個人事業主は履歴事項が無いので「履歴事項」と表示しない）
     if task == 'wage_ledger_creation':
-        _expander_title = '▶ 賃金台帳・履歴事項を差し替える（必要な場合のみ）'
+        _expander_title = (
+            '▶ 賃金台帳・履歴事項を差し替える（必要な場合のみ）'
+            if 'registry' in override_cats
+            else '▶ 賃金台帳を差し替える（必要な場合のみ）'
+        )
     else:
         _expander_title = '▶ 決算書・賃金台帳を差し替える（必要な場合のみ）'
     with st.expander(_expander_title, expanded=False):
@@ -1604,11 +1653,22 @@ def _render_file_selection_override(
                 # 「自動検出」ラベルには実際に選定されるファイル名を埋め込んで
                 # 「今何が選ばれているか」を可視化する。
                 # セパレータ行は disabled 不可なので、選ばれたら自動扱いに戻す（後段ガード）。
-                auto_name = _auto_selected_for_display(cat, recommended)
-                auto_label = (
-                    f'（自動検出: {auto_name}）'
-                    if auto_name else '（自動検出に従う・候補なし）'
+                auto_name = _auto_selected_for_display(
+                    cat, recommended, fiscal_month_override=fiscal_month_override,
                 )
+                if auto_name == _PL_AUTO_AMBIGUOUS:
+                    # PL で年・年月を判別できず複数候補 → 断定表示しない。実選択は
+                    # pipeline の mtime 最新になり UI 表示と食い違うため、手動選択を促す。
+                    auto_label = '（自動検出: 年度判別不可 — 手動で選択してください）'
+                    st.warning(
+                        '決算書のファイル名から年度を判別できません。'
+                        '推奨候補から正しい期を手動で選んでください'
+                        '（自動では更新日時の新しいファイルが選ばれます）。'
+                    )
+                elif auto_name:
+                    auto_label = f'（自動検出: {auto_name}）'
+                else:
+                    auto_label = '（自動検出に従う・候補なし）'
                 opts: list[str] = [auto_label]
                 if recommended:
                     opts.append(_OVERRIDE_SEP_RECOMMENDED)
@@ -1666,7 +1726,7 @@ def _build_path_override(
     return path_override if path_override else None
 
 
-def _check_required_by_names(file_names, task, name_override=None):
+def _check_required_by_names(file_names, task, name_override=None, template_type=None):
     """タスクに応じた必須ファイルが揃っているかチェック。
 
     判定優先順:
@@ -1681,7 +1741,7 @@ def _check_required_by_names(file_names, task, name_override=None):
         return False
     # NFD（macOS の濁点分離形式）でも比較が通るよう NFC 化してから判定
     names_nfc = [unicodedata.normalize('NFC', n) for n in file_names]
-    required_cats = _REQUIRED_CATS_BY_TASK.get(task, set())
+    required_cats = _get_required_cats(task, template_type)
     allowed_table = _get_ui_allowed_exts(task)
     name_override = name_override or {}
 
@@ -1921,7 +1981,10 @@ if data_source == 'Google Drive':
         if all_files:
             drive_files_to_download = all_files
 
-            drive_analysis = _analyze_files([f['name'] for f in all_files], task_type)
+            drive_analysis = _analyze_files(
+                [f['name'] for f in all_files], task_type,
+                template_type=template_type,
+            )
             _render_file_check_result(drive_analysis, len(all_files))
 
             # 検出されたファイルの差し替え UI（自動検出が誤ったときの保険）
@@ -1929,6 +1992,8 @@ if data_source == 'Google Drive':
                 [f['name'] for f in all_files],
                 case_key=f'drive_{drive_folder_id}',
                 task=task_type,
+                template_type=template_type,
+                fiscal_month_override=fiscal_month_override,
             )
             # 容量・件数の事前警告（Drive ファイルのサイズは f['size'] が文字列の場合があるので int 変換）
             size_pairs = []
@@ -2041,7 +2106,10 @@ else:
 
     # アップロード済みファイルのチェックリスト（タスク別に必須/任意を切り替え）
     if uploaded_files:
-        upload_analysis = _analyze_files([f.name for f in uploaded_files], task_type)
+        upload_analysis = _analyze_files(
+            [f.name for f in uploaded_files], task_type,
+            template_type=template_type,
+        )
         _render_file_check_result(upload_analysis, len(uploaded_files))
 
         # 検出されたファイルの差し替え UI（同名で別期の決算書混在などへの保険）
@@ -2058,6 +2126,8 @@ else:
             [f.name for f in uploaded_files],
             case_key=_upload_case_key,
             task=task_type,
+            template_type=template_type,
+            fiscal_month_override=fiscal_month_override,
         )
         # 案件規模・処理時間・APIコスト予想
         size_pairs_upload = [(f.name, f.size) for f in uploaded_files]
@@ -2096,6 +2166,7 @@ has_required = (
     _check_required_by_names(
         [f.name for f in uploaded_files], task_type,
         name_override=selection_override_names,
+        template_type=template_type,
     )
     if has_files else False
 )
@@ -2103,6 +2174,7 @@ has_drive_required = (
     _check_required_by_names(
         [f['name'] for f in drive_files_to_download], task_type,
         name_override=selection_override_names,
+        template_type=template_type,
     )
     if has_drive_files else False
 )
@@ -2596,4 +2668,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.63 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.64 | カラフルボックス株式会社')
