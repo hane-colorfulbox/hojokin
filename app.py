@@ -1528,42 +1528,27 @@ def _auto_selected_for_display(
 ) -> str | None:
     """カテゴリの自動選定結果（UI 表示用）を 1 件返す。
 
-    pipeline の選定ロジックを完全再現はしない（DRY 違反になるため簡易版）。
-    PL は「ファイル名から期末年月（または年）を抽出して最新」、それ以外は recommended[0]。
-    PL で年・年月いずれも判別できず候補が2件以上のときは、pipeline が mtime 最新で
-    選ぶ（UI からは再現不能）ため _PL_AUTO_AMBIGUOUS を返し、手動選択を促す。
+    PL は pipeline._rank_pl_names（get_pl_latest と共有する名前ベース順位付け）を使い、
+    名前だけで一意に決まる勝者のときだけそのファイル名を返す。サイズ/mtime での同点崩しが
+    必要なとき（同一順位が複数 / 名前から判別不可で複数候補）は、UI からは実選択を再現
+    できないため _PL_AUTO_AMBIGUOUS を返して手動選択を促す。これにより「具体名を表示した
+    ら必ず get_pl_latest の実選択と一致する」が構造的に保証される。PL 以外は recommended[0]。
     候補が無ければ None。
     """
     if not recommended:
         return None
     if category == 'pl':
         try:
-            from hojokin.pipeline import (
-                _parse_fiscal_end_from_filename,
-                _parse_fiscal_year_from_filename,
-            )
+            from hojokin.pipeline import _rank_pl_names
         except Exception:
             return recommended[0]
-        # 月ありで取れるものは (年,月) で最新を選ぶ。決算月指定があれば年のみ名も救済され、
-        # pipeline の get_pl_latest と表示が一致する。
-        with_date = [
-            (name, _parse_fiscal_end_from_filename(
-                name, fiscal_month_override=fiscal_month_override))
-            for name in recommended
-        ]
-        valid = [(n, ym) for n, ym in with_date if ym is not None]
-        if valid:
-            return max(valid, key=lambda t: t[1])[0]
-        # 「令和N年度」のような月なし名は年だけで順位付け（前年度を先頭に出さない）。
-        with_year = [
-            (n, _parse_fiscal_year_from_filename(n)) for n in recommended
-        ]
-        valid_year = [(n, y) for n, y in with_year if y is not None]
-        if valid_year:
-            return max(valid_year, key=lambda t: t[1])[0]
-        # 年・年月いずれも不明 + 複数候補 → 断定せず曖昧（pipeline は mtime 最新で決める）
-        if len(recommended) >= 2:
-            return _PL_AUTO_AMBIGUOUS
+        ranked = _rank_pl_names(recommended, fiscal_month_override)
+        if ranked['basis'] == 'none':
+            # 名前から判別不可 → 実選択は mtime 最新（UI 再現不能）。複数なら手動選択を促す。
+            return _PL_AUTO_AMBIGUOUS if len(recommended) >= 2 else recommended[0]
+        top = ranked['top']
+        # 名前ベースの一意勝者だけ確信表示（= get_pl_latest の _pick_full_version([単一]) と一致）。
+        return top[0] if len(top) == 1 else _PL_AUTO_AMBIGUOUS
     return recommended[0]
 
 
@@ -2668,4 +2653,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.64 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.65 | カラフルボックス株式会社')

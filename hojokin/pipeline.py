@@ -346,6 +346,72 @@ def _pick_full_version(candidates: list[Path]) -> Path:
     return max(pool, key=lambda p: p.stat().st_size)
 
 
+_PL_PERIOD_RE = re.compile(r'第(\d+)期')
+
+
+def _rank_pl_names(names, fiscal_month_override=None) -> dict:
+    """ファイル名のみで PL 候補を順位付けし、最上位タイ候補と根拠を返す（純関数・副作用なし）。
+
+    get_pl_latest（実選択）と app._auto_selected_for_display（UI 表示）が共有する
+    単一の真実。サイズ/mtime に依存する最終同点崩しはここでは行わず、呼び出し側に委ねる。
+    これにより「UI が具体ファイル名を出すなら、それは必ず実選択と一致する」が構造的に成立する。
+
+    Returns:
+        {'top': list[str], 'basis': 'period'|'yearmonth'|'year'|'none',
+         'month_fallback': bool}
+        - top: 名前ベースで最上位のタイ候補（複数なら size/mtime で最終決定が必要）
+        - month_fallback: 決算月指定ありだが一致ファイルが無く年月最新へ代替した
+    """
+    names = list(names)
+
+    # ステップ1: 第N期（最大N。1件でも第N期があれば最優先＝get_pl_latest と同順）
+    def _period_num(n: str) -> int:
+        m = _PL_PERIOD_RE.search(n)
+        return int(m.group(1)) if m else -1
+
+    nums = [(n, _period_num(n)) for n in names]
+    max_num = max((v for _, v in nums), default=-1)
+    if max_num >= 0:
+        return {
+            'top': [n for n, v in nums if v == max_num],
+            'basis': 'period', 'month_fallback': False,
+        }
+
+    # ステップ2: 期末年月
+    date_pairs = [
+        (n, _parse_fiscal_end_from_filename(
+            n, fiscal_month_override=fiscal_month_override))
+        for n in names
+    ]
+    with_date = [(n, ym) for n, ym in date_pairs if ym is not None]
+    if with_date:
+        month_fallback = False
+        if fiscal_month_override is not None:
+            mm = [(n, ym) for n, ym in with_date if ym[1] == fiscal_month_override]
+            if mm:
+                with_date = mm
+            else:
+                month_fallback = True
+        max_ym = max(ym for _, ym in with_date)
+        return {
+            'top': [n for n, ym in with_date if ym == max_ym],
+            'basis': 'yearmonth', 'month_fallback': month_fallback,
+        }
+
+    # ステップ2.5: 年のみ（令和N年度 等）
+    year_pairs = [(n, _parse_fiscal_year_from_filename(n)) for n in names]
+    with_year = [(n, y) for n, y in year_pairs if y is not None]
+    if with_year:
+        max_year = max(y for _, y in with_year)
+        return {
+            'top': [n for n, y in with_year if y == max_year],
+            'basis': 'year', 'month_fallback': False,
+        }
+
+    # ステップ3: 名前からは判別不可（呼び出し側が mtime 最新で決める）
+    return {'top': names, 'basis': 'none', 'month_fallback': False}
+
+
 class FileDetector:
     """資料フォルダからファイルを自動分類"""
 
@@ -544,69 +610,27 @@ class FileDetector:
             logger.info(f'手動選択 PL: {chosen.name}（自動選定ロジックをスキップ）')
             return chosen
 
-        # ---- ステップ1: 第N期表記 ----
-        period_re = re.compile(r'第(\d+)期')
-
-        def period_num(p: Path) -> int:
-            m = period_re.search(p.name)
-            return int(m.group(1)) if m else -1
-
-        nums = [(p, period_num(p)) for p in pls]
-        max_num = max(n for _, n in nums)
-
-        if max_num >= 0:
-            latest = [p for p, n in nums if n == max_num]
-            return _pick_full_version(latest)
-
-        # ---- ステップ2: ファイル名から期末年月を抽出 ----
-        date_pairs = [
-            (p, _parse_fiscal_end_from_filename(
-                p.name, fiscal_month_override=fiscal_month_override))
-            for p in pls
-        ]
-        with_date = [(p, ym) for p, ym in date_pairs if ym is not None]
-
-        if with_date:
-            # 決算月指定があれば、月が一致する候補に絞る
-            if fiscal_month_override is not None:
-                month_match = [
-                    (p, ym) for p, ym in with_date
-                    if ym[1] == fiscal_month_override
-                ]
-                if month_match:
-                    with_date = month_match
-                else:
-                    logger.warning(
-                        f'決算月{fiscal_month_override}月と一致するファイル名が無く、'
-                        f'年月最新で選びます: '
-                        f'{[(p.name, ym) for p, ym in with_date]}'
-                    )
-                    self.pl_selection_warnings.append(
-                        f'決算月{fiscal_month_override}月と一致する決算書ファイル名が'
-                        f'見つからず、年月最新で代替選択しました'
-                    )
-            # 期末年月が最新のもの
-            max_ym = max(ym for _, ym in with_date)
-            latest = [p for p, ym in with_date if ym == max_ym]
+        # ---- ステップ1/2/2.5: 名前ベースの順位付け（_rank_pl_names と共有）----
+        # 表示用 app._auto_selected_for_display と同一の純関数で順位付けし、
+        # 「UI 表示＝実選択」を構造的に保証する。サイズ/mtime に依存する最終決定だけ
+        # ここで行う（UI は再現不能なので、その場合 UI 側は「手動選択を促す」に倒す）。
+        ranked = _rank_pl_names([p.name for p in pls], fiscal_month_override)
+        if ranked['month_fallback']:
+            logger.warning(
+                f'決算月{fiscal_month_override}月と一致するファイル名が無く、年月最新で選びます'
+            )
+            self.pl_selection_warnings.append(
+                f'決算月{fiscal_month_override}月と一致する決算書ファイル名が'
+                f'見つからず、年月最新で代替選択しました'
+            )
+        if ranked['basis'] != 'none':
+            top = set(ranked['top'])
+            latest = [p for p in pls if p.name in top]
             if len(latest) > 1:
                 logger.info(
-                    f'同一期末年月のPL候補が{len(latest)}件あり → フル版優先で選択'
+                    f'同一順位のPL候補が{len(latest)}件あり（{ranked["basis"]}）'
+                    f' → フル版優先で選択'
                 )
-            return _pick_full_version(latest)
-
-        # ---- ステップ2.5: 月情報なしファイル名（令和N年度 等）を年だけで順位付け ----
-        # 決算月未指定 + 月なし名でも、年で最新を選べる（mtime ガチャ回避）。
-        # 「令和6年度決算報告書」「令和7年度決算報告書」のような並びで前年度が
-        # 選ばれる事故を防ぐ。
-        year_pairs = [(p, _parse_fiscal_year_from_filename(p.name)) for p in pls]
-        with_year = [(p, y) for p, y in year_pairs if y is not None]
-        if with_year:
-            max_year = max(y for _, y in with_year)
-            latest = [p for p, y in with_year if y == max_year]
-            logger.info(
-                f'PL候補を決算年で順位付け（月情報なし）: 最新={max_year}年 → '
-                f'{[p.name for p in latest]}'
-            )
             return _pick_full_version(latest)
 
         # ---- ステップ3: フォールバック（mtime 最新）— 強警告 ----
