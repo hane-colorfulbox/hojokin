@@ -947,9 +947,11 @@ def add_data_source_sheet(
                 wage_ledger_paths[0].name if len(wage_ledger_paths) == 1
                 else f'{wage_ledger_paths[0].name} 他 {len(wage_ledger_paths) - 1} 件'
             )
+            # FTE が 1 未満（パート換算のみ等）でも分母を 1 に切り上げず実値で割る。
+            # FTE=0 のときだけ '-' 表示（ゼロ除算回避）。
+            _fte = wage_plan.get('employee_count_fte', 0)
             _row('賃金台帳', '一人当たり給与支給総額(基準年)',
-                 int(round(wage_plan.get('wage_total_base', 0) /
-                           max(wage_plan.get('employee_count_fte', 1), 1))),
+                 int(round(wage_plan.get('wage_total_base', 0) / _fte)) if _fte > 0 else '-',
                  ledger_summary, '（Excel全体）', wage_extraction_method, '高')
             _row('賃金台帳', '給与支給総額(基準年)', int(round(wage_plan.get('wage_total_base', 0))),
                  ledger_summary, '（Excel全体）', wage_extraction_method, '高')

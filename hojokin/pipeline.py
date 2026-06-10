@@ -18,6 +18,7 @@ from .wage_calculator import (
     PayrollEmployee,
     calculate_per_capita_wage,
     is_full_time_employment,
+    is_zero_wage_detail,
     wage_employees_to_payroll,
 )
 from .wage_reader import read_wage_ledger, read_wage_ledgers, export_wage_ledger_summary
@@ -1046,6 +1047,20 @@ def run_application_transfer(
                 f'IT導入補助金 公募要領 p.10 は「正社員の就業時間に換算」を要求。'
                 f'賃金台帳テンプレ E列「月間平均時間」を顧客確認のうえ手入力してください'
             )
+
+        # 給与支給0円の従業員を算定対象外にした場合の通知（黙って R215/R216 が
+        # 小さくなるとユーザーが原因を追えないため、除外人数と対象者を明示する）
+        if wage_plan and wage_plan.get('excluded_zero_count', 0) > 0:
+            _z_names = wage_plan.get('excluded_zero_names', []) or []
+            _z_preview = ', '.join(_z_names[:3])
+            if len(_z_names) > 3:
+                _z_preview += f' ほか{len(_z_names) - 3}名'
+            wage_warning += (
+                f' ℹ 賃金台帳で給与支給0円の従業員 {wage_plan["excluded_zero_count"]}名'
+                f'（{_z_preview}）を R215/R216 の算定対象外にしました'
+                f'（公募要領「全月分の給与等の支給を受けた従業員」に非該当）。'
+                f'退職済み行・無給の家族従業者等でないか賃金台帳をご確認ください'
+            )
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
         consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
         # 会計式整合（売上 − 原価 = 粗利）— ()書きマイナス誤読の自動検出
@@ -1390,14 +1405,15 @@ def run_wage_calculation(
                     ledger_emps, fiscal_period_hint=_fiscal_hint_for_detail,
                 )
                 # 「契約社員」は正規雇用相当として seishain_count にカウント
-                # （wage_calculator.is_full_time_employment と整合）
-                from .wage_calculator import is_full_time_employment
+                # （wage_calculator.is_full_time_employment と整合）。
+                # 給与支給0円の人は R215 算定対象外のため人数にも数えない。
                 seishain_count = sum(
-                    1 for e in employees_detail if is_full_time_employment(e['type'])
+                    1 for e in employees_detail
+                    if is_full_time_employment(e['type']) and not is_zero_wage_detail(e)
                 )
                 part_count = sum(
                     1 for e in employees_detail
-                    if e['type'] in ('パート・アルバイト',)
+                    if e['type'] in ('パート・アルバイト',) and not is_zero_wage_detail(e)
                 )
                 logger.info(
                     f'賃金台帳フォールバック: 正社員{seishain_count}, '
@@ -1799,10 +1815,17 @@ def _calc_wage_plan_from_ledger(
                 )
                 return None, employees_raw, 'officer_only'
             if included_count == 0:
+                zero_note = ''
+                if result.excluded_zero_names:
+                    zero_note = (
+                        f'③賃金台帳で給与0円と明記された従業員'
+                        f'{len(result.excluded_zero_names)}名は算定対象外、'
+                    )
                 logger.warning(
                     f'給与支給総額0：非役員{non_officer_count}名いるが全月在籍者が0名。'
                     f'①賃金台帳の対象期間が直近事業年度12ヶ月とズレ（支給日ベース等）、'
                     f'②設立間もない等で全員が在籍12ヶ月未満（役員報酬ベース算定の要否を要確認）、'
+                    f'{zero_note}'
                     f'のいずれかの可能性。R215/R216 は自動転記せず手動確認が必要です'
                 )
                 return None, employees_raw, 'no_full_year_target'
@@ -1829,6 +1852,14 @@ def _calc_wage_plan_from_ledger(
         if part_fte_fallback_count > 0:
             plan['part_fte_fallback_count'] = part_fte_fallback_count
             plan['part_fte_fallback_names'] = part_fte_fallback_names
+        if result.excluded_zero_names:
+            plan['excluded_zero_count'] = len(result.excluded_zero_names)
+            plan['excluded_zero_names'] = list(result.excluded_zero_names)
+            logger.info(
+                f'給与支給0円のため算定対象外: {len(result.excluded_zero_names)}名 '
+                f'({", ".join(result.excluded_zero_names[:5])}'
+                f'{"..." if len(result.excluded_zero_names) > 5 else ""})'
+            )
         logger.info(
             f'給与支給総額: {base:,.0f}円 '
             f'(従業員FTE: {result.employee_count_fte:.1f}人, 年3%成長, '
@@ -1843,11 +1874,13 @@ def _calc_wage_plan_from_ledger(
                 f'賃金台帳テンプレ E列「月間平均時間」を顧客に確認のうえ手入力してください。'
             )
         if low_full_year_ratio:
-            excluded_n = non_officer_count - included_count
+            zero_n = len(result.excluded_zero_names)
+            midyear_n = non_officer_count - included_count - zero_n
+            zero_part = f'・給与支給0円{zero_n}名' if zero_n else ''
             logger.warning(
                 f'全月在籍者({included_count}名)が非役員数({non_officer_count}名)の'
-                f'{FISCAL_MISMATCH_RATIO*100:.0f}%未満。中途入退社{excluded_n}名は'
-                f'公募要領通り算出対象から除外。R215/R216 は自動転記しますが、'
+                f'{FISCAL_MISMATCH_RATIO*100:.0f}%未満。中途入退社{midyear_n}名'
+                f'{zero_part}は公募要領通り算出対象から除外。R215/R216 は自動転記しますが、'
                 f'対象者と賃金台帳期間を念のためご確認ください'
             )
             return plan, employees_raw, 'low_full_year_ratio'
@@ -2328,8 +2361,11 @@ def _read_wage_report(path: Path) -> tuple[list[dict], int, int, int]:
 
     wb.close()
 
-    seishain = [e for e in employees if e['type'] == '正社員']
-    part = [e for e in employees if e['type'] != '正社員']
+    # 給与支給0円（3ヶ月とも0）の人は R215 算定対象外のため人数に数えない。
+    # employees リストには残す（従業員別明細シートで人間が突合できるように）。
+    countable = [e for e in employees if not is_zero_wage_detail(e)]
+    seishain = [e for e in countable if e['type'] == '正社員']
+    part = [e for e in countable if e['type'] != '正社員']
     return employees, len(seishain), len(part), yakuin_hoshu_3m
 
 

@@ -2396,10 +2396,17 @@ def _is_excluded_from_wage_total(emp: WageEmployee) -> bool:
     除外条件（公募要領準拠）:
       - 役員（employment_type に「役員」を含む）
       - 基準年度に全月分の給与支給を受けていない（中途入退社等）
+      - 給与支給0円（年計＝月次合計＋年間賞与が0以下。賃金台帳に0円と明記された人。
+        2026-06-10 補助金MTG決定。賞与のみ受給者は対象に含める）
     """
+    # 判定の単一の真実は wage_calculator.is_zero_wage（R215/FTE 側と同一基準）
+    from .wage_calculator import is_zero_wage
+
     if '役員' in (emp.employment_type or ''):
         return True
     if not emp.is_full_year:
+        return True
+    if is_zero_wage(emp.monthly_wages, emp.annual_bonus):
         return True
     return False
 
@@ -2490,7 +2497,7 @@ def export_wage_ledger_summary(
     ws.cell(row=3, column=1).font = Font(size=9, color='666666')
     ws.cell(
         row=4, column=1,
-        value='※グレー行は給与支給総額（R216）の集計対象外 — 役員 or 非全月在籍（中途入退社）',
+        value='※グレー行は給与支給総額（R216）の集計対象外 — 役員 / 非全月在籍（中途入退社） / 給与支給0円',
     )
     ws.cell(row=4, column=1).font = Font(size=9, color='666666')
 

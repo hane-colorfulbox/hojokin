@@ -54,6 +54,9 @@ class PerCapitaWageResult:
     regular_annual_hours: float = 0.0      # 正社員の年間所定労働時間
     included: list[PayrollEmployee] = dc_field(default_factory=list)
     excluded_names: list[str] = dc_field(default_factory=list)
+    # excluded_names のうち「給与支給0円（年計≤0）」で除外した人（中途入退社とは区別して
+    # 警告文に出すために分離保持。excluded_names にも重複して入る）
+    excluded_zero_names: list[str] = dc_field(default_factory=list)
 
     GROWTH_RATE = 0.03  # 3%
 
@@ -82,6 +85,32 @@ def is_full_time_employment(employment_type: str | None) -> bool:
     """
     et = employment_type or ''
     return '正社員' in et or '契約社員' in et
+
+
+def is_zero_wage(monthly_wages, annual_bonus: float = 0.0) -> bool:
+    """「年計（月次支給合計＋年間賞与）≤ 0」＝給与の支給を受けていない従業員か判定する。
+
+    公募要領 p.10「全月分の給与等の支給を受けた従業員」に非該当のため、非役員であれば
+    R215（FTE換算従業員数）/ R216（給与支給総額）/ 人数集計の算定対象から除外する
+    （2026-06-10 補助金MTG決定: 賃金台帳に0円と明記された人を1人と数えて
+    1人当たり給与が過小になる不具合の対処）。
+    賞与のみ受給（月次0・賞与>0）は支給を受けた従業員として対象に含める
+    （_debug/test_per_capita_zero_salary.py ケース3で固定済みの既存仕様）。
+    """
+    total = sum(w or 0.0 for w in (monthly_wages or []))
+    return total + (annual_bonus or 0.0) <= 0
+
+
+def is_zero_wage_detail(e: dict) -> bool:
+    """employees_detail の1人分 dict に対する is_zero_wage。
+
+    12ヶ月モード（monthly_wages_full あり）は12ヶ月合計＋年間賞与、
+    3ヶ月モード（賃金状況報告シート由来）は m1〜m3 合計で判定する。
+    """
+    wages = e.get('monthly_wages_full')
+    if not wages:
+        wages = [e.get('m1', 0), e.get('m2', 0), e.get('m3', 0)]
+    return is_zero_wage(wages, e.get('annual_bonus', 0.0) or 0.0)
 
 
 def _calc_fte(emp: PayrollEmployee, annual_hours: float) -> float:
@@ -123,10 +152,16 @@ def calculate_per_capita_wage(
 
         # 給与支給総額（R216）= 月次課税給与の年計 ＋ 年間賞与（公募要領 p.10: 賞与も対象）
         annual = sum(emp.monthly_salary) + (emp.annual_bonus or 0.0)
-        # 年計0円の人は給与を受けていない（個人事業主本人・退職済み行など）。分子に0を足し
-        # 分母（FTE）に+1すると1人当たりが不当に下がるため、計算対象から除外する。
-        if annual <= 0:
+        # 年計0円の人は給与を受けていない（賃金台帳に0円明記・個人事業主本人・退職済み行など）。
+        # 分子に0を足し分母（FTE）に+1すると1人当たりが不当に下がるため、計算対象から除外する。
+        if is_zero_wage(emp.monthly_salary, emp.annual_bonus):
+            if any((w or 0) < 0 for w in emp.monthly_salary):
+                logger.warning(
+                    f'{emp.name}: 月次給与に負値が含まれ年計0以下 → 算定対象外'
+                    '（賃金台帳の値を要確認）'
+                )
             result.excluded_names.append(emp.name)
+            result.excluded_zero_names.append(emp.name)
             continue
         result.total_salary += annual
         fte = _calc_fte(emp, regular_annual_hours)
@@ -193,6 +228,11 @@ def wage_employees_to_payroll(
         else:
             monthly_hours = []
 
+        annual_bonus = getattr(emp, 'annual_bonus', 0.0) or 0.0
+        # 給与支給0円の非役員は R215/R216 算定対象外（calculate_per_capita_wage で除外）。
+        # 総労働時間（生産性指標B40）・パートFTE警告にも入れない。
+        zero_wage = not is_officer and is_zero_wage(monthly_salary, annual_bonus)
+
         payroll_list.append(PayrollEmployee(
             name=emp.name,
             employment_type=emp_type,
@@ -200,17 +240,18 @@ def wage_employees_to_payroll(
             monthly_hours=monthly_hours,
             is_officer=is_officer,
             full_year=full_year,
-            annual_bonus=getattr(emp, 'annual_bonus', 0.0) or 0.0,
+            annual_bonus=annual_bonus,
         ))
 
         # 役員を除く全従業員の年間総労働時間を集計
-        if not is_officer and monthly_hours:
+        if not is_officer and monthly_hours and not zero_wage:
             total_annual_hours += sum(monthly_hours)
 
         # パートで時間データが空 → _calc_fte で FTE=1.0 サイレント昇格になる人
         # （IT導入補助金は本来 FTE 換算が要件。R215 過大計上の警告対象）
         if (
             not is_officer
+            and not zero_wage
             and not is_full_time_employment(emp_type)
             and not monthly_hours
             and full_year
@@ -382,12 +423,21 @@ def create_wage_calculation(
     else:
         month_labels_full = [f'{i + 1}月' for i in range(12)]
 
+    # Sheet 2 に合計行が出力されるか（金額が皆無なら合計行は出ない）。
+    # ledger_total_cell の事前計算と Sheet 2 の実出力で**同じ条件**を使い、
+    # 「Sheet 1 が存在しない合計行を参照して0表示」になる参照ズレを防ぐ。
+    has_any_amount = bool(employees_detail) and any(
+        (e.get('monthly_wages_full') and any(e['monthly_wages_full']))
+        or e.get('m1') or e.get('m2') or e.get('m3')
+        for e in (employees_detail or [])
+    )
+
     # Sheet 2 の「12ヶ月在籍のみ合計」セル位置を事前計算（Sheet 1 から参照するため）。
     # Sheet 2 レイアウト（後段で実装）:
     #   row 4 ヘッダー / row 5〜(4+N) データ / row (5+N) 合計（全員） / row (6+N) 合計（12ヶ月在籍）
     # 12ヶ月合計列は Q列（FIRST_MONTH_COL=E=5 から12列で P=16、その次 Q=17）。
     ledger_total_cell: str | None = None
-    if has_12_months and employees_detail:
+    if has_12_months and employees_detail and has_any_amount:
         _sheet2_target_row = 6 + len(employees_detail)
         ledger_total_cell = f"'従業員別明細'!Q{_sheet2_target_row}"
 
@@ -409,10 +459,16 @@ def create_wage_calculation(
     fte_seishain = 0.0
     fte_part = 0.0
     excluded_midyear = 0  # 中途者として除外した人数（凡例表示用）
+    excluded_zero = 0     # 給与支給0円で除外した人数（凡例表示用）
     if employees_detail:
         for e in employees_detail:
             if not e.get('full_year', True):
                 excluded_midyear += 1
+                continue
+            # 給与支給0円（年計≤0）は R215 算定対象外（公募要領「全月分の給与等の
+            # 支給を受けた従業員」に非該当。2026-06-10 MTG決定）
+            if is_zero_wage_detail(e):
+                excluded_zero += 1
                 continue
             if is_full_time_employment(e.get('type')):
                 fte_seishain += 1.0
@@ -825,6 +881,17 @@ def create_wage_calculation(
             ws1.cell(r, 2).fill = FILL_GRAY
             ws1.cell(r, 3).fill = FILL_GRAY
             ws1.cell(r, 4).fill = FILL_GRAY
+        if excluded_zero:
+            r += 1
+            _cell(ws1, r, 2, '給与支給0円で除外した人数')
+            _cell(ws1, r, 3, excluded_zero)
+            _cell(ws1, r, 4,
+                  '※R215 算定対象外（公募要領「全月分の給与等の支給を受けた従業員」に非該当。'
+                  '賃金台帳に0円と明記された従業員。退職済み行・無給の家族従業者等でないか要確認）',
+                  SMALL_FONT)
+            ws1.cell(r, 2).fill = FILL_GRAY
+            ws1.cell(r, 3).fill = FILL_GRAY
+            ws1.cell(r, 4).fill = FILL_GRAY
         r += 1
         d_row = r  # 1人当たり計算で参照する用
         # FTE換算後（D）を Excel 関数化（正社員FTE + パートFTE）
@@ -1089,16 +1156,20 @@ def create_wage_calculation(
             is_seishain = is_full_time_employment(e.get('type'))
             full_year = e.get('full_year', True)
             tenure_months = e.get('tenure_months', 12)
+            # 給与支給0円（年計≤0）は R215/R216 算定対象外。FTE は 0 で表示する
+            zero_wage = full_year and is_zero_wage_detail(e)
             # 在籍月数を反映した FTE（中途入退社は分母12を按分）
             tenure_factor = min(tenure_months, 12) / 12 if tenure_months > 0 else 0
-            if is_seishain:
+            if zero_wage:
+                fte = 0.0
+            elif is_seishain:
                 fte = 1.0 * tenure_factor
             else:
                 monthly_h = e.get('monthly_hours', 0)
                 fte = (monthly_h / standard_monthly) * tenure_factor if standard_monthly else 0
 
-            # 行全体の塗り（優先: 中途 > 非正規 > 通常）
-            if not full_year:
+            # 行全体の塗り（優先: 算定対象外（中途/0円） > 非正規 > 通常）
+            if not full_year or zero_wage:
                 row_fill = FILL_INCOMPLETE
             elif not is_seishain:
                 row_fill = FILL_GRAY
@@ -1164,6 +1235,8 @@ def create_wage_calculation(
                 labels = [l for l in e.get('last_three_labels', []) if l]
                 if labels:
                     note_parts.append(f'実体: {"/".join(labels)}')
+            if zero_wage:
+                note_parts.append('給与支給0円（R215/R216 算定対象外）')
             _bonus_note = float(e.get('annual_bonus', 0) or 0)
             if _bonus_note > 0:
                 note_parts.append(f'年間給与計に賞与{_bonus_note:,.0f}円を算入（月次列には含めない）')
@@ -1172,11 +1245,8 @@ def create_wage_calculation(
         # ── 合計行（全員 / 12ヶ月在籍のみの2段）────────────────────────
         # 12ヶ月在籍のみ合計は、Sheet 1 の「賃金台帳ベース給与支給総額（R216）」と
         # Sheet 3 の「賃上げ計画」基準値からシート間参照される。
-        has_any_amount = any(
-            (e.get('monthly_wages_full') and any(e['monthly_wages_full']))
-            or e.get('m1') or e.get('m2') or e.get('m3')
-            for e in employees_detail
-        )
+        # has_any_amount は関数冒頭（ledger_total_cell の事前計算）で同一条件で算出済み。
+        # ここで条件を変えると Sheet 1 の参照セルと実出力がズレるため再計算しない。
         if has_any_amount:
             last_data_row = r
             r += 1
@@ -1203,10 +1273,10 @@ def create_wage_calculation(
             for col_idx in range(HR_COL, NOTE_COL + 1):
                 _cell(ws2, r, col_idx, '', fill=FILL_SUBTOTAL_ALL)
 
-            # 合計（12ヶ月在籍のみ）— R216 母数
+            # 合計（12ヶ月在籍のみ）— R216 母数（給与支給0円の人は算定対象外）
             target_rows = [
                 first_data_row + i for i, e in enumerate(employees_detail)
-                if e.get('full_year', True)
+                if e.get('full_year', True) and not is_zero_wage_detail(e)
             ]
             r += 1
             target_row = r
@@ -1238,8 +1308,9 @@ def create_wage_calculation(
         # 凡例
         r += 2
         _cell(ws2, r, 2,
-              '※灰色（濃）行＝直近事業年度に12ヶ月在籍していない社員（中途入社・退職含む）。'
-              'R216の母数（12ヶ月在籍のみ合計）からは除外されます。',
+              '※灰色（濃）行＝直近事業年度に12ヶ月在籍していない社員（中途入社・退職含む）'
+              'または給与支給0円の社員（備考欄参照）。'
+              'R215/R216の母数（12ヶ月在籍のみ合計）からは除外されます。',
               SMALL_FONT, border=None)
         if has_12_months:
             r += 1
