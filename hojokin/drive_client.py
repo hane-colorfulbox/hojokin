@@ -60,8 +60,60 @@ class DriveClient:
             )
         else:
             raise ValueError('credentials_path or credentials_dict is required')
+        # エラー案内用（権限不足時に「どのアカウントに権限を付けるか」を提示する）
+        self.service_account_email = getattr(creds, 'service_account_email', '')
         self.service = build('drive', 'v3', credentials=creds)
         logger.info('Drive接続完了')
+
+    def can_write(self, folder_id: str) -> bool | None:
+        """フォルダにファイルを追加できる権限があるか（処理前の事前チェック用）。
+
+        Returns:
+            True/False: capabilities.canAddChildren の値
+            None: 判定不能（API エラー等）。呼出側は警告を出さずに続行してよい
+        """
+        try:
+            meta = self.service.files().get(
+                fileId=folder_id,
+                fields='capabilities(canAddChildren)',
+                supportsAllDrives=True,
+            ).execute()
+            return bool(meta.get('capabilities', {}).get('canAddChildren'))
+        except Exception as e:
+            logger.warning(f'書込権限の事前チェックに失敗（続行）: {e}')
+            return None
+
+    def upload_error_hint(self, exc: Exception) -> str:
+        """アップロード失敗例外を、担当者が対処できる日本語メッセージに変換する。"""
+        from googleapiclient.errors import HttpError
+
+        sa = self.service_account_email or 'サービスアカウント'
+        if isinstance(exc, HttpError):
+            reason = ''
+            try:
+                err = exc.error_details[0] if exc.error_details else {}
+                reason = err.get('reason', '') if isinstance(err, dict) else ''
+            except Exception:
+                pass
+            status = exc.resp.status if exc.resp is not None else 0
+            if reason == 'storageQuotaExceeded':
+                return (
+                    f'サービスアカウント（{sa}）は個人のマイドライブ配下に'
+                    'ファイルを作成できません（容量0のため）。格納先フォルダを'
+                    '共有ドライブ配下に移すか、管理者にご相談ください。'
+                )
+            if status == 403:
+                return (
+                    f'サービスアカウント（{sa}）にこのフォルダへの書き込み権限が'
+                    'ありません。共有ドライブの管理者に、このアカウントを'
+                    '「コンテンツ管理者」以上のメンバーとして追加してもらってください。'
+                )
+            if status == 404:
+                return (
+                    'アップロード先フォルダが見つかりません（削除・移動された'
+                    '可能性）。フォルダを選び直してください。'
+                )
+        return f'{exc}'
 
     def list_folders(self, parent_id: str) -> list[dict]:
         """親フォルダ直下のサブフォルダ一覧を取得"""

@@ -167,6 +167,13 @@ def _cached_list_drive_files_recursive(folder_id: str) -> list[dict]:
     ) if c else []
 
 
+@st.cache_data(ttl=60)
+def _cached_drive_can_write(folder_id: str) -> bool | None:
+    """格納先フォルダへの書込権限の事前チェック（True/False/None=判定不能）"""
+    c = _get_drive_client()
+    return c.can_write(folder_id) if c else None
+
+
 # ── 定数 ──
 # 個人事業主テンプレの種別値。is_kojin 判定の単一の真実（複数箇所での文字列重複を防ぐ）。
 _KOJIN_TEMPLATE_TYPE = 'インボイス枠_個人_2026'
@@ -1957,6 +1964,18 @@ if data_source == 'Google Drive':
                 # サブフォルダなし = フラットな顧客フォルダ → 親フォルダ直下のファイルを使用
                 drive_folder_id = parent_folder_id
 
+        # Drive格納オプションの事前チェック: 書込権限がないと処理完了後に必ず失敗するため、
+        # 実行前に気づけるよう警告する（一覧・DLは閲覧権限で通るので、ここでしか気づけない）
+        if drive_folder_id and upload_to_drive:
+            if _cached_drive_can_write(drive_folder_id) is False:
+                st.warning(
+                    '⚠ 選択フォルダへの書き込み権限がありません。このまま実行すると'
+                    '処理自体は完了しますが、Driveへの格納は失敗します'
+                    '（結果はダウンロードボタンから取得可能）。'
+                    '共有ドライブの管理者に、ツールのサービスアカウントを'
+                    '「コンテンツ管理者」として追加するよう依頼してください。'
+                )
+
         # ファイル一覧取得（drive_folder_id が確定している時のみ）
         all_files = (
             _cached_list_drive_files_recursive(drive_folder_id)
@@ -2322,33 +2341,54 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
             and data_source == 'Google Drive'
             and drive_folder_id
         ):
-            try:
-                with st.spinner('Driveへアップロード中...'):
-                    client = _get_drive_client()
-                    # work_dir 内の出力ファイル（*.xlsx）を全てアップロード
-                    for task_name, result in results.items():
-                        out = result.get('output_path')
-                        if out and out.exists():
-                            res = client.upload_file(out, drive_folder_id)
-                            drive_upload_links[out.name] = res.get('webViewLink', '')
-                        for fname, fpath in result.get('extra_files', {}).items():
-                            if fpath.exists():
-                                res = client.upload_file(fpath, drive_folder_id)
-                                drive_upload_links[fname] = res.get('webViewLink', '')
-                        for key, fpath in result.get('output_files', {}).items():
-                            if isinstance(fpath, Path) and fpath.exists():
-                                res = client.upload_file(fpath, drive_folder_id)
-                                drive_upload_links[fpath.name] = res.get('webViewLink', '')
-                st.success(
-                    f'✅ Driveへ {len(drive_upload_links)} ファイルを格納しました'
-                )
-            except Exception as e:
-                drive_upload_errors.append(str(e))
-                logger.warning(f'Driveアップロード失敗: {e}', exc_info=True)
+            client = _get_drive_client()
+            if client is None:
                 st.warning(
-                    f'⚠ Driveアップロードに失敗しました: {e}\n'
-                    'ローカルダウンロードボタンから結果を取得できます。'
+                    '⚠ Drive認証に失敗したため格納をスキップしました'
+                    '（ローカルダウンロードボタンから結果を取得できます）。'
+                    '認証情報の設定を確認してください。'
                 )
+            else:
+                # work_dir 内の出力ファイルを収集（output_path / extra_files / output_files
+                # で同一ファイルが重複し得るため、パスで重複排除する）
+                upload_targets: list[Path] = []
+                seen_paths: set[Path] = set()
+
+                def _add_target(p):
+                    if isinstance(p, Path) and p.exists() and p not in seen_paths:
+                        seen_paths.add(p)
+                        upload_targets.append(p)
+
+                for task_name, result in results.items():
+                    _add_target(result.get('output_path'))
+                    for fpath in result.get('extra_files', {}).values():
+                        _add_target(fpath)
+                    for fpath in result.get('output_files', {}).values():
+                        _add_target(fpath)
+
+                # 1件の失敗で残りを中断しない（ファイル単位で試行し、最後にまとめて報告）
+                with st.spinner('Driveへアップロード中...'):
+                    for fpath in upload_targets:
+                        try:
+                            res = client.upload_file(fpath, drive_folder_id)
+                            drive_upload_links[fpath.name] = res.get('webViewLink', '')
+                        except Exception as e:
+                            drive_upload_errors.append(
+                                f'{fpath.name}: {client.upload_error_hint(e)}'
+                            )
+                            logger.warning(
+                                f'Driveアップロード失敗 ({fpath.name}): {e}', exc_info=True,
+                            )
+                if drive_upload_links:
+                    st.success(
+                        f'✅ Driveへ {len(drive_upload_links)} ファイルを格納しました'
+                    )
+                if drive_upload_errors:
+                    st.warning(
+                        '⚠ Driveへ格納できなかったファイルがあります'
+                        '（ローカルダウンロードボタンから取得できます）:\n\n'
+                        + '\n'.join(f'- {m}' for m in drive_upload_errors)
+                    )
 
         # 結果をsession_stateに保存（画面再描画後も残る）
         session_results = {}
@@ -2653,4 +2693,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.66 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.67 | カラフルボックス株式会社')
