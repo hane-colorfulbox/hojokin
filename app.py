@@ -1121,9 +1121,16 @@ def _analyze_files(file_names, task, template_type=None):
         if not matched:
             unmatched.append(name)
 
+    # 個人事業主の「賃金台帳の作成」では履歴事項全部証明書が存在しない（登記がなく、
+    # 役員照合は法人のみ）ため、判別結果チェックリストに「なし（任意）」として出さない。
+    # 差し替えUI側は _OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION_KOJIN で対応済み（その checks 版）
+    hidden_cats: set[str] = set()
+    if task == 'wage_ledger_creation' and _derive_is_kojin(template_type):
+        hidden_cats.add('registry')
     checks = [
         (cat, display, keywords, cat in required_cats)
         for cat, display, keywords in _FILE_CATEGORIES
+        if cat not in hidden_cats
     ]
     missing_required = [
         display for cat, display, _, required in checks
@@ -1135,7 +1142,7 @@ def _analyze_files(file_names, task, template_type=None):
     registry_verify = [
         n for n in detected['registry']
         if _REGISTRY_CONFIRMED_KEYWORD not in unicodedata.normalize('NFC', n)
-    ]
+    ] if 'registry' not in hidden_cats else []
     return {
         'checks': checks,
         'detected': detected,
@@ -2693,4 +2700,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.68 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.69 | カラフルボックス株式会社')
