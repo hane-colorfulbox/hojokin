@@ -600,12 +600,16 @@ PDF/画像の中に以下のいずれかが含まれる場合、**販管費部�
 **販管費の値だけで返すのは抽出ミスです。原価部があれば必ず加算してください。**
 
 個人事業主の「所得税の青色申告決算書」または「収支内訳書」の場合:
-- revenue = 売上（収入）金額
-- gross_profit = 売上（収入）金額 - 売上原価
+- revenue = ①売上（収入）金額（雑収入を含む）
+- cost_of_sales = ⑥差引原価（期首棚卸②＋仕入③−期末棚卸⑤ の後の値。**仕入金額③をそのまま使わない**）
+- gross_profit = ⑦差引金額（**必ず⑦欄の記載値を読む。①−③で自前計算しない**。棚卸調整の分だけずれる）
 - operating_profit / ordinary_profit = 所得金額（青色申告特別控除前）
-- salary = 給料賃金
-- 役員報酬・賞与・経常利益といった法人特有の項目は null
+- salary = 経費欄の「給料賃金」
+- 役員報酬・賞与・当期純利益といった法人特有の項目は null
 - 専従者給与がある場合は misc_wages に計上
+- welfare = 福利厚生費 / depreciation = 減価償却費 / travel_expense = 旅費交通費（いずれも経費欄から）
+- proprietor_name / proprietor_kana = 用紙上部の申告者の氏名・フリガナ
+- 検算: ①−⑥=⑦ が成立するか確認し、不一致なら⑥⑦を読み直す
 
 ```json
 {
@@ -624,7 +628,9 @@ PDF/画像の中に以下のいずれかが含まれる場合、**販管費部�
   "legal_welfare": 法定福利費,
   "welfare": 福利厚生費,
   "depreciation": 減価償却費,
-  "travel_expense": 旅費交通費
+  "travel_expense": 旅費交通費,
+  "proprietor_name": "個人事業主の申告者氏名（法人決算書なら null）",
+  "proprietor_kana": "申告者氏名のフリガナ（カタカナ・姓名の間に空白。法人なら null）"
 }
 ```"""
 
@@ -708,7 +714,17 @@ PROMPT_PL_BASIC = """**出力は ```json コードブロック1個のみ。前�
 販管費明細・製造原価報告書・貸借対照表は**無視**してください。
 
 複数年度がある場合は **直近期1期分のみ** を返してください。
-個人事業主の場合: revenue=売上(収入)金額、operating_profit=所得金額、salary系はnull。
+
+個人事業主の「所得税の青色申告決算書」または「収支内訳書」の場合は次の対応で読むこと:
+  - revenue = ①売上（収入）金額（雑収入を含む）
+  - cost_of_sales = ⑥差引原価（期首棚卸②＋仕入③−期末棚卸⑤ の後の値。**仕入金額③をそのまま使わない**）
+  - gross_profit = ⑦差引金額（**必ず⑦欄の記載値を読む。①−③で自前計算しない**。棚卸調整の分だけずれる）
+  - sga_total = 経費の計㉜
+  - operating_profit / ordinary_profit = 所得金額（青色申告特別控除前）
+  - net_profit = null
+  - proprietor_name / proprietor_kana = 用紙上部の申告者の氏名・フリガナ
+  - 検算: ①−⑥=⑦ が成立するか確認し、不一致なら⑥⑦を読み直す
+法人決算書の場合は proprietor_name / proprietor_kana は null。
 
 【重要：マイナス表記の読み方】
 日本の決算書では損失（負数）を以下の表記で示すことがあります。**すべて負数として読み、マイナスを付けて返してください**:
@@ -733,7 +749,9 @@ PROMPT_PL_BASIC = """**出力は ```json コードブロック1個のみ。前�
   "sga_total": 販売費及び一般管理費の合計（円・整数・必ず正値。費用合計なので括弧やマイナスにしない。合計行が無ければ販管費明細を合算）,
   "operating_profit": 営業利益（損失なら必ずマイナス、括弧・△・▲記号で表示されていれば負数として返す）,
   "ordinary_profit": 経常利益（同上）,
-  "net_profit": 当期純利益（同上）
+  "net_profit": 当期純利益（同上）,
+  "proprietor_name": "個人事業主の申告者氏名（法人決算書なら null）",
+  "proprietor_kana": "申告者氏名のフリガナ（カタカナ・姓名の間に空白。法人なら null）"
 }
 ```
 
@@ -746,6 +764,13 @@ PROMPT_PL_PL_SECTION = """**出力は ```json コードブロック1個のみ。
 **製造原価報告書 / 完成工事原価報告書 / 工事原価報告書 は無視** してください（別途抽出するため）。
 
 販管費「のみ」の値を返してください。複数年度なら直近期1期のみ。
+
+個人事業主の「所得税の青色申告決算書」または「収支内訳書」の場合は、
+損益計算書の **経費欄（⑧〜㉛）を販管費とみなして** 次の対応で抽出すること:
+  - salary = 「給料賃金」（販管費明細ではなく経費欄にある。金額の桁を1桁ずつ正確に読むこと）
+  - misc_wages = 「専従者給与」（経費欄の外に専従者給与欄がある様式でも必ず拾う）
+  - bonus / officer_compensation = 0（個人事業主に賞与・役員報酬の科目は無い）
+  - welfare = 「福利厚生費」 / depreciation = 「減価償却費」 / travel_expense = 「旅費交通費」
 
 ```json
 {
@@ -1717,6 +1742,8 @@ class ClaudeExtractor(BaseExtractor):
             welfare=d.get('welfare', 0) or 0,
             depreciation=d.get('depreciation', 0) or 0,
             travel_expense=d.get('travel_expense', 0) or 0,
+            proprietor_name=str(d.get('proprietor_name') or '').strip(),
+            proprietor_kana=str(d.get('proprietor_kana') or '').strip(),
             breakdown=d.get('_breakdown', {}) or {},
         )
 
@@ -2703,6 +2730,8 @@ class ClaudeExtractor(BaseExtractor):
             welfare=_sum('welfare'),
             depreciation=_sum('depreciation'),
             travel_expense=_sum('travel_expense'),
+            proprietor_name=str(basic.get('proprietor_name') or '').strip(),
+            proprietor_kana=str(basic.get('proprietor_kana') or '').strip(),
             confidence=confidence,
             breakdown=breakdown,
         )

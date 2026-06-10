@@ -64,6 +64,12 @@ class FinancialData:
     depreciation: int = 0           # 減価償却費
     travel_expense: int = 0         # 旅費交通費
 
+    # 個人事業主（青色申告決算書/収支内訳書）の申告者氏名・フリガナ。
+    # 個人には履歴事項全部証明書が無く代表者氏名の取得元が決算書しかないため、
+    # PL抽出と同時に取得して申請書の「代表者氏名」へ転記する。法人では空。
+    proprietor_name: str = ''
+    proprietor_kana: str = ''
+
     # Phase 2: 各フィールドの信頼度メタ（フィールド名→FieldConfidence）
     # 例: {'salary': FieldConfidence(level='high', source_component='PL+cost', reason='')}
     confidence: dict = field(default_factory=dict)

@@ -217,6 +217,11 @@ class TemplateMapping:
     # （テンプレの既定値を温存したい行。通常枠173/175 のITツール投資/活用状況など）
     preserve_rows: list[int] = field(default_factory=list)
 
+    # ヒアリングシート（基本情報）の「賃金引上げ幅」回答行。
+    # 申請内容「賃上げ幅を選択」はこの回答から決める（既定値の決め打ちはしない）。
+    # 0 = 対応するヒアリング項目なし（賃上げ幅は空欄のまま空セル警告に委ねる）
+    hearing_wage_raise_row: int = 0
+
 
 # ── 2026 通常枠テンプレート ──
 # テンプレート原本: ツール/【原本_法人】企業名_通常枠_法人2026.xlsx
@@ -384,6 +389,7 @@ MAPPING_2026_TSUJO = TemplateMapping(
     shinsei_clear_range=(5, 270),
     tenki_text_range=(15, 26),
     preserve_rows=[173, 175],
+    hearing_wage_raise_row=82,
 )
 
 # ── 2026 インボイス枠 ──
@@ -539,6 +545,7 @@ MAPPING_2026_INVOICE = TemplateMapping(
     shinsei_clear_range=(5, 270),
     tenki_text_range=(16, 26),
     preserve_rows=[163, 164, 165],
+    hearing_wage_raise_row=76,
 )
 
 
@@ -676,6 +683,7 @@ MAPPING_2026_INVOICE_KOJIN = TemplateMapping(
     tenki_text_range=(16, 26),
     is_kojin=True,
     preserve_rows=[133, 134, 135],
+    hearing_wage_raise_row=88,
 )
 
 

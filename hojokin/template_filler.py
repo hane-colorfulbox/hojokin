@@ -19,6 +19,47 @@ logger = logging.getLogger(__name__)
 SHINSEI_CHECKLIST_HIDE_START = 5
 SHINSEI_CHECKLIST_HIDE_END = 26
 
+# 申請内容「賃上げ幅を選択」のプルダウン候補（テンプレ3種共通のデータ検証リスト
+# "賃上げを行わない,＋30円,＋50円" と一字一句一致させること）
+WAGE_RAISE_NONE = '賃上げを行わない'
+WAGE_RAISE_30 = '＋30円'
+WAGE_RAISE_50 = '＋50円'
+
+# ヒアリング回答の表記揺れ吸収用（選択肢は「❷＋３０円以上」だが手入力で
+# 半角数字・円なし等が混ざるため、数字だけ半角に正規化して判定する）
+_ZEN2HAN_DIGITS = str.maketrans('０１２３４５６７８９', '0123456789')
+
+
+def wage_raise_choice_from_hearing(hearing_data: dict, mapping: TemplateMapping) -> str | None:
+    """ヒアリングの「賃金引上げ幅」回答を申請内容プルダウン値に変換する。
+
+    ヒアリングシートの選択肢は「❶賃上げを行わない / ❷＋３０円以上 / ❸＋５０円以上」。
+    顧客回答と食い違う既定値を書く事故（＋50円固定で顧客回答＋30円を上書き）を
+    防ぐため、回答が無い・解釈できない場合は None を返し、セルは空欄のまま
+    空セル警告に委ねる。
+    """
+    import re
+
+    row = getattr(mapping, 'hearing_wage_raise_row', 0)
+    if not row or not hearing_data or row not in hearing_data:
+        return None
+    entry = hearing_data[row]
+    value = entry.get('value') if isinstance(entry, dict) else entry
+    if value is None:
+        return None
+    s = str(value).translate(_ZEN2HAN_DIGITS)
+    if '行わない' in s:
+        return WAGE_RAISE_NONE
+    # 「＋30」「+50」のように引上げ幅を明示した部分を最優先で読む
+    # （自由記入で他の金額（時給など）が混ざっても誤判定しないため）
+    m_amt = re.search(r'[+＋]\s*(30|50)', s)
+    amount = m_amt.group(1) if m_amt else ('50' if '50' in s else '30' if '30' in s else '')
+    if amount == '50':
+        return WAGE_RAISE_50
+    if amount == '30':
+        return WAGE_RAISE_30
+    return None
+
 
 def _safe_write_cell(ws, row: int, col: int, value):
     """結合セルに対応した安全な書き込み。
@@ -97,8 +138,17 @@ def clear_manual_cells(wb: openpyxl.Workbook, mapping: TemplateMapping) -> int:
     return cleared
 
 
-def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> list[str]:
-    """申請内容シートにデータを転記。転記した項目のログリストを返す。"""
+def fill_shinsei_sheet(
+    ws,
+    mapping: TemplateMapping,
+    data: ExtractionResult,
+    wage_raise_choice: str | None = None,
+) -> list[str]:
+    """申請内容シートにデータを転記。転記した項目のログリストを返す。
+
+    wage_raise_choice: ヒアリング回答由来の賃上げ幅プルダウン値
+        （wage_raise_choice_from_hearing の戻り値）。None なら空欄のまま。
+    """
     writes = []
     m = mapping.shinsei
     co = data.company
@@ -182,9 +232,18 @@ def fill_shinsei_sheet(ws, mapping: TemplateMapping, data: ExtractionResult) -> 
     elif ai.min_wage_text:
         write('min_wage', ai.min_wage_text, '地域別最低賃金')
 
-    # ── 賃上げ関連（デフォルト値） ──
+    # ── 賃上げ関連 ──
     write('wage_raise_declaration', '■はい\n□いいえ', '賃上げ表明')
-    write('wage_raise_amount', '＋50円', '賃上げ幅')
+    # 賃上げ幅はヒアリング回答からのみ書く。以前の「＋50円」固定の既定値は、
+    # 顧客回答（＋30円以上）を上書きする実害が出たため廃止。
+    # 回答が取れない場合は空欄のままにして空セル警告で人に選ばせる。
+    if wage_raise_choice:
+        write('wage_raise_amount', wage_raise_choice, '賃上げ幅')
+    elif 'wage_raise_amount' in m:
+        writes.append(
+            f'⚠ 行{m["wage_raise_amount"]:3d} [賃上げ幅]: ヒアリングの賃金引上げ幅'
+            f'回答が見つからないため空欄（プルダウンから手動選択してください）'
+        )
     write('wage_raise_method',
           '□社内掲示板などへの掲載によって\n■朝礼時、会議、面談時など口頭によって\n□書面、電子メールによって\n□その他',
           '表明方法')
@@ -459,7 +518,11 @@ def fill_template(
 
     # STEP 3: PDF → 申請内容 + 給与計算
     if '申請内容' in wb.sheetnames:
-        shinsei_writes = fill_shinsei_sheet(wb['申請内容'], mapping, extraction)
+        wage_raise_choice = wage_raise_choice_from_hearing(hearing_data or {}, mapping)
+        shinsei_writes = fill_shinsei_sheet(
+            wb['申請内容'], mapping, extraction,
+            wage_raise_choice=wage_raise_choice,
+        )
         for w in shinsei_writes:
             logger.info(f'STEP 3: {w}')
 

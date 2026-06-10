@@ -664,6 +664,27 @@ class FileDetector:
         return '\n'.join(lines)
 
 
+def _adopt_proprietor_as_representative(extraction, mapping) -> bool:
+    """個人事業主: 決算書の申告者氏名・フリガナを代表者として採用する。
+
+    個人には履歴事項全部証明書が無く、代表者氏名の取得元が
+    青色申告決算書/収支内訳書（PL抽出の proprietor_name/kana）しかない。
+    履歴事項由来の代表者氏名が既にあればそちらを優先して何もしない。
+
+    Returns:
+        True = 採用した / False = 条件を満たさず何もしなかった
+    """
+    if not mapping.is_kojin:
+        return False
+    if extraction.company.representative_name:
+        return False
+    if not extraction.financial.proprietor_name:
+        return False
+    extraction.company.representative_name = extraction.financial.proprietor_name
+    extraction.company.representative_kana = extraction.financial.proprietor_kana
+    return True
+
+
 def run_application_transfer(
     resource_folder: Path,
     template_path: Path,
@@ -792,6 +813,14 @@ def run_application_transfer(
                     cost_report_detected = True
                 extraction.financial = extractor.extract_pl(images)
                 logger.info(f'損益計算書: 売上{extraction.financial.revenue:,}')
+
+                # 個人事業主: 決算書の申告者氏名を代表者として採用
+                # （財務値リセットの整合性チェックより前に確定させる）
+                if _adopt_proprietor_as_representative(extraction, mapping):
+                    logger.info(
+                        f'個人事業主の代表者氏名を決算書から採用: '
+                        f'{extraction.company.representative_name}'
+                    )
 
                 # 賃金台帳期間 vs PL期末 / ユーザー指定決算月の整合性チェック
                 # ズレを検出したら財務値転記をスキップ + 強警告
@@ -1149,10 +1178,13 @@ def run_application_transfer(
         # スキップ。失敗してもログ警告のみで申請書本体は維持する（補助情報のため）。
         if ledger_employees:
             try:
+                # 会社名は出力ファイル名の先頭セグメントを使う。
+                # resource_folder.name は Streamlit 実行時に一時フォルダ名
+                # （tmpXXXX）になり、給与計算シートの社名表示が壊れるため不可。
                 _attach_per_employee_wage_sheet(
                     output_path=output_path,
                     resource_folder=resource_folder,
-                    company_name=resource_folder.name,
+                    company_name=output_path.stem.split('_')[0],
                     extractor=extractor,
                     cached_financial=extraction.financial,
                     cached_ledger_employees=ledger_employees,

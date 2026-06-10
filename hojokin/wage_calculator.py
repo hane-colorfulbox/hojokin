@@ -489,7 +489,9 @@ def create_wage_calculation(
     ws1.title = '給与支給総額計算'
 
     _cell(ws1, 2, 2, '給与支給総額計算書', TITLE_FONT, border=None)
-    _cell(ws1, 3, 2, f'株式会社 {company_name}', Font(name='游ゴシック', size=12), border=None)
+    # 社名はそのまま表示する（「株式会社」固定の接頭辞は個人事業主・
+    # 有限会社等で誤表示になるため付けない）
+    _cell(ws1, 3, 2, company_name, Font(name='游ゴシック', size=12), border=None)
     # 事業年度ラベルは PL 由来（AI抽出）or 賃金台帳期間からの導出。誤読リスクのあるセル
     _cell(ws1, 4, 2, f'事業年度: {fiscal_year_label}', NORMAL_FONT,
           fill=FILL_AI_EXTRACTED, border=None)
