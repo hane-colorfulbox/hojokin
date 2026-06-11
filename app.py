@@ -771,7 +771,9 @@ def _run_bonus_judgment(
         }
 
     try:
-        ledger = read_bonus_wage_ledger(ledger_path)
+        # 交付申請月は台帳C3優先・未入力ならUI値で補完。読み取り前に確定させないと
+        # R列/AE列（直近月の基本給・労働時間）が読み飛ばされる。
+        ledger = read_bonus_wage_ledger(ledger_path, application_ym_fallback=application_ym)
     except Exception as e:
         return {'status': 'エラー',
                 'message': f'加点判定用賃金台帳の読み取りに失敗しました: {str(e)}'}
@@ -779,8 +781,6 @@ def _run_bonus_judgment(
     # 台帳に未入力なら UI 値で補完（台帳の入力値があればそちらを優先）
     if not ledger.prefecture and prefecture:
         ledger.prefecture = prefecture
-    if ledger.application_ym is None and application_ym:
-        ledger.application_ym = application_ym
 
     if not ledger.employees:
         return {'status': 'エラー',
@@ -2700,4 +2700,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.71 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.72 | カラフルボックス株式会社')

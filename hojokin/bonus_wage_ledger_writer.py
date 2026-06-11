@@ -19,6 +19,8 @@ from .wage_reader import (
     BWL_APPYM_CELL,
     BWL_COL_EMPTYPE,
     BWL_COL_HOURS,
+    BWL_COL_HOURS_LATEST,
+    BWL_COL_HOURS_WINDOW_START,
     BWL_COL_LATEST,
     BWL_COL_NAME,
     BWL_COL_NO,
@@ -44,6 +46,9 @@ def write_bonus_wage_ledger(
 
     C2=都道府県、C3=交付申請月（日付）。各従業員行に No/氏名/雇用形態/月間所定労働時間/
     令和6年10月〜令和7年9月の基本給（F〜Q）/交付申請直近月の基本給（R）を書く。
+    monthly_hours_override（時給制等の月別労働時間）がある月は S〜AD/AE にも書き出し、
+    読み戻し時に E列固定値で時間換算給与が歪むのを防ぐ。BONUS1_WINDOW 外かつ直近月以外の
+    override は判定に使われないため書き出さない（往復で落ちるのは仕様）。
     """
     wb = openpyxl.load_workbook(str(template_path))
     ws = wb[BWL_SHEET_NAME] if BWL_SHEET_NAME in wb.sheetnames else wb[wb.sheetnames[0]]
@@ -71,6 +76,14 @@ def write_bonus_wage_ledger(
             base = emp.monthly_base.get(latest_ym)
             if base is not None:
                 ws.cell(row, BWL_COL_LATEST, round(base))
+        for j, ym in enumerate(BONUS1_WINDOW):
+            h = emp.monthly_hours_override.get(ym)
+            if h is not None and h > 0:
+                ws.cell(row, BWL_COL_HOURS_WINDOW_START + j, round(h, 1))
+        if latest_ym is not None:
+            h = emp.monthly_hours_override.get(latest_ym)
+            if h is not None and h > 0:
+                ws.cell(row, BWL_COL_HOURS_LATEST, round(h, 1))
 
     wb.save(str(output_path))
     wb.close()

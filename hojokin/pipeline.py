@@ -2585,6 +2585,34 @@ def run_bonus_wage_ledger_creation(
                 f'⚠️ 月間所定労働時間が取得できなかった従業員: {len(no_hours)}名（{head}）。'
                 'E列に会社の所定労働時間（例: 160）を手入力してください（最低賃金比較の分母）。'
             )
+        # 月別労働時間（S〜AE列）のカバレッジ。時給制は月により労働時間が変動するため、
+        # 月別が無い月は E列固定値で換算され時間換算給与が歪む（最賃割れの誤表示リスク）。
+        hours_written = [
+            e for e in employees
+            if any(ym in e.monthly_hours_override for ym in target_yms)
+        ]
+        partial_hours = []
+        for e in employees:
+            if e.is_officer:
+                continue
+            et = e.employment_type or ''
+            hourly_like = ('パート' in et) or ('アルバイト' in et) or bool(e.monthly_hours_override)
+            missing = [ym for ym in target_yms
+                       if ym in e.monthly_base and ym not in e.monthly_hours_override]
+            if hourly_like and missing:
+                partial_hours.append(e.name)
+        if hours_written:
+            msgs.append(
+                f'ℹ️ {len(hours_written)}名は月別労働時間も S〜AE列 に出力しました'
+                '（時給制等で月により労働時間が変動する従業員。空欄の月は E列で換算されます）。'
+            )
+        if partial_hours:
+            head = '、'.join(partial_hours[:5]) + ('…' if len(partial_hours) > 5 else '')
+            msgs.append(
+                f'⚠️ 時給制とみられるのに月別労働時間が取得できなかった月がある従業員: '
+                f'{len(partial_hours)}名（{head}）。原本を確認し S〜AE列 に補入力してください'
+                '（未入力の月は E列で換算され、時間換算給与が歪む可能性があります）。'
+            )
         if application_ym is None:
             msgs.append(
                 '⚠️ 交付申請月が未指定のため、加点措置②の直近月列（R列）が空です。'

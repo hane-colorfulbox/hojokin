@@ -90,6 +90,10 @@ BWL_COL_EMPTYPE = 4     # D
 BWL_COL_HOURS = 5       # E 月間所定労働時間
 BWL_COL_WINDOW_START = 6  # F〜Q: BONUS1_WINDOW（令和6年10月〜令和7年9月）の基本給12列
 BWL_COL_LATEST = 18       # R: 交付申請直近月の基本給
+# S〜AD / AE: 月別労働時間（任意）。時給制など月により労働時間が変動する従業員のみ入力し、
+# 空欄の月は E列（月間所定労働時間）で換算する（v0.2.72〜。旧形式＝列なし台帳も読める）。
+BWL_COL_HOURS_WINDOW_START = 19  # S〜AD: BONUS1_WINDOW 12ヶ月の月別労働時間
+BWL_COL_HOURS_LATEST = 31        # AE: 交付申請直近月の月別労働時間
 BWL_PREF_CELL = (2, 3)    # C2: 事業場所在地（都道府県）
 BWL_APPYM_CELL = (3, 3)   # C3: 交付申請月（yyyy/mm）
 
@@ -2902,11 +2906,18 @@ def _parse_app_month(v) -> tuple[int, int] | None:
     return None
 
 
-def read_bonus_wage_ledger(path: Path) -> BonusWageLedger:
+def read_bonus_wage_ledger(
+    path: Path,
+    application_ym_fallback: tuple[int, int] | None = None,
+) -> BonusWageLedger:
     """加点判定用賃金台帳（専用テンプレ）を決定論で直読みして BonusWageLedger を返す。
 
     AI 再抽出はしない。月列は暦月固定（F〜Q=令和6年10月〜令和7年9月、R=交付申請直近月）。
+    S〜AD/AE の月別労働時間（任意列）は monthly_hours_override に読み込み、空欄の月は
+    E列（月間所定労働時間）にフォールバックする。旧形式（S〜AE列なし）もそのまま読める。
     時間換算給与は持たず、基本給と所定労働時間から judge_bonus_points が算出する。
+    application_ym_fallback: C3 が未入力のときに使う交付申請月（UI 指定値）。
+    C3 が空のままだと R列/AE列（直近月）が読み飛ばされるため、読み取り前に補完する。
     """
     wb = openpyxl.load_workbook(str(path), data_only=True)
     ws = wb[BWL_SHEET_NAME] if BWL_SHEET_NAME in wb.sheetnames else wb[wb.sheetnames[0]]
@@ -2915,6 +2926,8 @@ def read_bonus_wage_ledger(path: Path) -> BonusWageLedger:
     pref = ws.cell(*BWL_PREF_CELL).value
     ledger.prefecture = str(pref).strip() if pref else ''
     ledger.application_ym = _parse_app_month(ws.cell(*BWL_APPYM_CELL).value)
+    if ledger.application_ym is None and application_ym_fallback is not None:
+        ledger.application_ym = application_ym_fallback
     latest_ym = ledger.latest_ym
 
     for r in range(BWL_DATA_START_ROW, ws.max_row + 1):
@@ -2941,6 +2954,16 @@ def read_bonus_wage_ledger(path: Path) -> BonusWageLedger:
             v = _to_float(ws.cell(r, BWL_COL_LATEST).value)
             if v is not None and v > 0:
                 emp.monthly_base[latest_ym] = v
+        # 月別労働時間（任意列）。直近月が BONUS1_WINDOW 内と重複する場合は
+        # AE が後勝ち（基本給の Q/R と同じ仕様）。
+        for i, ym in enumerate(BONUS1_WINDOW):
+            h = _to_float(ws.cell(r, BWL_COL_HOURS_WINDOW_START + i).value)
+            if h is not None and h > 0:
+                emp.monthly_hours_override[ym] = h
+        if latest_ym is not None:
+            h = _to_float(ws.cell(r, BWL_COL_HOURS_LATEST).value)
+            if h is not None and h > 0:
+                emp.monthly_hours_override[latest_ym] = h
         ledger.employees.append(emp)
     wb.close()
 
@@ -3103,6 +3126,40 @@ def judge_bonus_points(ledger: BonusWageLedger) -> BonusPointResult:
         f'(差額{result.bonus2_diff:.0f}円) '
         f'→ {"対象" if result.bonus2_eligible else "対象外"}'
     )
+
+    # ── 安全網: 法定最低賃金割れの検知 ──
+    # 地域別最賃を下回る支払いは法令上あり得ないため、下回る時間換算給与は
+    # 月別労働時間（S〜AE列）の入力漏れ（時給制で E列固定時間のまま換算）か
+    # 基本給の抽出誤りのシグナル。公式シートに転記される前に surfacing する。
+    # R7改定の発効は2025年10月 → BONUS1_WINDOW（〜2025年9月）は R6改定後と比較する。
+    def _legal_mw(ym: tuple[int, int]) -> int:
+        return result.min_wage_r6 if ym < (2025, 10) else result.min_wage_r7
+
+    check_yms = list(BONUS1_WINDOW)
+    if latest_ym is not None and latest_ym not in check_yms:
+        check_yms.append(latest_ym)
+    breaches: list[tuple[str, list[str]]] = []
+    for emp in workers:
+        bad = []
+        for ym in check_yms:
+            mw = _legal_mw(ym)
+            hourly = emp.hourly_for(ym)
+            if mw and hourly is not None and hourly > 0 and round(hourly) < mw:
+                bad.append(f'{ym_label(ym)}={round(hourly)}円(法定{mw}円)')
+        if bad:
+            breaches.append((emp.name, bad))
+    if breaches:
+        shown = '；'.join(
+            f'{name}: {"、".join(months[:3])}{"…" if len(months) > 3 else ""}'
+            for name, months in breaches[:5]
+        )
+        more = f'、他{len(breaches) - 5}名' if len(breaches) > 5 else ''
+        result.notes.append(
+            f'時間換算給与が法定最低賃金を下回る従業員が{len(breaches)}名います（{shown}{more}）。'
+            '時給制で月別労働時間（S〜AE列）が未入力、または基本給の抽出誤りの可能性があります。'
+            '台帳を原本と照合してください。'
+        )
+        logger.warning(f'法定最賃割れ検知: {len(breaches)}名')
     return result
 
 
