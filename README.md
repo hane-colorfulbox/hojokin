@@ -1,6 +1,6 @@
 # 補助金書類 自動化プロジェクト
 
-IT導入補助金の申請書類をClaude API + openpyxlで半自動作成するツール群。
+デジタル化・AI導入補助金（旧IT導入補助金）の申請書類をClaude API + openpyxlで半自動作成するツール群。
 案件管理（Google Sheets）・資料受領（Google Drive/Gmail）・書類生成（Python）・Streamlit UIを含む。
 
 ---

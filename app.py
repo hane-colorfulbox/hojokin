@@ -834,7 +834,7 @@ def _run_bonus_judgment(
 
 # ── ヘッダー ──
 st.markdown('<div class="main-header">📋 補助金書類自動作成ツール</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">IT導入補助金の申請書類をAIで自動作成します</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">デジタル化・AI導入補助金の申請書類をAIで自動作成します</div>', unsafe_allow_html=True)
 
 # API接続状態
 if CLAUDE_API_KEY:
@@ -2700,4 +2700,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.70 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.71 | カラフルボックス株式会社')

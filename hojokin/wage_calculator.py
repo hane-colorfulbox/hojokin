@@ -218,7 +218,7 @@ def _restore_monthly_from_detail(e: dict) -> list | None:
 def _calc_fte(emp: PayrollEmployee, annual_hours: float) -> float:
     """パート・アルバイトを正社員換算（FTE換算）。フルタイム雇用は FTE 1.0。
 
-    根拠: IT導入補助金 2026 通常枠 公募要領 p.10
+    根拠: デジタル化・AI導入補助金2026 通常枠 公募要領 p.10
         「パートタイム従業員については、正社員の就業時間に換算して人数を算出すること」
     交付申請マニュアル p.86 算定例
         「週20時間勤務（正規雇用は、週40時間労働）の場合 従業員数：20÷40＝0.5(人)」
@@ -370,7 +370,7 @@ def wage_employees_to_payroll(
             total_annual_hours += sum(monthly_hours)
 
         # パートで時間データが空 → _calc_fte で FTE=1.0 サイレント昇格になる人
-        # （IT導入補助金は本来 FTE 換算が要件。R215 過大計上の警告対象）
+        # （デジタル化・AI導入補助金は本来 FTE 換算が要件。R215 過大計上の警告対象）
         if (
             not is_officer
             and not zero_wage

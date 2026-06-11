@@ -25,7 +25,7 @@ const FOLDER_CONFIG = {
 
   // フォーム回答の列インデックス（0始まり、e.valuesの添字）
   COL_COMPANY_NAME: 11,    // L列: お客様企業名
-  COL_TEMPLATE_TYPE: 10,   // K列: IT導入補助金の申請枠
+  COL_TEMPLATE_TYPE: 10,   // K列: デジタル化・AI導入補助金の申請枠
   COL_SUPPORT_COMPANY: 6,  // G列: 支援事業者名（貴社名）
 
   // シート1の列番号（1始まり）
