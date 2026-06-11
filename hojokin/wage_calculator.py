@@ -45,6 +45,9 @@ class PayrollEmployee:
     # 支給>0 の月と 0円明記月が混在（v0.2.69 の新規除外対象）。monthly_salary は
     # None→0 変換済みで判別不能なため、wage_employees_to_payroll で焼き込む
     partial_zero: bool = False
+    # 全月が0円明記（None なし）。賞与の有無と組み合わせて「賞与のみ受給で除外
+    # (v0.2.70)」「給与支給0円で除外 (v0.2.66)」の警告を出し分ける。同上の理由で焼き込み
+    zero_explicit: bool = False
 
 
 @dataclass
@@ -64,6 +67,9 @@ class PerCapitaWageResult:
     # None ベースの従来中途者と区別して警告文に出すために分離保持。
     # excluded_zero_names（年計≤0）とは互いに素（partial_zero は年計>0）。
     excluded_partial_zero_names: list[str] = dc_field(default_factory=list)
+    # excluded_names のうち「全月0円明記＋賞与のみ受給」で除外した人（v0.2.70）。
+    # 賞与が R216 から落ちることを黙らせないために分離保持。
+    excluded_bonus_only_names: list[str] = dc_field(default_factory=list)
 
     GROWTH_RATE = 0.03  # 3%
 
@@ -101,8 +107,9 @@ def is_zero_wage(monthly_wages, annual_bonus: float = 0.0) -> bool:
     R215（FTE換算従業員数）/ R216（給与支給総額）/ 人数集計の算定対象から除外する
     （2026-06-10 補助金MTG決定: 賃金台帳に0円と明記された人を1人と数えて
     1人当たり給与が過小になる不具合の対処）。
-    賞与のみ受給（月次0・賞与>0）は支給を受けた従業員として対象に含める
-    （_debug/test_per_capita_zero_salary.py ケース3で固定済みの既存仕様）。
+    賞与のみ受給（月次0・賞与>0）は年計>0 のため本述語では False（除外判定は
+    is_full_year_paid 側が担う。v0.2.70 から賞与のみ受給者も全月支給に非該当
+    として除外＝2026-06-11 ルール変更。v0.2.66〜v0.2.69 は算入だった）。
     """
     total = sum(w or 0.0 for w in (monthly_wages or []))
     return total + (annual_bonus or 0.0) <= 0
@@ -128,18 +135,19 @@ def is_full_year_paid(monthly_wages) -> bool:
     等の休職は『除くことができる』＝任意だが、台帳からは中途と判別できないため
     一律除外し、警告で手動修正の経路を案内する）。
 
-    - 支給>0 の月が1つ以上ある場合: 12スロット全てが >0 のときのみ True。
-      None（データ無し月）も 0円・負値の月も「支給を受けていない月」と扱う。
-      「賃金台帳の作成」タスク産の台帳は不在月を 0円 で出力するため、None だけの
-      判定では中途入社者が全月在籍扱いになり R215/R216 に誤算入される（v0.2.69）。
-    - 支給>0 の月が0件の場合: 従来の None ベース判定にフォールバック
-      （all(w is not None)）。全月0円明記＝True を維持し、除外可否は is_zero_wage
-      と賞与のみ受給者の仕様（月次全0・賞与>0 は算入）に委ねる。
+    ルール（v0.2.70、2026-06-11 確定）: 12スロット全てが 支給>0 のときのみ True。
+    None（データ無し月）も 0円・負値の月も「支給を受けていない月」＝空欄と同等に扱う
+    （「賃金台帳の作成」タスク産の台帳は不在月を 0円 で出力するため。v0.2.69）。
+
+    賞与は月の支給判定に使わない: 標準テンプレ T列は賞与の年間合計のみで支給月の
+    情報を持たないため、「0円月に賞与が支給されていた」ケースは機械判定できない。
+    該当し得る人（賞与あり＋0円月）には警告を出し、算入する場合は該当月に賞与額を
+    記入し T列から同額を差し引く手動修正で対応する。
+    これに伴い全月0円＋賞与のみ受給者も除外（v0.2.66〜v0.2.69 の「算入する」仕様を
+    2026-06-11 に変更。月給0円の月は支給なしと読む整理）。
     """
     wages = monthly_wages or []
-    if any((w or 0) > 0 for w in wages):
-        return all(w is not None and w > 0 for w in wages)
-    return all(w is not None for w in wages)
+    return all(w is not None and w > 0 for w in wages)
 
 
 def has_partial_zero_months(monthly_wages) -> bool:
@@ -163,15 +171,48 @@ def has_partial_zero_months_detail(e: dict) -> bool:
     3ヶ月モード（賃金状況報告シート由来・monthly_wages_full なし）は全月判定が
     原理的に不能なため常に False（部分0円ルールの対象外）。
     """
+    restored = _restore_monthly_from_detail(e)
+    if restored is None:
+        return False
+    return has_partial_zero_months(restored)
+
+
+def is_all_zero_explicit(monthly_wages) -> bool:
+    """全月が「明記された0円以下」（None を含まない）か。
+
+    is_full_year_paid=False のうち「全月0円明記」の人（賞与のみ受給者・退職済み行・
+    無給の家族従業者など）を、None ベースの中途者と区別して警告・凡例に出し分ける
+    ための述語。賞与の有無は見ない（呼出側が annual_bonus で出し分ける）。
+    """
+    wages = monthly_wages or []
+    return bool(wages) and all(w is not None and w <= 0 for w in wages)
+
+
+def is_all_zero_explicit_detail(e: dict) -> bool:
+    """employees_detail の1人分 dict に対する is_all_zero_explicit。
+    3ヶ月モード（monthly_wages_full なし）は常に False。
+    """
+    restored = _restore_monthly_from_detail(e)
+    if restored is None:
+        return False
+    return is_all_zero_explicit(restored)
+
+
+def _restore_monthly_from_detail(e: dict) -> list | None:
+    """employees_detail から None 込みの月次配列を復元する（detail 系述語の共通部）。
+
+    monthly_wages_full は None→0 変換済みのため、month_data_mask（元データの
+    non-None マスク）で None を復元する。monthly_wages_full が無い（3ヶ月モード）
+    場合は None を返す。
+    """
     wages = e.get('monthly_wages_full')
     if not wages:
-        return False
+        return None
     mask = e.get('month_data_mask') or [True] * len(wages)
-    restored = [
+    return [
         w if (i < len(mask) and mask[i]) else None
         for i, w in enumerate(wages)
     ]
-    return has_partial_zero_months(restored)
 
 
 def _calc_fte(emp: PayrollEmployee, annual_hours: float) -> float:
@@ -217,6 +258,14 @@ def calculate_per_capita_wage(
                         '（年末調整の返金処理や入力ミスの可能性。賃金台帳の値を要確認）'
                     )
                 result.excluded_partial_zero_names.append(emp.name)
+            elif emp.zero_explicit and (emp.annual_bonus or 0) > 0:
+                # 全月0円明記＋賞与のみ受給（v0.2.70 から除外。賞与も R216 に入らない）
+                result.excluded_bonus_only_names.append(emp.name)
+            elif emp.zero_explicit:
+                # 全月0円明記・賞与なし。v0.2.66 からの除外対象（従来は後段の
+                # is_zero_wage で拾っていたが、full_year=False が先に立つため
+                # ここで excluded_zero_names に入れて警告表示を維持する）
+                result.excluded_zero_names.append(emp.name)
             result.excluded_names.append(emp.name)
             continue
 
@@ -313,6 +362,7 @@ def wage_employees_to_payroll(
             annual_bonus=annual_bonus,
             # monthly_salary は None→0 変換済みのため、変換前の monthly_wages から判定
             partial_zero=has_partial_zero_months(emp.monthly_wages),
+            zero_explicit=is_all_zero_explicit(emp.monthly_wages),
         ))
 
         # 役員を除く全従業員の年間総労働時間を集計
@@ -533,13 +583,20 @@ def create_wage_calculation(
     excluded_midyear = 0       # 中途者として除外した人数（凡例表示用）
     excluded_zero = 0          # 給与支給0円で除外した人数（凡例表示用）
     excluded_partial_zero = 0  # 0円支給月の混在で除外した人数（凡例表示用、v0.2.69）
+    excluded_bonus_only = 0    # 賞与のみ受給で除外した人数（凡例表示用、v0.2.70）
     if employees_detail:
         for e in employees_detail:
             if not e.get('full_year', True):
-                # 0円明記月持ち（公募要領「全月分の支給」非該当）と None ベースの
-                # 従来中途者を凡例で出し分ける（除外扱いはどちらも同じ）
+                # 除外理由を凡例で出し分ける（除外扱いはどれも同じ）:
+                #   0円明記月と支給月の混在 / 全月0円明記（賞与あり・なし） /
+                #   None ベースの従来中途者
                 if has_partial_zero_months_detail(e):
                     excluded_partial_zero += 1
+                elif is_all_zero_explicit_detail(e):
+                    if (e.get('annual_bonus') or 0) > 0:
+                        excluded_bonus_only += 1
+                    else:
+                        excluded_zero += 1
                 else:
                     excluded_midyear += 1
                 continue
@@ -967,8 +1024,22 @@ def create_wage_calculation(
             _cell(ws1, r, 3, excluded_partial_zero)
             _cell(ws1, r, 4,
                   '※R215 算定対象外（公募要領「全月分の給与等の支給を受けた従業員」に非該当。'
-                  '中途入社・退職なら正しい除外。休職等で算入する場合や0円月に賞与支給がある'
-                  '場合は賃金台帳の該当月を実支給額に修正して再実行）',
+                  '中途入社・退職なら正しい除外。休職等で算入する場合は該当月を実支給額に修正、'
+                  '0円月に賞与支給があった場合は該当月に賞与額を記入し年間賞与欄から同額を'
+                  '差し引いて再実行）',
+                  SMALL_FONT)
+            ws1.cell(r, 2).fill = FILL_GRAY
+            ws1.cell(r, 3).fill = FILL_GRAY
+            ws1.cell(r, 4).fill = FILL_GRAY
+        if excluded_bonus_only:
+            r += 1
+            _cell(ws1, r, 2, '賞与のみ受給で除外した人数')
+            _cell(ws1, r, 3, excluded_bonus_only)
+            _cell(ws1, r, 4,
+                  '※R215 算定対象外（月次給与が全月0円のため「全月分の給与等の支給」に'
+                  '非該当と整理＝2026-06-11ルール。年間賞与も給与支給総額に算入していません。'
+                  '算入すべき場合は支給実態のある月に賞与額を記入し年間賞与欄から同額を'
+                  '差し引いて再実行）',
                   SMALL_FONT)
             ws1.cell(r, 2).fill = FILL_GRAY
             ws1.cell(r, 3).fill = FILL_GRAY
@@ -1329,6 +1400,13 @@ def create_wage_calculation(
                     note_parts.append(
                         f'0円支給月あり（支給{tenure_months}ヶ月／R215・R216算定対象外）'
                     )
+                elif is_all_zero_explicit_detail(e):
+                    if (e.get('annual_bonus') or 0) > 0:
+                        note_parts.append(
+                            '賞与のみ受給（月次給与が全月0円／R215・R216算定対象外）'
+                        )
+                    else:
+                        note_parts.append('給与支給0円（R215/R216 算定対象外）')
                 else:
                     note_parts.append(f'中途入退社（在籍{tenure_months}ヶ月）')
                 labels = [l for l in e.get('last_three_labels', []) if l]
@@ -1408,7 +1486,7 @@ def create_wage_calculation(
         r += 2
         _cell(ws2, r, 2,
               '※灰色（濃）行＝直近事業年度に12ヶ月在籍していない社員（中途入社・退職含む）、'
-              '0円支給月がある社員、または給与支給0円の社員（備考欄参照）。'
+              '0円支給月がある社員、給与支給0円または賞与のみ受給の社員（備考欄参照）。'
               'R215/R216の母数（12ヶ月在籍のみ合計）からは除外されます。',
               SMALL_FONT, border=None)
         if has_12_months:

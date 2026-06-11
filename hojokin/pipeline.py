@@ -1104,8 +1104,25 @@ def run_application_transfer(
                 f'R215/R216 の算定対象外にしました'
                 f'（公募要領「全月分の給与等の支給を受けた従業員」に非該当）。'
                 f'中途入社・退職なら正しい挙動です。産休・育休等の休職で算入したい場合'
-                f'（除外は任意）や、0円月に賞与支給があり全月支給に該当する場合は、'
-                f'賃金台帳の該当月を実支給額に修正して再実行してください'
+                f'（除外は任意）は該当月を実支給額に修正、0円月に賞与支給があった場合は'
+                f'該当月に賞与額を記入し年間賞与欄から同額を差し引いて再実行してください'
+            )
+
+        # 賞与のみ受給者（月次給与が全月0円）を算定対象外にした場合の通知
+        # （v0.2.70、2026-06-11 ルール確定。賞与が R216 から落ちることを黙らせない）
+        if wage_plan and wage_plan.get('excluded_bonus_only_count', 0) > 0:
+            _b_names = wage_plan.get('excluded_bonus_only_names', []) or []
+            _b_preview = ', '.join(_b_names[:3])
+            if len(_b_names) > 3:
+                _b_preview += f' ほか{len(_b_names) - 3}名'
+            wage_warning += (
+                f' ℹ 賃金台帳で月次給与が全月0円・賞与のみ受給の従業員 '
+                f'{wage_plan["excluded_bonus_only_count"]}名（{_b_preview}）を '
+                f'R215/R216 の算定対象外にしました'
+                f'（公募要領「全月分の給与等の支給を受けた従業員」に非該当のため。'
+                f'年間賞与も給与支給総額に算入していません）。'
+                f'算入すべき事情がある場合は、支給実態のある月に賞与額を記入し'
+                f'年間賞与欄から同額を差し引いて再実行してください'
             )
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
         consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
@@ -1875,6 +1892,11 @@ def _calc_wage_plan_from_ledger(
                         f'④0円支給月がある従業員'
                         f'{len(result.excluded_partial_zero_names)}名は算定対象外、'
                     )
+                if result.excluded_bonus_only_names:
+                    zero_note += (
+                        f'⑤賞与のみ受給（月次全月0円）の従業員'
+                        f'{len(result.excluded_bonus_only_names)}名は算定対象外、'
+                    )
                 logger.warning(
                     f'給与支給総額0：非役員{non_officer_count}名いるが全月在籍者が0名。'
                     f'①賃金台帳の対象期間が直近事業年度12ヶ月とズレ（支給日ベース等）、'
@@ -1927,6 +1949,19 @@ def _calc_wage_plan_from_ledger(
                 f'({", ".join(result.excluded_partial_zero_names[:5])}'
                 f'{"..." if len(result.excluded_partial_zero_names) > 5 else ""})'
             )
+        if result.excluded_bonus_only_names:
+            plan['excluded_bonus_only_count'] = len(
+                result.excluded_bonus_only_names
+            )
+            plan['excluded_bonus_only_names'] = list(
+                result.excluded_bonus_only_names
+            )
+            logger.info(
+                f'賞与のみ受給（月次全月0円）のため算定対象外: '
+                f'{len(result.excluded_bonus_only_names)}名 '
+                f'({", ".join(result.excluded_bonus_only_names[:5])}'
+                f'{"..." if len(result.excluded_bonus_only_names) > 5 else ""})'
+            )
         logger.info(
             f'給与支給総額: {base:,.0f}円 '
             f'(従業員FTE: {result.employee_count_fte:.1f}人, 年3%成長, '
@@ -1943,15 +1978,18 @@ def _calc_wage_plan_from_ledger(
         if low_full_year_ratio:
             zero_n = len(result.excluded_zero_names)
             partial_n = len(result.excluded_partial_zero_names)
-            # 除外集合は互いに素（partial は年計>0、zero は年計≤0）。引き忘れると
-            # 中途入退社の人数が二重計上される
-            midyear_n = non_officer_count - included_count - zero_n - partial_n
+            bonus_only_n = len(result.excluded_bonus_only_names)
+            # 除外集合は互いに素（partial は支給月あり、zero/bonus_only は全月0円明記で
+            # 賞与の有無により排他）。引き忘れると中途入退社の人数が二重計上される
+            midyear_n = (non_officer_count - included_count
+                         - zero_n - partial_n - bonus_only_n)
             zero_part = f'・給与支給0円{zero_n}名' if zero_n else ''
             partial_part = f'・0円支給月あり{partial_n}名' if partial_n else ''
+            bonus_only_part = f'・賞与のみ受給{bonus_only_n}名' if bonus_only_n else ''
             logger.warning(
                 f'全月在籍者({included_count}名)が非役員数({non_officer_count}名)の'
                 f'{FISCAL_MISMATCH_RATIO*100:.0f}%未満。中途入退社{midyear_n}名'
-                f'{partial_part}{zero_part}は公募要領通り算出対象から除外。'
+                f'{partial_part}{bonus_only_part}{zero_part}は公募要領通り算出対象から除外。'
                 f'R215/R216 は自動転記しますが、'
                 f'対象者と賃金台帳期間を念のためご確認ください'
             )
@@ -2299,23 +2337,15 @@ def _build_employees_detail_from_ledger(
             continue
 
         # 事業年度内の時系列順で「支給>0 の月」を取り、末尾3つを直近として採用。
-        # 0円明記月は「支給を受けていない月」（公募要領 p.10、v0.2.69）として
+        # 0円・負値・空欄の月はいずれも「支給を受けていない月」（公募要領 p.10）として
         # 在籍月に数えない（「賃金台帳の作成」産の台帳は不在月を0円で出力するため、
-        # non-None 判定では中途入社者が full_year=True になり R215/R216 に誤算入）。
-        # 支給>0 の月が0件の人（全月0円＝賞与のみ受給者等）は従来の non-None 判定に
-        # フォールバックし、full_year=True を維持（賞与のみ算入仕様・v0.2.66）。
+        # non-None 判定では中途入社者が full_year=True になり R215/R216 に誤算入。
+        # v0.2.69）。全月0円＋賞与のみ受給者も除外（v0.2.70、2026-06-11 ルール確定）。
         # ※ wage_calculator.is_full_year_paid と同一ルール。変える場合は両方同期。
-        paid_months_ordered = [
+        ordered_months_with_data = [
             idx for idx in month_order
             if idx < len(emp.monthly_wages) and (emp.monthly_wages[idx] or 0) > 0
         ]
-        if paid_months_ordered:
-            ordered_months_with_data = paid_months_ordered
-        else:
-            ordered_months_with_data = [
-                idx for idx in month_order
-                if idx < len(emp.monthly_wages) and emp.monthly_wages[idx] is not None
-            ]
         tenure_months = len(ordered_months_with_data)
         full_year = tenure_months >= 12
 

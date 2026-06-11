@@ -233,9 +233,9 @@ class WageEmployee:
         """全月分の給与等の支給を受けたか（公募要領 p.10）。
 
         判定の単一の真実は wage_calculator.is_full_year_paid（v0.2.69〜）。
-        None だけでなく 0円・負値の月も「支給を受けていない月」として扱う
+        None だけでなく 0円・負値の月も「支給を受けていない月」＝空欄と同等に扱う
         （「賃金台帳の作成」タスク産の台帳は不在月を0円で出力するため）。
-        全月 0/None の人は従来の None ベース判定（賞与のみ受給者は全月在籍扱い）。
+        全月0円＋賞与のみ受給者も False（v0.2.70、2026-06-11 ルール確定）。
         """
         # 局所 import（_is_excluded_from_wage_total と同パターン。循環 import 回避）
         from .wage_calculator import is_full_year_paid
@@ -2406,9 +2406,10 @@ def _is_excluded_from_wage_total(emp: WageEmployee) -> bool:
     除外条件（公募要領準拠）:
       - 役員（employment_type に「役員」を含む）
       - 基準年度に全月分の給与支給を受けていない（中途入退社等。v0.2.69 から
-        0円明記月と支給月の混在も該当＝is_full_year が新ルールで False になる）
+        0円明記月と支給月の混在、v0.2.70 から全月0円＋賞与のみ受給者も該当
+        ＝is_full_year が新ルールで False になる）
       - 給与支給0円（年計＝月次合計＋年間賞与が0以下。賃金台帳に0円と明記された人。
-        2026-06-10 補助金MTG決定。賞与のみ受給者は対象に含める）
+        2026-06-10 補助金MTG決定）
     """
     # 判定の単一の真実は wage_calculator.is_zero_wage（R215/FTE 側と同一基準）
     from .wage_calculator import is_zero_wage
