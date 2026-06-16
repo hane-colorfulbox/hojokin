@@ -2519,25 +2519,31 @@ def export_wage_ledger_summary(
 
     # 列レイアウト
     # 1: No, 2: 従業員名, 3: 雇用形態,
-    # 4-15: 1月〜12月 賃金, 16: 年間合計賃金,
-    # 17-28: 1月〜12月 時間, 29: 年間合計時間, 30: 月平均労働時間,
-    # 31: データソース
+    # 4-15: 1月〜12月 賃金, 16: 年間合計賃金(月次課税給与の年計),
+    # 17: 年間賞与, 18: 給与支給総額(賞与込)=R216母数,
+    # 19-30: 1月〜12月 時間, 31: 年間合計時間, 32: 月平均労働時間,
+    # 33: データソース
     wage_start = 4
-    wage_total_col = wage_start + 12  # 16
-    hours_start = wage_total_col + 1  # 17
-    hours_total_col = hours_start + 12  # 29
-    avg_hours_col = hours_total_col + 1  # 30
-    source_col = avg_hours_col + 1  # 31
+    wage_total_col = wage_start + 12  # 16 月次課税給与の年計
+    bonus_col = wage_total_col + 1  # 17 年間賞与
+    gross_total_col = bonus_col + 1  # 18 給与支給総額(賞与込)=R216母数
+    hours_start = gross_total_col + 1  # 19
+    hours_total_col = hours_start + 12  # 31
+    avg_hours_col = hours_total_col + 1  # 32
+    source_col = avg_hours_col + 1  # 33
 
     # グループヘッダー（5行目）— 抽出経路メッセージを 2行目に追加したため1行ずれる
     group_row = 5
     ws.cell(row=group_row, column=wage_start, value='月別課税対象額（円）')
     ws.merge_cells(start_row=group_row, start_column=wage_start,
                    end_row=group_row, end_column=wage_total_col)
+    ws.cell(row=group_row, column=bonus_col, value='年額（賞与・給与支給総額）')
+    ws.merge_cells(start_row=group_row, start_column=bonus_col,
+                   end_row=group_row, end_column=gross_total_col)
     ws.cell(row=group_row, column=hours_start, value='月別労働時間')
     ws.merge_cells(start_row=group_row, start_column=hours_start,
                    end_row=group_row, end_column=avg_hours_col)
-    for c in (wage_start, hours_start):
+    for c in (wage_start, bonus_col, hours_start):
         cell = ws.cell(row=group_row, column=c)
         cell.font = header_font_white
         cell.fill = group_fill
@@ -2549,6 +2555,7 @@ def export_wage_ledger_summary(
     headers = (
         ['No', '従業員名', '雇用形態']
         + MONTH_NAMES + ['年間合計']
+        + ['年間賞与', '給与支給総額(賞与込)']
         + MONTH_NAMES + ['年間合計', '月平均']
         + ['データソース']
     )
@@ -2581,6 +2588,17 @@ def export_wage_ledger_summary(
         wage_total_cell.number_format = number_fmt
         wage_total_cell.font = Font(bold=True)
         wage_total_cell.border = thin_border
+
+        # 年間賞与は月次セルに混ぜない設計を維持し、独立列で見せる。
+        # 給与支給総額(賞与込)＝月次課税給与の年計＋年間賞与＝R216 母数（申請書R216と一致）。
+        bonus_amt = getattr(emp, 'annual_bonus', 0.0) or 0.0
+        bonus_cell = ws.cell(row=r, column=bonus_col, value=bonus_amt)
+        bonus_cell.number_format = number_fmt
+        bonus_cell.border = thin_border
+        gross_cell = ws.cell(row=r, column=gross_total_col, value=annual_wage + bonus_amt)
+        gross_cell.number_format = number_fmt
+        gross_cell.font = Font(bold=True)
+        gross_cell.border = thin_border
 
         annual_hours = 0.0
         has_any_hours = False
@@ -2658,8 +2676,9 @@ def export_wage_ledger_summary(
             c.fill = fill
             c.border = thin_border
 
-        # 賃金: 1月〜12月 + 年間合計
-        for col in list(range(wage_start, wage_start + 12)) + [wage_total_col]:
+        # 賃金: 1月〜12月 + 年間合計 + 年間賞与 + 給与支給総額(賞与込)
+        for col in (list(range(wage_start, wage_start + 12))
+                    + [wage_total_col, bonus_col, gross_total_col]):
             col_letter = get_column_letter(col)
             # 全員
             _set_total_cell(
@@ -2696,12 +2715,11 @@ def export_wage_ledger_summary(
                 hours_fmt, subtotal_fill_target,
             )
 
-        # 備考: 「集計対象のみ」の年間合計＝R216 母数。ただし R列(年間合計)は月次課税給与のみで、
-        # R216（給与支給総額）は「月次年計＋年間賞与」。賞与は月次セルに混ぜない設計（年間賞与は
-        # WageEmployee.annual_bonus に隔離）のため、R列だけを R216 母数と書くと申請書 R216
-        # （賞与込み）とダブルチェックで賞与額ぶん食い違う。集計対象の年間賞与額と R216 実値を
-        # 備考に明示し、申請書 R216 と突合できるようにする。
-        wage_total_letter = get_column_letter(wage_total_col)
+        # 備考: 「給与支給総額(賞与込)」列の「合計（集計対象のみ）」＝R216 母数（申請書R216と一致）。
+        # 賞与は月次セルに混ぜない設計（年間賞与は WageEmployee.annual_bonus に隔離）のままだが、
+        # 専用列で「月次年計＋賞与」を明示し、重要な数字が備考に埋もれないようにする
+        # （旧版は年間合計が月次のみで R216 と食い違い、利用者が混乱していた）。
+        gross_letter = get_column_letter(gross_total_col)
         included_emps = [e for e in employees if not _is_excluded_from_wage_total(e)]
         target_wage_sum = sum(
             sum(w for w in e.monthly_wages if w is not None) for e in included_emps
@@ -2709,19 +2727,12 @@ def export_wage_ledger_summary(
         target_bonus_sum = sum(
             (getattr(e, 'annual_bonus', 0.0) or 0.0) for e in included_emps
         )
-        if target_bonus_sum > 0:
-            note_value = (
-                f'※「合計（集計対象のみ）」年間合計（{wage_total_letter}列）'
-                f'＝月次課税給与の年計 {target_wage_sum:,.0f}円。'
-                f'R216 給与支給総額＝これ＋年間賞与 {target_bonus_sum:,.0f}円'
-                f'＝ {target_wage_sum + target_bonus_sum:,.0f}円'
-                f'（賞与は月次セルに含めない設計のため別途加算）'
-            )
-        else:
-            note_value = (
-                f'※「合計（集計対象のみ）」の年間合計（{wage_total_letter}列）'
-                f'＝ R216 給与支給総額の母数 {target_wage_sum:,.0f}円（賞与なし）'
-            )
+        note_value = (
+            f'※「給与支給総額(賞与込)」（{gross_letter}列）の「合計（集計対象のみ）」'
+            f'＝R216 給与支給総額の母数。月次課税給与の年計 {target_wage_sum:,.0f}円'
+            f'＋年間賞与 {target_bonus_sum:,.0f}円＝{target_wage_sum + target_bonus_sum:,.0f}円。'
+            f'申請書R216と一致する。'
+        )
         note_cell = ws.cell(
             row=total_target_row, column=source_col, value=note_value,
         )
@@ -2747,6 +2758,8 @@ def export_wage_ledger_summary(
     for c in range(wage_start, avg_hours_col + 1):
         ws.column_dimensions[get_column_letter(c)].width = 11
     ws.column_dimensions[get_column_letter(wage_total_col)].width = 13
+    ws.column_dimensions[get_column_letter(bonus_col)].width = 12
+    ws.column_dimensions[get_column_letter(gross_total_col)].width = 18
     ws.column_dimensions[get_column_letter(hours_total_col)].width = 13
     ws.column_dimensions[get_column_letter(avg_hours_col)].width = 11
     ws.column_dimensions[get_column_letter(source_col)].width = 40

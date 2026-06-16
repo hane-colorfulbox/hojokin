@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from pathlib import Path
 import openpyxl
@@ -90,6 +91,43 @@ def _safe_write_cell(ws, row: int, col: int, value):
                 anchor.value = value
                 return
     cell.value = value
+
+
+# Excel番号書式の幅調整スペーサ（_ の直後1文字＝「その文字幅の空白」）。
+# 例: '#,##0_);(#,##0)' の '_)' / '#,##0_ ' の '_ '。表示揃え用の空白だが、
+# セルをコピーしてプレーンテキスト貼り付けすると実スペース文字として混入し、
+# 顧客が申請フォーマットへ貼るとエラーになる（決算書由来の数値で頻発）。
+_FORMAT_SPACER_RE = re.compile(r'_.')
+
+
+def _strip_format_spacers(fmt: str) -> str:
+    """番号書式から幅調整スペーサ（_x）だけを除去する。
+
+    桁区切り・[Red]・負数表示は保持し、コピー時に空白を生む `_)` `_(` `_ ` のみ落とす。
+    '#,##0_);(#,##0)' → '#,##0;(#,##0)' / '#,##0_ ' → '#,##0'
+    """
+    if not fmt or '_' not in fmt:
+        return fmt
+    return _FORMAT_SPACER_RE.sub('', fmt)
+
+
+def normalize_number_format_spacers(ws) -> int:
+    """シート内の数値セルの番号書式から幅調整スペーサ(_x)を除去。変更セル数を返す。
+
+    結合セルの非先頭(MergedCell)は書式を持たないためスキップ。値は一切変えない。
+    """
+    changed = 0
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell, MergedCell):
+                continue
+            fmt = cell.number_format
+            if fmt and '_' in fmt:
+                new_fmt = _strip_format_spacers(fmt)
+                if new_fmt != fmt:
+                    cell.number_format = new_fmt
+                    changed += 1
+    return changed
 
 
 def clear_manual_cells(wb: openpyxl.Workbook, mapping: TemplateMapping) -> int:
@@ -594,6 +632,17 @@ def fill_template(
             f'STEP 5.5: 申請内容シート 行{SHINSEI_CHECKLIST_HIDE_START}〜'
             f'{SHINSEI_CHECKLIST_HIDE_END} を非表示化'
         )
+
+    # STEP 5.6: 数値セルの番号書式スペーサ(_x)を除去（コピー時の空白混入を防止）
+    # 申請内容シート＋給与支給総額計算系シートの財務/従業員数/給与支給総額/労働時間セルは
+    # テンプレ原本が '#,##0_);(#,##0)' 等の幅調整書式で、コピペ時に前後へ半角空白が入り
+    # 顧客の申請フォーマット貼り付けでエラーになる。値は変えず書式のスペーサだけ落とす。
+    spacer_total = 0
+    for sname in ('申請内容', mapping.kyuyo_sheet_name):
+        if sname in wb.sheetnames:
+            spacer_total += normalize_number_format_spacers(wb[sname])
+    if spacer_total:
+        logger.info(f'STEP 5.6: 番号書式スペーサ除去 {spacer_total}セル')
 
     # 保存
     wb.save(output_path)

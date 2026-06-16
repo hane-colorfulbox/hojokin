@@ -23,6 +23,7 @@ from .wage_calculator import (
 )
 from .wage_reader import read_wage_ledger, read_wage_ledgers, export_wage_ledger_summary
 from .pdf_reader import pdf_to_images
+from .warnings_catalog import tag as warn_tag
 
 logger = logging.getLogger(__name__)
 
@@ -298,7 +299,7 @@ def _check_pl_wage_period_consistency(
         latest_wage_end = max(wage_ends)
         if latest_wage_end[1] != fiscal_month_override:
             msgs.append(
-                f' ⛔ 致命的不整合: 賃金台帳期末月={latest_wage_end[1]}月 ／ '
+                f' ⛔ {warn_tag("W-FISCAL-002")}致命的不整合: 賃金台帳期末月={latest_wage_end[1]}月 ／ '
                 f'ユーザー指定決算月={fiscal_month_override}月。'
                 f'賃金台帳の対象期間がユーザー指定と矛盾しています。'
                 f'決算月の設定または賃金台帳の差し替えを確認してください。'
@@ -309,7 +310,7 @@ def _check_pl_wage_period_consistency(
         # 賃金台帳ファイル名から期間が取れなかった時のフォールバック
         if pl_end[1] != fiscal_month_override:
             msgs.append(
-                f' ⚠ 警告: 決算書期末月={pl_end[1]}月 ／ '
+                f' ⚠ {warn_tag("W-FISCAL-001")}警告: 決算書期末月={pl_end[1]}月 ／ '
                 f'ユーザー指定決算月={fiscal_month_override}月で不一致。'
                 f'別の期の決算書が読み込まれた可能性があります。'
             )
@@ -942,7 +943,7 @@ def run_application_transfer(
                     logger.warning(f'事業内容を自動短縮(機械削除): {n_orig}文字 → {result.length}文字')
                 else:
                     biz_desc_warning = (
-                        f' ⚠ 事業内容が文字数制限超過（{n_orig}文字 / 上限255文字）。'
+                        f' ⚠ {warn_tag("W-DESC-001")}事業内容が文字数制限超過（{n_orig}文字 / 上限255文字）。'
                         f'自動短縮（AI再生成 + 機械削除）に失敗しました。'
                         f'原稿を手動で短縮してください。'
                     )
@@ -975,7 +976,7 @@ def run_application_transfer(
                     logger.warning(f'事業内容を自動増量(機械調整): {n_orig}文字 → {result.length}文字')
                 else:
                     biz_desc_warning = (
-                        f' ⚠ 事業内容が短すぎます（{n_orig}文字 / 推奨240〜255文字）。'
+                        f' ⚠ {warn_tag("W-DESC-002")}事業内容が短すぎます（{n_orig}文字 / 推奨240〜255文字）。'
                         f'4要素（現状・課題・解決策・期待効果）が十分書き切れているか、'
                         f'ヒアリング情報を追記して厚みを出してください。'
                     )

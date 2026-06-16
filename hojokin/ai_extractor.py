@@ -899,7 +899,7 @@ PROMPT_AI_JUDGMENT = """以下の会社情報に基づいて、補助金申請�
 {{
   "industry_code": "日本標準産業分類（令和5年6月改定・第14回改定）の細分類コード（4桁）。古い体系の3桁コードは不可。総務省統計局・e-Stat の最新分類（https://www.e-stat.go.jp/classifications/terms/10）に従うこと。具体的コードは推定せず、業態から該当する細分類を引くこと。主たる事業＝売上が最も大きい事業の細分類を1つ選ぶ（履歴事項目的の1番目に引っ張られない）。建設業の大分類記号は必ずD・製造業はE",
   "industry_text": "日本標準産業分類（令和5年6月改定）に基づき '大分類 X xxx / 中分類 xx xxx / 小分類 xxx xxx / 細分類 xxxx xxx' 形式で返す。コード番号と名称は一致させること",
-  "business_description": "事業内容の説明文。**必ず240文字以上252文字以内**（句読点・記号も1文字、改行は含めない）。255文字を超えると申請書のセルで切られるので絶対に超えない。バッファとして252文字までに収めること。以下4要素を順番に必ず含めること: (1)現状の事業概要（業種・主要サービス・顧客層を1〜2文） (2)直面している課題・非効率（具体的な業務名・所要時間） (3)導入するITツールによる解決策（どの業務をどう変えるか） (4)期待される効果（時間削減・売上向上・新規事業展開の見込みを具体的に）。一般論ではなく、ヒアリング回答に含まれる固有の業務名・数値を必ず織り込むこと。語尾は『〜である』調で統一",
+  "business_description": "事業内容の説明文。**必ず240文字以上252文字以内**（句読点・記号も1文字、改行は含めない）。255文字を超えると申請書のセルで切られるので絶対に超えない。バッファとして252文字までに収めること。以下4要素を順番に必ず含めること: (1)現状の事業概要（業種・主要サービス・顧客層を1〜2文） (2)直面している課題・非効率（具体的な業務名・所要時間） (3)導入するITツール（上記「ツール名」が空欄でない場合は、そのツールの実際の機能・用途に厳密に沿うこと。ツール名と無関係な別ツール・他社サービスの機能を創作してはならない）による解決策（どの業務をどう変えるか） (4)期待される効果（時間削減・売上向上・新規事業展開の見込みを具体的に）。一般論ではなく、ヒアリング回答に含まれる固有の業務名・数値を必ず織り込むこと。語尾は『〜である』調で統一",
   "management_intent": "営業利益がプラスなら '事業の拡大に積極的'、マイナスなら '事業の維持に注力'",
   "future_goals": "営業利益がプラスなら '事業の拡大'、マイナスなら '利益の確保'",
   "security_status": "パソコンやサーバなどには、IDやパスワードを設け情報セキュリティ管理を行っている",
@@ -1863,6 +1863,7 @@ class ClaudeExtractor(BaseExtractor):
             'reduction': '',
             'freed_time': '',
             'sales_target': '',
+            'tool_name_from_hearing': '',
         }
         if hearing_data:
             FIELD_KEYWORDS = {
@@ -1874,6 +1875,9 @@ class ClaudeExtractor(BaseExtractor):
                 'reduction': ['何％', '何時間'],
                 'freed_time': ['浮いた時間'],
                 'sales_target': ['売上目標'],
+                # 事業内容(255字)はツールに沿った内容にする必要がある。見積書が無い案件では
+                # tool_name が空になり AI が別ツールを創作するため、ヒアリングの導入ツールを拾う。
+                'tool_name_from_hearing': ['導入ツール', 'ツール名', '導入予定ツール', '導入するツール'],
             }
             for row_num, item in hearing_data.items():
                 label = str(item.get('label', ''))
@@ -1888,6 +1892,11 @@ class ClaudeExtractor(BaseExtractor):
                         if any(kw in label for kw in keywords):
                             hearing_fields[field_key] = str(value) if value else ''
                             break
+
+        # 見積書由来の tool_name が空なら、ヒアリングシートの「導入ツール」を採用する。
+        # 空のまま生成するとツールと無関係な事業内容（別ツールの話）が出る不具合の対策。
+        if not (tool_name or '').strip() and hearing_fields.get('tool_name_from_hearing'):
+            tool_name = hearing_fields['tool_name_from_hearing']
 
         prompt = PROMPT_AI_JUDGMENT.format(
             company_name=company.name,
