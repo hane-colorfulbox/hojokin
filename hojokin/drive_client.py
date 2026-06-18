@@ -14,6 +14,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
+from .warnings_catalog import tag as warn_tag
+
 logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/drive']  # アップロード機能のため read/write 必要
@@ -104,7 +106,7 @@ class DriveClient:
                 )
             if status == 403:
                 return (
-                    f'サービスアカウント（{sa}）にこのフォルダへの書き込み権限が'
+                    f'{warn_tag("W-DRIVE-001")}サービスアカウント（{sa}）にこのフォルダへの書き込み権限が'
                     'ありません。共有ドライブの管理者に、このアカウントを'
                     '「コンテンツ管理者」以上のメンバーとして追加してもらってください。'
                 )

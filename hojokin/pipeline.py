@@ -1086,7 +1086,7 @@ def run_application_transfer(
             if len(_z_names) > 3:
                 _z_preview += f' ほか{len(_z_names) - 3}名'
             wage_warning += (
-                f' ℹ 賃金台帳で給与支給0円の従業員 {wage_plan["excluded_zero_count"]}名'
+                f' ℹ {warn_tag("W-WAGE-002")}賃金台帳で給与支給0円の従業員 {wage_plan["excluded_zero_count"]}名'
                 f'（{_z_preview}）を R215/R216 の算定対象外にしました'
                 f'（公募要領「全月分の給与等の支給を受けた従業員」に非該当）。'
                 f'退職済み行・無給の家族従業者等でないか賃金台帳をご確認ください'
@@ -1100,7 +1100,7 @@ def run_application_transfer(
             if len(_p_names) > 3:
                 _p_preview += f' ほか{len(_p_names) - 3}名'
             wage_warning += (
-                f' ℹ 賃金台帳で0円支給月がある従業員 '
+                f' ℹ {warn_tag("W-WAGE-002")}賃金台帳で0円支給月がある従業員 '
                 f'{wage_plan["excluded_partial_zero_count"]}名（{_p_preview}）を '
                 f'R215/R216 の算定対象外にしました'
                 f'（公募要領「全月分の給与等の支給を受けた従業員」に非該当）。'
@@ -1117,7 +1117,7 @@ def run_application_transfer(
             if len(_b_names) > 3:
                 _b_preview += f' ほか{len(_b_names) - 3}名'
             wage_warning += (
-                f' ℹ 賃金台帳で月次給与が全月0円・賞与のみ受給の従業員 '
+                f' ℹ {warn_tag("W-WAGE-002")}賃金台帳で月次給与が全月0円・賞与のみ受給の従業員 '
                 f'{wage_plan["excluded_bonus_only_count"]}名（{_b_preview}）を '
                 f'R215/R216 の算定対象外にしました'
                 f'（公募要領「全月分の給与等の支給を受けた従業員」に非該当のため。'
@@ -2659,7 +2659,7 @@ def _bonus_period_shift_warning(
         if fiscal_month_override else '決算月未指定'
     )
     return (
-        f'⚠ 賞与の対象期間に注意（{month_label}・非暦年）: '
+        f'⚠ {warn_tag("W-WAGE-001")}賞与の対象期間に注意（{month_label}・非暦年）: '
         f'{len(undated)}名の賞与に支給日（支給年月）が無く、'
         '対象事業年度の12ヶ月で絞り込めていません'
         '（暦年ベースの年間賞与をそのまま年間賞与として算入）。'
@@ -2777,7 +2777,7 @@ def _reconcile_monthly_with_layout(employees, pdf_layout) -> list[str]:
         )
     if unverified:
         notes.append(
-            f'⚠ 月配置の決定論照合ができなかった: {len(unverified)}名'
+            f'⚠ {warn_tag("W-WAGE-003")}月配置の決定論照合ができなかった: {len(unverified)}名'
             '（極小ページ/値不一致）。PDF原本で月配置を確認してください: '
             f'{unverified}'
         )

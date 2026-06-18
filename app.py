@@ -85,6 +85,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from hojokin.ai_extractor import create_extractor
 from hojokin.config import CLAUDE_API_KEY, detect_prefecture
+from hojokin.warnings_catalog import tag as warn_tag
 from hojokin.pipeline import (
     FileDetector, run_application_transfer, run_wage_calculation,
     run_wage_ledger_conversion, run_bonus_wage_ledger_creation,
@@ -1976,7 +1977,7 @@ if data_source == 'Google Drive':
         if drive_folder_id and upload_to_drive:
             if _cached_drive_can_write(drive_folder_id) is False:
                 st.warning(
-                    '⚠ 選択フォルダへの書き込み権限がありません。このまま実行すると'
+                    f'⚠ {warn_tag("W-DRIVE-001")}選択フォルダへの書き込み権限がありません。このまま実行すると'
                     '処理自体は完了しますが、Driveへの格納は失敗します'
                     '（結果はダウンロードボタンから取得可能）。'
                     '共有ドライブの管理者に、ツールのサービスアカウントを'
@@ -2700,4 +2701,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.74 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.75 | カラフルボックス株式会社')
