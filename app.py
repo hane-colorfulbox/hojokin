@@ -1794,6 +1794,39 @@ _WAGEBOOK_SKILL_VERSION = '2026-06-04'
 # Drive 共有リンク（wagebook-convert.zip を配置した Drive ファイル URL）
 # 配布先: マイドライブ/補助金ツール/wagebook-convert.zip （カラフルボックス株式会社グループ閲覧可）
 _WAGEBOOK_SKILL_ZIP_URL = 'https://drive.google.com/file/d/1VxD0y4l7DPb9qK7eDfOpWUDQvMZ9eBBF/view?usp=sharing'
+
+# 引き継ぎコンテキストパック（CC向け）— 別メンバーの Claude Code に補助金業務の知識を渡す配布物。
+# 中身は脱PIIの知識パック(引き継ぎ/)＋索引CLAUDE.md＋参照docs。スキルは含めない（別配布）。
+# scripts/build_handoff_zip.py で生成し、スキルZIPと同じ Drive「補助金ツール」フォルダに置く。
+_HANDOFF_CONTEXT_VERSION = '2026-06-22'
+# Drive 共有リンク（hojokin-handoff.zip = コンテキスト一式）。配布先: マイドライブ/補助金ツール/
+_HANDOFF_CONTEXT_ZIP_URL = 'https://drive.google.com/file/d/1FWubpOrg0crtoz6cF2Jdp3otRi5_GslJ/view?usp=sharing'
+with st.expander(
+    '📦 補助金業務の引き継ぎコンテキスト（CC向け）— 別の人の Claude Code に業務知識を渡す',
+    expanded=False,
+):
+    st.info(
+        '補助金業務の全体像・制度ルール（R215/R216・加点）・賃金台帳の実務・運用ルールを、'
+        '別メンバーの Claude Code が読める形（脱PII の markdown 一式）にまとめた配布物です。\n\n'
+        'これは業務理解のための**補助的なコンテキスト**で、ツールやスキルの動作に必須ではありませんが、'
+        '入れておくと判断のブレや事故が減ります。賃金台帳を実際に変換するスキルは下の'
+        '「📘 賃金台帳の作成手順」から**別途**インストールしてください（コンテキストとスキルは2本に分けて配布）。'
+    )
+    st.markdown(
+        f'1. [`hojokin-handoff.zip`（コンテキスト一式）をダウンロード]({_HANDOFF_CONTEXT_ZIP_URL})\n'
+        '2. ZIP を展開し、中身（`CLAUDE.md` / `引き継ぎ/` / `docs/`）を **補助金フォルダの直下** に置く\n'
+        '3. その補助金フォルダの直下で Claude Code を開いて質問・作業する\n'
+        '   - 直下の `CLAUDE.md` が自動で読み込まれ、`引き継ぎ/00_はじめに.md` から案内されます\n'
+        '   - すでに自分の `CLAUDE.md` を直下に持っている場合は上書きに注意'
+        '（同梱の案内ブロックを自分の `CLAUDE.md` に追記してください）\n\n'
+        f'**最新版: {_HANDOFF_CONTEXT_VERSION}**（内容が更新されたら再ダウンロードして上書き）'
+    )
+    st.markdown(
+        '- 修正したい点があれば、**ファイル名・箇所・修正案**をチャットで管理者に送ってください'
+        '（マスタを直して再配布します）。\n'
+        '- 顧客の実データ（賃金台帳・決算書・給与明細・ヒアリング）は、このフォルダや共有に入れないでください。'
+    )
+
 with st.expander(
     '🔧 はじめての方へ：CC環境セットアップ（Python・1回だけ）',
     expanded=False,

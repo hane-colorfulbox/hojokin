@@ -20,7 +20,7 @@
 
 ## 使い始め（人間向けセットアップ）
 
-1. 賃金台帳PDFを変換するスキルを使うなら、`.claude/skills/wagebook-convert` を自分の `~/.claude/skills/` にコピーする（または Claude Code に「同梱の wagebook-convert スキルを ~/.claude/skills に入れて」と頼む）。Claude Code を再起動すると `/wagebook-convert` が使えるようになります。
+1. 賃金台帳PDFを変換するスキルを使うなら、補助金書類作成ツールのUI（「📘 賃金台帳の作成手順」）から `wagebook-convert.zip` をダウンロードし、`~/.claude/skills/wagebook-convert/` に展開する（このスキルはコンテキストとは別配布）。Claude Code を再起動すると `/wagebook-convert` が使えるようになります。
 2. この補助金フォルダの直下で Claude Code を開き、そのまま質問・作業する（このファイルが自動で読み込まれ、上の案内に従って必要なファイルを読みます）。
 
 ## 修正したいとき（内容の更新）

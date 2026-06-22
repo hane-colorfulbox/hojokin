@@ -40,9 +40,11 @@ DIST_DIR = ROOT / '_dist'
 # 配布する中身（許可リスト）。ディレクトリは再帰的に含める。
 # 引き継ぎパックが相対リンク（../docs/..., ../CLAUDE.md, ../.claude/skills/...）で
 # 参照する配布可能ドキュメントを、リポジトリ相対のパス構造を保ったまま同梱する。
+# 注: スキル(wagebook-convert)はこのコンテキストZIPには含めない。
+# スキルは独立した配布物（scripts/build_skill_zip.py → wagebook-convert.zip）として
+# ツールUIから別途配布し、~/.claude/skills に入れて使う（コンテキストとスキルを2本に分離）。
 INCLUDE_DIRS = [
     '引き継ぎ',
-    '.claude/skills/wagebook-convert',
 ]
 # 注: CLAUDE.md は社内担当者の氏名を含む開発設定ファイルのため、配布スナップショットには
 # 同梱しない（引き継ぎパックは CLAUDE.md にリンクしない自己完結構成）。GitHub 経由の閲覧者は
