@@ -1,0 +1,17 @@
+# コードオーナー定義
+#
+# ここに挙げたパスへ変更を入れる Pull Request は、オーナーのレビューが必須になる。
+# = チームの誰かがコンテキスト（引き継ぎパック等）を修正したら、オーナーに
+#   レビュー依頼の通知が届く（「修正したら連絡が来る」運用の土台）。
+#
+# 前提:
+# - リポジトリ Settings → Branches で main にブランチ保護を設定し
+#   「Require a pull request before merging」+「Require review from Code Owners」を有効にする
+#   （CODEOWNERS ファイルだけでは必須化されない。保護設定とセットで効く）。
+# - さらにオーナーがリポジトリを Watch（All Activity）しておくと、push/PR をメールでも追える。
+
+# 既定: リポジトリ全体のオーナー
+*                 @hane-colorfulbox
+
+# 引き継ぎコンテキストパック（チームで編集する想定の中心。上の * で既にカバーされるが明示）
+/引き継ぎ/        @hane-colorfulbox
