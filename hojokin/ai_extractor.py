@@ -876,7 +876,7 @@ PROMPT_AI_JUDGMENT = """以下の会社情報に基づいて、補助金申請�
 - 所在地: {address}
 - 営業利益: {operating_profit}円
 - ツール名: {tool_name}
-
+{tool_reference}
 ヒアリングシート回答:
 - 主な事業内容: {main_business}
 - 強み: {strength}
@@ -1222,7 +1222,8 @@ class BaseExtractor(ABC):
 
     @abstractmethod
     def generate_ai_judgment(self, company: CompanyInfo, financial: FinancialData,
-                              tool_name: str, hearing_data: dict | None = None) -> AIJudgment:
+                              tool_name: str, hearing_data: dict | None = None,
+                              tool_override: str | None = None) -> AIJudgment:
         """AI判断項目を生成"""
         ...
 
@@ -1315,7 +1316,8 @@ class StubExtractor(BaseExtractor):
         logger.warning(f'{self.STUB_MARKER} 見積書の読取にはClaude APIが必要です')
         return EstimateData()
 
-    def generate_ai_judgment(self, company, financial, tool_name, hearing_data=None) -> AIJudgment:
+    def generate_ai_judgment(self, company, financial, tool_name, hearing_data=None,
+                             tool_override: str | None = None) -> AIJudgment:
         logger.warning(f'{self.STUB_MARKER} AI判断にはClaude APIが必要です')
 
         # 営業利益の符号だけで判定できる部分はスタブでも埋める
@@ -1849,7 +1851,8 @@ class ClaudeExtractor(BaseExtractor):
             logger.warning(f'[lookup_industry] Web検索失敗、AI判断のコードにフォールバック: {e}')
             return None
 
-    def generate_ai_judgment(self, company, financial, tool_name, hearing_data=None) -> AIJudgment:
+    def generate_ai_judgment(self, company, financial, tool_name, hearing_data=None,
+                             tool_override: str | None = None) -> AIJudgment:
         # ヒアリングデータから各種情報を取得
         hearing_fields = {
             'it_investment_answer': '不明',
@@ -1898,12 +1901,32 @@ class ClaudeExtractor(BaseExtractor):
         if not (tool_name or '').strip() and hearing_fields.get('tool_name_from_hearing'):
             tool_name = hearing_fields['tool_name_from_hearing']
 
+        # 導入ツールの実機能をプロンプトに注入し、事業内容255字をツールに沿わせる。
+        # tool_override: None=自動（tool_name から引当て）/ ''=明示的に汎用（注入しない）/
+        #   表示名=手動指定（その名前で引当て）。引当て失敗・曖昧・サマリ未整備は注入なし＝従来挙動。
+        from .tool_catalog import match_tool, build_tool_reference
+        if tool_override is not None and not tool_override.strip():
+            tool_match = None
+        else:
+            name_for_match = (tool_override or tool_name or '').strip()
+            tool_match = match_tool(name_for_match) if name_for_match else None
+        tool_reference = build_tool_reference(tool_match)
+        _match_label = (
+            f'{tool_match.key}{("/" + tool_match.subproduct) if tool_match.subproduct else ""}'
+            if tool_match else 'none'
+        )
+        logger.warning(
+            f'[generate_ai_judgment] tool_match={_match_label} '
+            f'override={tool_override!r} tool_name={tool_name!r}'
+        )
+
         prompt = PROMPT_AI_JUDGMENT.format(
             company_name=company.name,
             business_purposes=', '.join(company.business_purposes),
             address=company.address,
             operating_profit=financial.operating_profit,
             tool_name=tool_name,
+            tool_reference=tool_reference,
             **hearing_fields,
         )
 

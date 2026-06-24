@@ -530,6 +530,7 @@ def run_processing(
     has_cost_report_hint: bool = False,
     selection_override: dict[str, list[Path]] | None = None,
     bonus_paid_months: list[tuple[int, int]] | None = None,
+    tool_override: str | None = None,
 ):
     """メイン処理を実行"""
     results = {}
@@ -576,6 +577,7 @@ def run_processing(
                 fiscal_month_override=fiscal_month_override,
                 has_cost_report_hint=has_cost_report_hint,
                 selection_override=selection_override,
+                tool_override=tool_override,
             )
             # 追加出力ファイル（賃金台帳一覧等）を収集
             extra_files = {}
@@ -950,6 +952,29 @@ with st.sidebar:
                  '（資料に製造原価報告書PDFがあれば自動検出されるため、'
                  '通常は自動検出に任せて構いません）',
         )
+
+    # 導入ツール（事業内容255字の根拠）— 申請書系タスクのみ表示。
+    # 既定[自動判定]は見積/ヒアリングのツール名から自動で引き当て、そのツールの公式登録機能に
+    # 沿って事業内容を生成する。表記ゆれや複数製品(irohana/ブレイン)で外れるときだけ手動指定する。
+    tool_override: str | None = None
+    if task_type in ('application', 'all'):
+        from hojokin.tool_catalog import catalog_display_names
+        _TOOL_AUTO, _TOOL_NONE = '[自動判定]', '[該当なし / 汎用生成]'
+        _tool_options = [_TOOL_AUTO] + catalog_display_names() + [_TOOL_NONE]
+        _tool_choice = st.selectbox(
+            '導入ツール（事業内容255字の根拠）',
+            _tool_options,
+            help='通常は「自動判定」のままでOK（見積・ヒアリングのツール名から自動で引き当て、'
+                 'そのツールの公式登録機能に沿って事業内容255字を生成）。'
+                 '表記ゆれや irohana/ブレインのような複数製品で引き当てが外れるときだけ手動指定。'
+                 '「該当なし / 汎用生成」はツール情報を使わず従来どおりツール名のみで生成。',
+        )
+        if _tool_choice == _TOOL_AUTO:
+            tool_override = None
+        elif _tool_choice == _TOOL_NONE:
+            tool_override = ''
+        else:
+            tool_override = _tool_choice
 
     # Drive 格納オプション（データソースが Drive のときのみ有効化される）
     upload_to_drive = st.checkbox(
@@ -2372,6 +2397,7 @@ if st.button('処理開始', type='primary', disabled=not can_run, use_container
                 has_cost_report_hint=has_cost_report_hint,
                 selection_override=selection_override,
                 bonus_paid_months=bonus_paid_months,
+                tool_override=tool_override,
             )
 
         # Drive 格納（オプション）— Drive ソース選択 + チェックON + 格納先フォルダ確定時のみ
@@ -2734,4 +2760,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.75 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.76 | カラフルボックス株式会社')

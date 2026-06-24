@@ -695,6 +695,7 @@ def run_application_transfer(
     fiscal_month_override: int | None = None,
     has_cost_report_hint: bool = False,
     selection_override: dict[str, list[Path]] | None = None,
+    tool_override: str | None = None,
 ) -> ProcessingStatus:
     """
     タスク1: 申請書転記の実行
@@ -710,6 +711,9 @@ def run_application_transfer(
             自動検出されなかった場合の警告強化に使う
         selection_override: ユーザーが UI で明示指定したファイル群（カテゴリ別）。
             FileDetector に渡して自動検出を上書きする。
+        tool_override: 事業内容255字生成で使う導入ツールの手動指定。
+            None=自動（見積/ヒアリングのツール名から引当て）/ ''=汎用（ツール情報を使わない）/
+            ツール表示名=手動指定。generate_ai_judgment にそのまま渡す。
     """
     status = ProcessingStatus(
         company_name=resource_folder.name,
@@ -848,6 +852,7 @@ def run_application_transfer(
                 extraction.financial,
                 extraction.estimate.tool_name,
                 hearing_data=hearing_data,
+                tool_override=tool_override,
             )
         except APICreditExhaustedError as e:
             # API残高切れ → Phase 1 の結果（ヒアリング・賃金台帳Excel等）で申請書を出力
