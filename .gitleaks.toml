@@ -5,10 +5,13 @@ title = "hojokin gitleaks config"
 useDefault = true
 
 # プロジェクト固有: 顧客企業名・社員氏名・金額・社員メールが新規commitに混入したらブロック
+# 注: クラフトバンク/ピスケス/いろはな(irohana) は「顧客」ではなく公開のITツール提供元/製品名
+#     （IT補助金コンソール登録＋公開HP）。docs/ツール情報/ や hojokin/tool_catalog.py で
+#     ツール名として正当に扱うため、顧客名検出から除外する（2026-06-24 方針決定）。
 [[rules]]
 id = "kf-customer-names"
 description = "Customer company names that must not be committed"
-regex = '''(クラフトバンク|京のお肉処弘|オーサワジャパン|ピスケス|ファンファーレ|いろはな|京の食事処|阿萬|医療法人社団三和会|黒石歯科|クリーン新潟)'''
+regex = '''(京のお肉処弘|オーサワジャパン|ファンファーレ|京の食事処|阿萬|医療法人社団三和会|黒石歯科|クリーン新潟)'''
 tags = ["customer", "personal-info"]
 
 [[rules]]
