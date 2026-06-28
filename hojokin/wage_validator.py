@@ -187,16 +187,23 @@ def check_bonus_omission(
 ) -> str:
     """賞与シート未参照を検出。
 
-    健全な賃金台帳: 月別合計 ≒ PL の (給料+雑給+賞与)（賞与込みで集計されている）
-    賞与未参照: 月別合計 ≒ PL の (給料+雑給) のみ（賞与分が抽出から抜けている）
+    健全な賃金台帳: 月別合計＋年間賞与 ≒ PL の (給料+雑給+賞与)（賞与が拾えている）
+    賞与未参照: 月別合計＋年間賞与 ≒ PL の (給料+雑給) のみ（賞与分が抽出から抜けている）
 
     本番で観測された23%差ケース: 賞与が別タブシートにあり、Haiku が拾えなかった。
     PL の bonus と賃金台帳合計の関係から、この状態を機械的に検出する。
+
+    賞与の持ち方は台帳により2通り: (1)月次セルに賞与支給月の額として含む（生PDF台帳）、
+    (2)月次は賞与抜きで T列「年間賞与」(annual_bonus)に分離保持（賃金台帳テンプレ/加点台帳）。
+    月次合計だけで突合すると (2) の健全台帳を誤検知するため、annual_bonus を必ず加算する
+    （従業員別明細シートの「年間給与計(賞与込)」と同じ合算ルール）。これにより
+    「賞与が従業員別明細に反映されていない」状態（賞与完全欠落）も同じ判定で拾える。
     """
     if not ledger_employees or not financial:
         return ''
 
-    # 賃金台帳合計（役員除外、月別値の総和）
+    # 賃金台帳合計（役員除外、月別値の総和 ＋ 年間賞与）。
+    # annual_bonus を加算して PL の (給料+雑給+賞与) と土俵を揃える（docstring 参照）。
     ledger_total = 0
     for e in ledger_employees:
         if '役員' in (_emp_get(e, 'employment_type') or ''):
@@ -205,6 +212,7 @@ def check_bonus_omission(
         ledger_total += sum(
             w for w in wages if isinstance(w, (int, float)) and w > 0
         )
+        ledger_total += _emp_get(e, 'annual_bonus', 0) or 0
     if ledger_total <= 0:
         return ''
 
