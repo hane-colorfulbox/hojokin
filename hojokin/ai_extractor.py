@@ -687,19 +687,19 @@ PROMPT_PL_PAGE_INVENTORY = """**出力は ```json コードブロック1個の�
   - "other": その他（表紙・目次・別添資料など）
 
 事業年度は「年度ラベル」として記載してください（例: "R6"="2024年度", "R7"="2025年度"）。
-直近期（最新の事業年度）は is_latest=true としてください。
+直近期（最新の事業年度）は is_latest=true としてください。**新旧は会計期間の期末日で判定し、令和の数字が大きい（期末日が新しい）方を最新**とすること。2期比較形式で複数年度が並ぶ場合も期末日で判定する（年号のラベルだけで決めつけない）。
 
 ```json
 {
   "pages": [
-    {"page": 1, "labels": ["pl_basic"], "fiscal_year_label": "R6", "is_latest": true},
-    {"page": 2, "labels": ["pl_section"], "fiscal_year_label": "R6", "is_latest": true},
-    {"page": 3, "labels": ["cost_section"], "fiscal_year_label": "R6", "is_latest": true},
-    {"page": 4, "labels": ["balance_sheet"], "fiscal_year_label": "R6", "is_latest": true},
-    {"page": 5, "labels": ["pl_basic"], "fiscal_year_label": "R5", "is_latest": false}
+    {"page": 1, "labels": ["pl_basic"], "fiscal_year_label": "R7", "is_latest": true},
+    {"page": 2, "labels": ["pl_section"], "fiscal_year_label": "R7", "is_latest": true},
+    {"page": 3, "labels": ["cost_section"], "fiscal_year_label": "R7", "is_latest": true},
+    {"page": 4, "labels": ["balance_sheet"], "fiscal_year_label": "R7", "is_latest": true},
+    {"page": 5, "labels": ["pl_basic"], "fiscal_year_label": "R6", "is_latest": false}
   ],
-  "latest_fiscal_year_label": "R6",
-  "latest_fiscal_year_period": "2024-04 to 2025-03"
+  "latest_fiscal_year_label": "R7",
+  "latest_fiscal_year_period": "2025-04 to 2026-03"
 }
 ```
 
@@ -714,6 +714,8 @@ PROMPT_PL_BASIC = """**出力は ```json コードブロック1個のみ。前�
 販管費明細・製造原価報告書・貸借対照表は**無視**してください。
 
 複数年度がある場合は **直近期1期分のみ** を返してください。
+
+【複数年度の見分け方】2期比較形式（当期と前期が左右の列、または上下に並ぶ）の決算書では、必ず各列/区分の会計期間（事業年度の終了日）の見出しを確認し、**最も新しい事業年度（期末日が新しい＝令和の数字が大きい方）** を「直近期」として採用してください。右の列＝当期とは限りません。見出しで判別できない場合のみ、一般に右側の列・後ろのページが新しいことが多い点を参考にしてください。
 
 個人事業主の「所得税の青色申告決算書」または「収支内訳書」の場合は次の対応で読むこと:
   - revenue = ①売上（収入）金額（雑収入を含む）
@@ -764,6 +766,7 @@ PROMPT_PL_PL_SECTION = """**出力は ```json コードブロック1個のみ。
 **製造原価報告書 / 完成工事原価報告書 / 工事原価報告書 は無視** してください（別途抽出するため）。
 
 販管費「のみ」の値を返してください。複数年度なら直近期1期のみ。
+【複数年度の見分け方】2期比較形式（当期と前期が左右の列、または上下に並ぶ）の決算書では、必ず各列/区分の会計期間（事業年度の終了日）の見出しを確認し、**最も新しい事業年度（期末日が新しい＝令和の数字が大きい方）** の列を採用してください。右の列＝当期とは限りません。
 
 個人事業主の「所得税の青色申告決算書」または「収支内訳書」の場合は、
 損益計算書の **経費欄（⑧〜㉛）を販管費とみなして** 次の対応で抽出すること:
@@ -796,6 +799,7 @@ PROMPT_PL_COST_SECTION = """**出力は ```json コードブロック1個のみ�
 **販売費及び一般管理費は完全に無視** してください（別途抽出するため）。
 
 原価部「のみ」の値を返してください。複数年度なら直近期1期のみ。
+【複数年度の見分け方】2期比較形式（当期と前期が左右の列、または上下に並ぶ）の決算書では、必ず各列/区分の会計期間（事業年度の終了日）の見出しを確認し、**最も新しい事業年度（期末日が新しい＝令和の数字が大きい方）** の列を採用してください。右の列＝当期とは限りません。
 
 ```json
 {
