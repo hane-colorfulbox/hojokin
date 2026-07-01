@@ -6,6 +6,8 @@ import logging
 from pathlib import Path
 import openpyxl
 
+from .choice_masters import decode_choice_field
+
 logger = logging.getLogger(__name__)
 
 # 全角→半角変換テーブル
@@ -80,9 +82,12 @@ def read_hearing_sheet(path: Path) -> dict[int, any]:
         value = row[2].value if len(row) > 2 else None   # C列
 
         if label is not None:
+            # 通常枠の選択肢フィールド（強み/弱み/IT投資プロセス）は番号入力を
+            # 「N 本文」へ復元する。対象外・本文入りは None が返り従来処理に委ねる。
+            decoded = decode_choice_field(label, value)
             data[row_num] = {
                 'label': str(label).strip(),
-                'value': normalize_value(value),
+                'value': decoded if decoded is not None else normalize_value(value),
             }
 
     wb.close()

@@ -795,6 +795,10 @@ def run_application_transfer(
         pl_path: Path | None = None
         cost_report_path: Path | None = None
         tax_path: Path | None = None
+        # 最終 status.message で必ず参照される警告。最初の API 呼出（履歴事項抽出）で
+        # 残高切れ例外が起きると try 内の代入（旧 pl_period_warning = ''）に到達できず
+        # UnboundLocalError になるため、try ブロック前に初期化しておく
+        pl_period_warning = ''
         try:
             # 履歴事項PDF → CompanyInfo
             registry_path = detector.get('registry')
@@ -807,7 +811,6 @@ def run_application_transfer(
             # 決算月指定があれば、ファイル名年月と突合して直近期を確定（誤読防止）
             pl_path = detector.get_pl_latest(fiscal_month_override=fiscal_month_override)
             _record_pl_selection(status, detector, pl_path, fiscal_month_override)
-            pl_period_warning = ''
             cost_report_path = detector.get('cost_report')
             if pl_path:
                 logger.info(f'直近期決算書として採用: {pl_path.name}')
@@ -854,6 +857,14 @@ def run_application_transfer(
                 hearing_data=hearing_data,
                 tool_override=tool_override,
             )
+            # 通常枠: 顧客がヒアリングで選んだ 弱み/IT投資プロセス（複数可）を
+            # 申請書へ反映（AI生成値を上書き）。空欄ならAI値を温存。
+            # インボイス/個人には該当ラベルが無いため通常枠のみで実行する。
+            if template_type.startswith('通常枠'):
+                from .choice_masters import apply_hearing_choice_overrides
+                apply_hearing_choice_overrides(
+                    extraction.ai_judgment, hearing_data
+                )
         except APICreditExhaustedError as e:
             # API残高切れ → Phase 1 の結果（ヒアリング・賃金台帳Excel等）で申請書を出力
             # 確認キューにAI由来項目が「未取得」として一覧される
