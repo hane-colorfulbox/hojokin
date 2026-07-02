@@ -67,7 +67,7 @@ def write_bonus_wage_ledger(
         ws.cell(row, BWL_COL_NAME, emp.name)
         ws.cell(row, BWL_COL_EMPTYPE, emp.employment_type or '')
         if emp.scheduled_hours is not None:
-            ws.cell(row, BWL_COL_HOURS, round(emp.scheduled_hours, 1))
+            ws.cell(row, BWL_COL_HOURS, round(emp.scheduled_hours, 4))
         for j, ym in enumerate(BONUS1_WINDOW):
             base = emp.monthly_base.get(ym)
             if base is not None:
@@ -76,14 +76,16 @@ def write_bonus_wage_ledger(
             base = emp.monthly_base.get(latest_ym)
             if base is not None:
                 ws.cell(row, BWL_COL_LATEST, round(base))
+        # 時間は小数第4位まで保持する。第1位丸めだと 57:45→57.8h のように歪み、
+        # 時間換算給与が1〜2円ズレて加点②の63円境界判定を覆し得る。
         for j, ym in enumerate(BONUS1_WINDOW):
             h = emp.monthly_hours_override.get(ym)
             if h is not None and h > 0:
-                ws.cell(row, BWL_COL_HOURS_WINDOW_START + j, round(h, 1))
+                ws.cell(row, BWL_COL_HOURS_WINDOW_START + j, round(h, 4))
         if latest_ym is not None:
             h = emp.monthly_hours_override.get(latest_ym)
             if h is not None and h > 0:
-                ws.cell(row, BWL_COL_HOURS_LATEST, round(h, 1))
+                ws.cell(row, BWL_COL_HOURS_LATEST, round(h, 4))
 
     wb.save(str(output_path))
     wb.close()
