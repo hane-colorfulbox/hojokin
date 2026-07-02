@@ -1395,6 +1395,15 @@ def _render_case_scale_estimate(
     task: str | None = None,
 ):
     """案件規模・処理時間・APIコスト予想を UI に表示。"""
+    # 加点判定は専用台帳の決定論読取のみで AI/API を一切呼ばない
+    # （run_processing で extractor を作らないタスク）。汎用のコスト予想を
+    # 出すと有料と誤解されるため、無料であることを明示して代替する。
+    if task == 'bonus':
+        st.info(
+            '🆓 このタスク（加点判定）は AI/API を使いません — **APIコスト 0円**。'
+            '加点判定用賃金台帳を決定論で直読みするため、処理は数秒で終わります。'
+        )
+        return
     est = _estimate_case_scale(file_size_pairs, task=task)
     if not est:
         return
@@ -2770,4 +2779,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.81 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.82 | カラフルボックス株式会社')
