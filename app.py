@@ -822,9 +822,21 @@ def _run_bonus_judgment(
             fill_bonus_sheet_2(bonus2_file, out2, result)
             output_files['bonus2'] = out2
 
+        # テンプレ欠落を無警告スキップにしない（判定だけ表示されると
+        # 提出用シートが作られていないことに気づけないため）
+        message = f'従業員{len(ledger.employees)}名の加点判定用賃金台帳を分析しました。'
+        _missing = [label for key, label in
+                    (('bonus1', '賃金状況報告シート①'), ('bonus2', '賃金状況報告シート②'))
+                    if key not in output_files]
+        if _missing:
+            message += (
+                f' ⚠ 提出用シートのテンプレート（補助金加点/）が見つからないため、'
+                f'{"・".join(_missing)}（事務局提出用）を生成できませんでした。'
+            )
+
         return {
             'status': '完了',
-            'message': f'従業員{len(ledger.employees)}名の加点判定用賃金台帳を分析しました。',
+            'message': message,
             'result': result,
             'output_files': output_files,
             'employee_count': len(ledger.employees),
@@ -893,7 +905,8 @@ with st.sidebar:
              '賃金台帳は AI で再抽出せず決定論パーサーで直読するため、'
              '上記②と同じ計算ロジックで R215/R216 を算出する（数値は一致）。'
              '中途入退社が多い案件は注意喚起を出すが自動転記は実行する。'
-             '加点判定：賃金台帳から加点措置の対象かを判定。',
+             '加点判定：賃金台帳から加点措置①②の対象かを判定し、'
+             '事務局提出用の賃金状況報告シート①②も自動生成する。',
     )
     task_type = TASK_OPTIONS[task_label]
 
@@ -2303,7 +2316,8 @@ else:
     source_label = 'Google Drive' if data_source == 'Google Drive' else 'アップロード'
     if task_type == 'bonus':
         st.info(
-            f'**{company_name}** の加点判定用賃金台帳を読み取り、加点措置①②を判定します'
+            f'**{company_name}** の加点判定用賃金台帳を読み取り、加点措置①②を判定して'
+            f'事務局提出用の賃金状況報告シート①②を生成します'
             f'（{source_label}）— 準備OKです\n\n'
             '※ 入力は「加点判定用賃金台帳の作成」で作った専用台帳（シート『加点判定用明細』）です。'
         )
@@ -2681,10 +2695,15 @@ if 'last_results' in st.session_state:
                     st.text(f"{_latest_lbl} 最低時給: {br['bonus2_min_wage_latest']:.0f}円")
 
                 # 加点シートダウンロード
+                if result.get('bonus_files'):
+                    st.caption(
+                        '⬇️ 以下が事務局へ提出する公式様式「賃金の状況報告シート」です'
+                        '（判定と同時に自動生成済み）'
+                    )
                 for key, file_info in result.get('bonus_files', {}).items():
                     label_map = {
-                        'bonus1': '加点措置①シート',
-                        'bonus2': '加点措置②シート',
+                        'bonus1': '加点措置①シート（事務局提出用）',
+                        'bonus2': '加点措置②シート（事務局提出用）',
                     }
                     st.download_button(
                         label=f"⬇️ {label_map.get(key, key)} をダウンロード",
@@ -2779,4 +2798,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.82 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.83 | カラフルボックス株式会社')
