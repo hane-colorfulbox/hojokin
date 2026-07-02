@@ -899,16 +899,20 @@ with st.sidebar:
 
     # 決算月（必須）— ユーザー指定で賃金台帳の対象期間を確定 + AI推定誤りを照合
     # 2026-05 方針: AI 推定に任せず、ユーザーが明示的に指定する運用に変更
+    # 加点系タスク（加点判定用賃金台帳の作成・加点判定）は暦月固定
+    # （令和6年10月〜令和7年9月＋交付申請直近月）で判定するため決算月を一切使わない。
+    # 「（必須）」表示のまま残すと未選択でよいのか迷わせるため、非表示にする。
     _FISCAL_MONTH_OPTIONS = ['（選択してください）'] + [f'{i}月' for i in range(1, 13)]
-    fiscal_month_label = st.selectbox(
-        '決算月（必須）',
-        _FISCAL_MONTH_OPTIONS,
-        help='決算期末の月を必ず指定してください。'
-             '賃金台帳の対象12ヶ月が確定し、決算書のAI誤読も照合できます。',
-    )
     fiscal_month_override: int | None = None
-    if fiscal_month_label != _FISCAL_MONTH_OPTIONS[0]:
-        fiscal_month_override = int(fiscal_month_label.replace('月', ''))
+    if task_type not in ('bonus', 'bonus_wage_ledger_creation'):
+        fiscal_month_label = st.selectbox(
+            '決算月（必須）',
+            _FISCAL_MONTH_OPTIONS,
+            help='決算期末の月を必ず指定してください。'
+                 '賃金台帳の対象12ヶ月が確定し、決算書のAI誤読も照合できます。',
+        )
+        if fiscal_month_label != _FISCAL_MONTH_OPTIONS[0]:
+            fiscal_month_override = int(fiscal_month_label.replace('月', ''))
 
     # 個人事業主は会計期間が暦年固定。決算月12月以外を選ぶと申請書(12月固定)と食い違う。
     _kojin_warn = _kojin_fiscal_month_warning(template_type, fiscal_month_override)
@@ -1486,6 +1490,8 @@ _OVERRIDE_UI_CATS = {'pl', 'wage_ledger'}
 _OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION = {'wage_ledger', 'registry'}
 # 個人事業主には履歴事項が存在しないため、賃金台帳のみを差し替え対象にする（registry を出さない）
 _OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION_KOJIN = {'wage_ledger'}
+# 加点系タスクは決算書を使わないため、賃金台帳のみを差し替え対象にする
+_OVERRIDE_UI_CATS_BONUS = {'wage_ledger'}
 
 
 def _get_override_ui_cats(task: str | None, template_type=None) -> set[str]:
@@ -1494,6 +1500,8 @@ def _get_override_ui_cats(task: str | None, template_type=None) -> set[str]:
         if _derive_is_kojin(template_type):
             return _OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION_KOJIN
         return _OVERRIDE_UI_CATS_WAGE_LEDGER_CREATION
+    if task in ('bonus', 'bonus_wage_ledger_creation'):
+        return _OVERRIDE_UI_CATS_BONUS
     return _OVERRIDE_UI_CATS
 
 # 複数選択（multiselect）させるカテゴリ。それ以外は単一選択（selectbox）。
@@ -1633,6 +1641,8 @@ def _render_file_selection_override(
             if 'registry' in override_cats
             else '▶ 賃金台帳を差し替える（必要な場合のみ）'
         )
+    elif 'pl' not in override_cats:
+        _expander_title = '▶ 賃金台帳を差し替える（必要な場合のみ）'
     else:
         _expander_title = '▶ 決算書・賃金台帳を差し替える（必要な場合のみ）'
     with st.expander(_expander_title, expanded=False):
@@ -2760,4 +2770,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.80 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.81 | カラフルボックス株式会社')
