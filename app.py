@@ -1855,7 +1855,7 @@ _WAGEBOOK_SKILL_ZIP_URL = 'https://drive.google.com/file/d/1VxD0y4l7DPb9qK7eDfOp
 # 引き継ぎコンテキストパック（CC向け）— 別メンバーの Claude Code に補助金業務の知識を渡す配布物。
 # 中身は脱PIIの知識パック(引き継ぎ/)＋索引CLAUDE.md＋参照docs。スキルは含めない（別配布）。
 # scripts/build_handoff_zip.py で生成し、スキルZIPと同じ Drive「補助金ツール」フォルダに置く。
-_HANDOFF_CONTEXT_VERSION = '2026-06-22'
+_HANDOFF_CONTEXT_VERSION = '2026-07-09'
 # Drive 共有リンク（hojokin-handoff.zip = コンテキスト一式）。配布先: マイドライブ/補助金ツール/
 _HANDOFF_CONTEXT_ZIP_URL = 'https://drive.google.com/file/d/1FWubpOrg0crtoz6cF2Jdp3otRi5_GslJ/view?usp=sharing'
 with st.expander(
@@ -2798,4 +2798,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.83 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.84 | カラフルボックス株式会社')
