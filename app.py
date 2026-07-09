@@ -1844,9 +1844,8 @@ st.markdown(
 )
 
 # 賃金台帳の作成 Skill（wagebook-convert）。本体は .claude/skills/wagebook-convert/ で管理（git）。
-# v2 で引き継ぎコンテキスト（hojokin-handoff.zip）に同梱＝別DL不要に一本化。版もパックに統一。
-# 単体ZIP（グローバル ~/.claude/skills 運用したい玄人向けの任意物）は残す：
-_WAGEBOOK_SKILL_ZIP_URL = 'https://drive.google.com/file/d/1VxD0y4l7DPb9qK7eDfOpWUDQvMZ9eBBF/view?usp=sharing'
+# v2 で引き継ぎコンテキスト（hojokin-handoff.zip）に同梱＝別DL不要・project-scopedで自動有効に一本化。
+# 単体ZIP配布は UI から廃止（同梱に統一）。build_skill_zip.py はテンプレ同期チェックの実装元として残置。
 
 # 引き継ぎコンテキストパック（CC向け）— 別メンバーの Claude Code に補助金業務の知識を渡す配布物。
 # 中身は脱PIIの知識パック(引き継ぎ/)＋索引CLAUDE.md＋参照docs＋スキル(.claude/skills/wagebook-convert)
@@ -1899,7 +1898,7 @@ with st.expander(
         'スキルを使う前に、**このPCで1回だけ**実施してください。'
         '手元の Claude Code（CC）に下のプロンプトを貼り付けて実行するだけです。'
         'Python 3.8 以上が無ければ CC が導入を試みます。\n\n'
-        '※ スキル本体（ZIP）を更新しても、このセットアップの再実行は不要です。'
+        '※ 引き継ぎパック（スキル同梱）を更新しても、このセットアップの再実行は不要です。'
     )
     st.code(
         '【補助金・賃金台帳スキル：CC環境の初回セットアップ（このPCで1回だけ）】\n'
@@ -1917,7 +1916,7 @@ with st.expander(
         '4. 動作確認：`python -c "import openpyxl; print(\'OK\', openpyxl.__version__)"`（使う Python に合わせる）。\n'
         '5. 報告：使った Python のパスとバージョン、openpyxl のバージョン、最終結果（OK/NG）。\n'
         '\n'
-        '※ これは1回だけ。スキル本体（wagebook-convert.zip）を更新しても、このセットアップの再実行は不要です。',
+        '※ これは1回だけ。引き継ぎパック（スキル同梱）を更新しても、このセットアップの再実行は不要です。',
         language='markdown',
     )
 
@@ -1940,28 +1939,18 @@ with st.expander(
 
     st.markdown('### 🔧 セットアップ（スキルは同梱済み・別DL不要）')
     st.markdown(
-        'スキルは引き継ぎコンテキストに同梱されています。'
-        '**補助金フォルダで Claude Code を開けば `/wagebook-convert` が使えます**（反映には CC 再起動）。\n'
+        'スキルは引き継ぎコンテキストに**同梱**されています。'
+        '**補助金フォルダで Claude Code を開けば、そのまま `/wagebook-convert` が使えます**（反映には CC 再起動）。'
+        '別途ダウンロード・インストールは不要です。\n'
         '※ 先に上の「🔧 はじめての方へ：CC環境セットアップ（Python）」を1回だけ済ませてください。\n\n'
-        '下は「補助金フォルダ**以外**でも常用したい玄人向け」の**任意**手順（グローバル `~/.claude/skills`）です。基本は不要。'
-    )
-    st.markdown(
-        f'1. [`wagebook-convert.zip` をダウンロード]({_WAGEBOOK_SKILL_ZIP_URL})\n'
-        '2. ZIP を展開し、フォルダ `wagebook-convert/` を以下に配置：\n'
-        '   - Windows: `C:\\\\Users\\\\<ユーザー名>\\\\.claude\\\\skills\\\\wagebook-convert\\\\`\n'
-        '   - macOS: `~/.claude/skills/wagebook-convert/`\n'
-        '   - **`.claude` の下に `skills` フォルダが無ければ、自分で作成してください**'
-        '（初めての方は無いのが普通です）。`skills` の中に展開した `wagebook-convert/` を丸ごと置き、'
-        '`...\\\\skills\\\\wagebook-convert\\\\SKILL.md` の形になれば配置完了です。\n'
-        '3. Claude Code を再起動\n'
-        '4. CC に `/wagebook-convert` と打って Skill 名が候補に出れば成功\n\n'
-        '※ 内容はコンテキスト同梱版と同一です（版はパックに統一）。'
-        'project版（同梱）と global版が二重にあると古い方が優先されるため、一本化するなら片方に統一してください。'
+        '⚠ もし**以前に単体スキルを `~/.claude/skills/wagebook-convert/`（グローバル）へ入れている**場合は、'
+        'その**古いグローバル版を削除**してください。同名スキルが二重にあると古い方が優先され、版ズレの原因になります'
+        '（同梱版が常に最新です）。'
     )
 
     st.markdown('### 👤 CC への依頼方法（毎回）')
     st.markdown(
-        'Skill インストール後は、手元の Claude Code に **下のプロンプトを貼り付け、`［　］` を埋めて送るだけ** です。'
+        'スキルは同梱済みなので、手元の Claude Code に **下のプロンプトを貼り付け、`［　］` を埋めて送るだけ** です。'
     )
     st.code(
         '賃金台帳を補助金ツール用の Excel に変換してください。\n'
@@ -2811,4 +2800,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.85 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.86 | カラフルボックス株式会社')
