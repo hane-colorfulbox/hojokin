@@ -69,6 +69,16 @@ def _check_template_sync() -> bool:
     return True
 
 
+def check_template_sync() -> bool:
+    """公開ラッパ。build_handoff_zip がスキル同梱前にテンプレ byte 一致を確認するために流用する。
+
+    スキル同梱 xlsx（`.claude/skills/wagebook-convert/templates/賃金台帳テンプレート.xlsx`）と
+    ツール原本（`ツール/賃金台帳テンプレート.xlsx`）が一致していないと、CC スキル出力とツール
+    出力のフォーマットがズレて後段パーサーが壊れる。同梱経路（handoff）でも必ず通す。
+    """
+    return _check_template_sync()
+
+
 def main() -> int:
     if not SKILL_DIR.exists():
         print(f'❌ Skill ディレクトリが見つかりません: {SKILL_DIR}', file=sys.stderr)

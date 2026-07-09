@@ -43,11 +43,13 @@ DIST_DIR = ROOT / '_dist'
 # 配布する中身（許可リスト）。ディレクトリは再帰的に含める。
 # 引き継ぎパックが相対リンク（../docs/..., ../CLAUDE.md, ../.claude/skills/...）で
 # 参照する配布可能ドキュメントを、リポジトリ相対のパス構造を保ったまま同梱する。
-# 注: スキル(wagebook-convert)はこのコンテキストZIPには含めない。
-# スキルは独立した配布物（scripts/build_skill_zip.py → wagebook-convert.zip）として
-# ツールUIから別途配布し、~/.claude/skills に入れて使う（コンテキストとスキルを2本に分離）。
+# スキル(wagebook-convert)も同梱する（v2 一本化）。受け取り手が補助金フォルダ直下に
+# 解凍すると `<補助金>/.claude/skills/wagebook-convert/` = project-scoped スキルとして
+# 自動有効になり、別DL不要になる。同梱前に build_skill_zip.check_template_sync() で
+# スキル xlsx とツール原本 xlsx の byte 一致を必ず確認する（main 冒頭）。
 INCLUDE_DIRS = [
     '引き継ぎ',
+    '.claude/skills/wagebook-convert',
 ]
 # 注: CLAUDE.md は社内担当者の氏名を含む開発設定ファイルのため、配布スナップショットには
 # 同梱しない（引き継ぎパックは CLAUDE.md にリンクしない自己完結構成）。GitHub 経由の閲覧者は
@@ -78,6 +80,8 @@ INCLUDE_FILES = [
     'docs/セカンドオピニオン加点/配布物テンプレ/15_記入見本_経営者一問一答_製造業例.md',
     'docs/セカンドオピニオン加点/_sample/05_記入サンプル_ダミー工務店.md',
     'docs/セカンドオピニオン加点/_sample/07_記入サンプル_情報少なめ_ダミー工務店.md',
+    # 受け取り手が「引き継ぎを最新に更新して」で使う更新スクリプト（ZIPに同梱＝初回展開後は自走）。
+    'scripts/update_handoff.py',
 ]
 
 # ZIP のルートに特別配置するファイル（リポジトリ内ソース → ZIP 内の配置名）。
@@ -137,6 +141,12 @@ def main() -> int:
         print(f'❌ 引き継ぎパックが見つかりません: {handoff_dir}', file=sys.stderr)
         return 1
 
+    # スキル同梱の前提: スキル同梱 xlsx == ツール原本 xlsx（byte一致）。崩れていたら中止。
+    from build_skill_zip import check_template_sync
+    if not check_template_sync():
+        print('❌ スキルテンプレ同期NG: 中止（スキル同梱の前提が崩れています）', file=sys.stderr)
+        return 1
+
     items = _collect()
     if not items:
         print('❌ 同梱対象のファイルが0件です', file=sys.stderr)
@@ -152,19 +162,20 @@ def main() -> int:
         for src, arcname in items:
             zf.write(src, arcname)
             included.append(arcname)
+        version = {
+            'name': 'hojokin-handoff',
+            'built_on': today,
+            'zip': zip_dated.name,
+            'file_count': len(included),
+            'files': included,
+        }
+        version_json = json.dumps(version, ensure_ascii=False, indent=2)
+        # 受け取り手の update_handoff.py が差分適用に使う manifest を ZIP 内にも同梱する。
+        zf.writestr('handoff_version.json', version_json)
 
     shutil.copy2(zip_dated, zip_latest)
 
-    version = {
-        'name': 'hojokin-handoff',
-        'built_on': today,
-        'zip': zip_dated.name,
-        'file_count': len(included),
-        'files': included,
-    }
-    (DIST_DIR / 'handoff_version.json').write_text(
-        json.dumps(version, ensure_ascii=False, indent=2), encoding='utf-8',
-    )
+    (DIST_DIR / 'handoff_version.json').write_text(version_json, encoding='utf-8')
 
     size_kb = zip_dated.stat().st_size / 1024
     print('✅ 引き継ぎパック ZIP 生成完了')

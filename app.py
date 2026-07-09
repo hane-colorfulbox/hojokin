@@ -1843,18 +1843,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 賃金台帳の作成手順（CC向け Skill）— 手元の Claude Code に Skill をインストールして使う運用。
-# Skill 本体は .claude/skills/wagebook-convert/ で管理（git）、配布は ZIP 経由（Drive）。
-# 過去事故：暦年と事業年度が混在した独自フォーマットで作って R215/R216 が誤集計された
-# Skill ZIP の更新日（build_skill_zip.py 実行後に手動更新）
-_WAGEBOOK_SKILL_VERSION = '2026-06-04'
-# Drive 共有リンク（wagebook-convert.zip を配置した Drive ファイル URL）
-# 配布先: マイドライブ/補助金ツール/wagebook-convert.zip （カラフルボックス株式会社グループ閲覧可）
+# 賃金台帳の作成 Skill（wagebook-convert）。本体は .claude/skills/wagebook-convert/ で管理（git）。
+# v2 で引き継ぎコンテキスト（hojokin-handoff.zip）に同梱＝別DL不要に一本化。版もパックに統一。
+# 単体ZIP（グローバル ~/.claude/skills 運用したい玄人向けの任意物）は残す：
 _WAGEBOOK_SKILL_ZIP_URL = 'https://drive.google.com/file/d/1VxD0y4l7DPb9qK7eDfOpWUDQvMZ9eBBF/view?usp=sharing'
 
 # 引き継ぎコンテキストパック（CC向け）— 別メンバーの Claude Code に補助金業務の知識を渡す配布物。
-# 中身は脱PIIの知識パック(引き継ぎ/)＋索引CLAUDE.md＋参照docs。スキルは含めない（別配布）。
-# scripts/build_handoff_zip.py で生成し、スキルZIPと同じ Drive「補助金ツール」フォルダに置く。
+# 中身は脱PIIの知識パック(引き継ぎ/)＋索引CLAUDE.md＋参照docs＋スキル(.claude/skills/wagebook-convert)
+# ＋更新スクリプト(scripts/update_handoff.py)。v2 でスキルを同梱し 1 本化。
+# scripts/build_handoff_zip.py で生成し、Drive「補助金ツール」の hojokin-handoff.zip を版差し替え。
 _HANDOFF_CONTEXT_VERSION = '2026-07-09'
 # Drive 共有リンク（hojokin-handoff.zip = コンテキスト一式）。配布先: マイドライブ/補助金ツール/
 _HANDOFF_CONTEXT_ZIP_URL = 'https://drive.google.com/file/d/1FWubpOrg0crtoz6cF2Jdp3otRi5_GslJ/view?usp=sharing'
@@ -1865,18 +1862,28 @@ with st.expander(
     st.info(
         '補助金業務の全体像・制度ルール（R215/R216・加点）・賃金台帳の実務・運用ルールを、'
         '別メンバーの Claude Code が読める形（脱PII の markdown 一式）にまとめた配布物です。\n\n'
-        'これは業務理解のための**補助的なコンテキスト**で、ツールやスキルの動作に必須ではありませんが、'
-        '入れておくと判断のブレや事故が減ります。賃金台帳を実際に変換するスキルは下の'
-        '「📘 賃金台帳の作成手順」から**別途**インストールしてください（コンテキストとスキルは2本に分けて配布）。'
+        '**賃金台帳を変換するスキル `wagebook-convert` も同梱済み**です（別DL不要）。'
+        '補助金フォルダで Claude Code を開けば `/wagebook-convert` がそのまま使えます。'
     )
+    st.markdown('#### 初回インストール（1回だけ）')
     st.markdown(
-        f'1. [`hojokin-handoff.zip`（コンテキスト一式）をダウンロード]({_HANDOFF_CONTEXT_ZIP_URL})\n'
-        '2. ZIP を展開し、中身（`CLAUDE.md` / `引き継ぎ/` / `docs/`）を **補助金フォルダの直下** に置く\n'
-        '3. その補助金フォルダの直下で Claude Code を開いて質問・作業する\n'
+        f'1. [`hojokin-handoff.zip` をダウンロード]({_HANDOFF_CONTEXT_ZIP_URL})\n'
+        '2. ZIP を展開し、中身（`CLAUDE.md` / `引き継ぎ/` / `docs/` / `.claude/` / `scripts/`）を **補助金フォルダの直下** に置く\n'
+        '3. その補助金フォルダの直下で Claude Code を開いて（再起動して）質問・作業する\n'
         '   - 直下の `CLAUDE.md` が自動で読み込まれ、`引き継ぎ/00_はじめに.md` から案内されます\n'
+        '   - 同梱の `.claude/skills/wagebook-convert/` により `/wagebook-convert` も使えます\n'
         '   - すでに自分の `CLAUDE.md` を直下に持っている場合は上書きに注意'
-        '（同梱の案内ブロックを自分の `CLAUDE.md` に追記してください）\n\n'
-        f'**最新版: {_HANDOFF_CONTEXT_VERSION}**（内容が更新されたら再ダウンロードして上書き）'
+        '（案内ブロックを自分の `CLAUDE.md` に追記してください）'
+    )
+    st.markdown('#### 2回目以降は「更新して」の一言（丸ごと再DL不要）')
+    st.markdown(
+        'あなたの Claude Code が **Google ドライブのコネクタに接続**（会社アカウント）していれば、'
+        'Claude Code に **「引き継ぎを最新に更新して」** と言うだけで最新版を取得して**差分適用**します。'
+        'あなたが直下に置いた自分の `CLAUDE.md` は保護されます。\n\n'
+        '- 仕組み：CC が Drive コネクタで最新 ZIP を取得 → 同梱の `scripts/update_handoff.py` が差分適用。\n'
+        '- Drive に繋いでいない場合：上のリンクから ZIP を手動DLし、'
+        '`python scripts/update_handoff.py <zipのパス>` を実行。\n\n'
+        f'**最新版: {_HANDOFF_CONTEXT_VERSION}**'
     )
     st.markdown(
         '- 修正したい点があれば、**ファイル名・箇所・修正案**をチャットで管理者に送ってください'
@@ -1920,7 +1927,8 @@ with st.expander(
 ):
     st.info(
         '**この作業は手元の PC の Claude Code（CC）に行わせます。**\n\n'
-        '人がやる作業は「自分の PC の CC に `wagebook-convert` Skill をインストールして、賃金台帳の変換を依頼する」だけ。\n'
+        'スキル `wagebook-convert` は **上の「📦 引き継ぎコンテキスト」に同梱済み**です。'
+        '補助金フォルダで CC を開いていれば、**追加DLなしで**そのまま賃金台帳の変換を依頼できます。\n'
         '具体的な変換手順・テンプレート・検証チェックリスト・サンプルは Skill 内に同梱されています。'
     )
     st.warning(
@@ -1930,8 +1938,13 @@ with st.expander(
         '顧客には可能な限り Excel/CSV 形式での提出を依頼するのが理想です。'
     )
 
-    st.markdown('### 🔧 初回セットアップ（1回だけ実施）')
-    st.markdown('※ 先に上の「🔧 はじめての方へ：CC環境セットアップ（Python）」を1回済ませてください。')
+    st.markdown('### 🔧 セットアップ（スキルは同梱済み・別DL不要）')
+    st.markdown(
+        'スキルは引き継ぎコンテキストに同梱されています。'
+        '**補助金フォルダで Claude Code を開けば `/wagebook-convert` が使えます**（反映には CC 再起動）。\n'
+        '※ 先に上の「🔧 はじめての方へ：CC環境セットアップ（Python）」を1回だけ済ませてください。\n\n'
+        '下は「補助金フォルダ**以外**でも常用したい玄人向け」の**任意**手順（グローバル `~/.claude/skills`）です。基本は不要。'
+    )
     st.markdown(
         f'1. [`wagebook-convert.zip` をダウンロード]({_WAGEBOOK_SKILL_ZIP_URL})\n'
         '2. ZIP を展開し、フォルダ `wagebook-convert/` を以下に配置：\n'
@@ -1942,7 +1955,8 @@ with st.expander(
         '`...\\\\skills\\\\wagebook-convert\\\\SKILL.md` の形になれば配置完了です。\n'
         '3. Claude Code を再起動\n'
         '4. CC に `/wagebook-convert` と打って Skill 名が候補に出れば成功\n\n'
-        f'**最新版: {_WAGEBOOK_SKILL_VERSION}**（手元の Skill が古い場合は再ダウンロードして上書き）'
+        '※ 内容はコンテキスト同梱版と同一です（版はパックに統一）。'
+        'project版（同梱）と global版が二重にあると古い方が優先されるため、一本化するなら片方に統一してください。'
     )
 
     st.markdown('### 👤 CC への依頼方法（毎回）')
@@ -1977,11 +1991,10 @@ with st.expander(
 
     st.warning(
         '**変換結果がおかしい／Skill が起動しないとき**\n\n'
-        f'1. **まず手元の Skill が最新版（{_WAGEBOOK_SKILL_VERSION}）か確認してください。** '
-        '古ければ、上の「初回セットアップ」のリンクから `wagebook-convert.zip` をもう一度ダウンロードし、'
-        '`wagebook-convert/` を上書きして Claude Code を再起動。'
+        '1. **まず手元のパックを最新化してください。** Claude Code に「引き継ぎを最新に更新して」と言えば'
+        '（Google ドライブ接続時）最新版に差分適用されます。反映のため CC を再起動。'
         '不具合のときは「手元が古い」可能性が高いので、まずこれを試します。\n'
-        '2. **最新版でもまだおかしいときは、羽根に共有してください。** '
+        '2. **最新でもまだおかしいときは、羽根に共有してください。** '
         '会社名・症状（例：給与支給総額が通勤手当ぶん少ない／人数が多すぎる 等）・CC が出力した Excel を添えてください。'
     )
 
@@ -2798,4 +2811,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.84 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.85 | カラフルボックス株式会社')
