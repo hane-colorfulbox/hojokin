@@ -43,13 +43,15 @@ DIST_DIR = ROOT / '_dist'
 # 配布する中身（許可リスト）。ディレクトリは再帰的に含める。
 # 引き継ぎパックが相対リンク（../docs/..., ../CLAUDE.md, ../.claude/skills/...）で
 # 参照する配布可能ドキュメントを、リポジトリ相対のパス構造を保ったまま同梱する。
-# スキル(wagebook-convert)も同梱する（v2 一本化）。受け取り手が補助金フォルダ直下に
-# 解凍すると `<補助金>/.claude/skills/wagebook-convert/` = project-scoped スキルとして
-# 自動有効になり、別DL不要になる。同梱前に build_skill_zip.check_template_sync() で
-# スキル xlsx とツール原本 xlsx の byte 一致を必ず確認する（main 冒頭）。
+# スキル(wagebook-convert / case-docs-check)も同梱する（v2 一本化）。受け取り手が補助金
+# フォルダ直下に解凍すると `<補助金>/.claude/skills/...` = project-scoped スキルとして
+# 自動有効になり、別DL不要になる。同梱前に build_skill_zip.check_template_sync()（テンプレ
+# xlsx byte 一致）と check_docscheck_sync.check_docs_sync()（分類定数の AST 突合）を
+# 必ず通す（main 冒頭）。
 INCLUDE_DIRS = [
     '引き継ぎ',
     '.claude/skills/wagebook-convert',
+    '.claude/skills/case-docs-check',
 ]
 # 注: CLAUDE.md は社内担当者の氏名を含む開発設定ファイルのため、配布スナップショットには
 # 同梱しない（引き継ぎパックは CLAUDE.md にリンクしない自己完結構成）。GitHub 経由の閲覧者は
@@ -145,6 +147,14 @@ def main() -> int:
     from build_skill_zip import check_template_sync
     if not check_template_sync():
         print('❌ スキルテンプレ同期NG: 中止（スキル同梱の前提が崩れています）', file=sys.stderr)
+        return 1
+
+    # case-docs-check の前提: スキル同梱 check_docs.py の分類・必須判定定数 ==
+    # hojokin/pipeline.py（FileDetector）・app.py の正典（AST 突合）。崩れていたら中止。
+    from check_docscheck_sync import check_docs_sync
+    if not check_docs_sync():
+        print('❌ case-docs-check 定数同期NG: 中止（原本と スキル側 check_docs.py を同時に直すこと）',
+              file=sys.stderr)
         return 1
 
     items = _collect()

@@ -49,6 +49,8 @@ _backups/
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+# ただし Skill 同梱スクリプトの実行キャッシュは除外（!.claude/skills/** の巻き添え防止）
+.claude/skills/**/__pycache__/
 
 # その他
 *.log

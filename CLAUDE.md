@@ -121,6 +121,7 @@
 - `docs/案件メモ/` — 個別案件の調査ログ（テンプレートのみ。実案件メモは gitignore）
 - **`docs/補助金_実務知識ベース.md`** — **R215/R216 や賃金台帳の取り扱いに迷ったらまずここを参照**。公募要領の定義（給与支給総額・役員除外・賞与の扱い）、賃金台帳の構造解釈（段1/段2/役員ブロック）、Codex 調査結果のサマリを集約。鮮度管理あり。
 - **`.claude/skills/wagebook-convert/`** — **PDF賃金台帳をツール用 Excel に変換するための CC Skill**。`SKILL.md` 本体に手順、`reference/` に役員正規化と公募要領要点、`checklists/` に検証チェックリスト、`templates/` に賃金台帳テンプレート、`examples/` に抽象化サンプル変換例を同梱。**xlsxの月列には「直近事業年度の12ヶ月分」を入れる（暦年ではない）** ← 落とし穴。配布は ZIP（`scripts/build_skill_zip.py` で生成）→ Drive 経由で他担当者へ。CC が文脈で自動発火、または `/wagebook-convert` で明示起動。
+- **`.claude/skills/case-docs-check/`** — **案件フォルダ（Drive/ローカル）の必要書類チェック用 CC Skill**（v0.2.90〜）。申請書作成・加点判定に必要な書類の有無と中身（対象年度・発行日・形式・テンプレ規格・ヒアリング様式取り違え）を1回の発動でチャット一括報告する。Drive 読み取り専用・成果物ファイルなし・途中質問なし。「必要書類チェックして」で自動発火、`/case-docs-check` で明示起動。Drive アクセスは各自の Google Drive コネクタ（MCP）経由（SA 不要）＝引き継ぎパック同梱で他担当者も使える。**分類・必須判定の定数は `hojokin/pipeline.py`（FileDetector）と `app.py` からの独立コピー＝原本を変えたらスキル側 `review/check_docs.py` も同時に直す**（`scripts/check_docscheck_sync.py` が handoff ZIP ビルド時に AST 突合、不一致でビルド中止）。ヒアリング様式・台帳テンプレ改訂時は check_docs.py のフィンガープリント/ヘッダー定数を再実測して更新。提出書類要件の一次裏取りは `reference/必要書類マトリクス.md`（公募要領＋交付申請マニュアル、鮮度管理あり）。
 
 ## R215/R216 や賃金台帳に迷ったら
 

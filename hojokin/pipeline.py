@@ -417,6 +417,9 @@ def _rank_pl_names(names, fiscal_month_override=None) -> dict:
 class FileDetector:
     """資料フォルダからファイルを自動分類"""
 
+    # PATTERNS / OUTPUT_FILE_MARKERS / ALLOWED_EXTS を変更したら、
+    # .claude/skills/case-docs-check/review/check_docs.py の独立コピーも同時に直すこと
+    # （scripts/check_docscheck_sync.py が handoff ZIP ビルド時に AST 突合して不一致なら中止）。
     PATTERNS = {
         'hearing': ['ヒアリング'],
         # 登記書類は通称が割れる（履歴事項全部証明書／登記簿謄本／登記事項証明書）。

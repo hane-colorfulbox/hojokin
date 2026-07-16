@@ -34,7 +34,7 @@ LOCAL_VERSION = ROOT / '.handoff_version'
 CLAUDE_MD = 'CLAUDE.md'
 CLAUDE_MARKER = '<!-- handoff-distributed-claude-md -->'
 # 丸ごと入れ替える（stale ファイルも消す）管理ディレクトリ。
-MANAGED_DIRS = ('引き継ぎ', '.claude/skills/wagebook-convert')
+MANAGED_DIRS = ('引き継ぎ', '.claude/skills/wagebook-convert', '.claude/skills/case-docs-check')
 ZIP_MAGIC = b'PK\x03\x04'
 
 
