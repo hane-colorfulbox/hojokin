@@ -56,6 +56,11 @@ BONUS_THRESHOLD_YEN = 63
 MONTH_NAMES = ['1月', '2月', '3月', '4月', '5月', '6月',
                '7月', '8月', '9月', '10月', '11月', '12月']
 
+# wagebook-convert スキルが出力に付ける「PDF丸ごと転記」シートのシート名プレフィックス。
+# 人間の確認用シート（可視）であり、リーダーは全経路で読み飛ばす（2026-07-21 決定）。
+# 変更する場合はスキル側 SKILL.md §4.1.2 と必ず同期すること。
+TRANSCRIPT_SHEET_PREFIX = '原本転記'
+
 # ── 加点判定の対象暦月（デジタル化・AI導入補助金2026 公募要領で固定）──
 # 加点措置①（補助率1/2→2/3 トリガー兼用／加点項目14）の対象期間。
 # 令和6年10月〜令和7年9月の暦月12か月。Oct-Dec は令和6年・Jan-Sep は令和7年と
@@ -825,12 +830,26 @@ def _read_csv(path: Path, emp_data: dict | None = None) -> None:
 
 
 def _visible_worksheets(wb: openpyxl.Workbook) -> list:
-    """人間に見える（表示中の）シートだけ返す。非表示シートは読まない。
+    """人間に見える（表示中の）シートのうち、読み取り対象のものだけ返す。
 
-    人手修正で旧版シートが「×」付きのまま非表示で残ることがあり、全シート走査だと
-    名寄せで二重計上になる（hidden/veryHidden を除外し、表示中シートのみを正本扱い）。
+    - 非表示（hidden/veryHidden）は除外。人手修正で旧版シートが「×」付きのまま
+      非表示で残ることがあり、全シート走査だと名寄せで二重計上になるため。
+    - シート名が「原本転記」で始まる可視シートも除外。wagebook-convert スキルが
+      出力に付ける PDF 丸ごと転記シート（確認用）で、表として誤読すると二重計上や
+      個人台帳型への誤判定（「月度給与」文字列で _is_individual_ledger が発火）を
+      起こす。決定論（_read_flexible/_read_individual_ledger）・形式判定
+      （_is_individual_ledger）・AI入力TSV（_workbook_to_tsv）は全て本関数を通る
+      （唯一のシート列挙点）ため、ここでの除外が全経路をカバーする。
     """
-    return [ws for ws in wb.worksheets if ws.sheet_state == 'visible']
+    result = []
+    for ws in wb.worksheets:
+        if ws.sheet_state != 'visible':
+            continue
+        if str(ws.title or '').strip().startswith(TRANSCRIPT_SHEET_PREFIX):
+            logger.info(f'原本転記シートを読み取り対象から除外: 「{ws.title}」')
+            continue
+        result.append(ws)
+    return result
 
 
 def _read_flexible(wb: openpyxl.Workbook,
