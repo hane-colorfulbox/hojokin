@@ -1068,11 +1068,11 @@ def add_data_source_sheet(
             _row('賃金台帳', '給与支給総額(基準年)', int(round(wage_plan.get('wage_total_base', 0))),
                  ledger_summary, '（Excel全体）', wage_extraction_method, '高')
             _row('賃金台帳', '給与支給総額(1年目計画)', int(round(wage_plan.get('wage_total_y1', 0))),
-                 '（基準年×1.03 自動計算）', '-', '機械計算', '高')
+                 '（基準年×1.03 切り上げ）', '-', '機械計算', '高')
             _row('賃金台帳', '給与支給総額(2年目計画)', int(round(wage_plan.get('wage_total_y2', 0))),
-                 '（基準年×1.03² 自動計算）', '-', '機械計算', '高')
+                 '（1年目計画×1.03 切り上げ）', '-', '機械計算', '高')
             _row('賃金台帳', '給与支給総額(3年目計画)', int(round(wage_plan.get('wage_total_y3', 0))),
-                 '（基準年×1.03³ 自動計算）', '-', '機械計算', '高')
+                 '（2年目計画×1.03 切り上げ）', '-', '機械計算', '高')
             _row('賃金台帳', '従業員数（FTE換算）',
                  round(wage_plan.get('employee_count_fte', 0), 1),
                  ledger_summary, '（Excel全体）', wage_extraction_method, '高')

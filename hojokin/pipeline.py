@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import tempfile
 import unicodedata
@@ -1933,15 +1934,24 @@ def _calc_wage_plan_from_ledger(
             and included_count < non_officer_count * FISCAL_MISMATCH_RATIO
         )
 
-        # 給与支給総額ベースで年3%成長の計画値を算出
+        # 給与支給総額ベースで年3%成長の計画値を算出。
+        # 計画値は常に切り上げ（2026-07-21 決定）。四捨五入だと申請ポータルの
+        # 伸び率表示が 1 円差で 2.9% になる事故があるため。前年の「表示整数」から
+        # 逐次切り上げることで、対基準年だけでなく年次間の伸び率も常に 3.0% 以上を
+        # 保証する（各年を base×1.03^n から独立に切り上げると年次間で 3% を割る
+        # 組み合わせが残る）。round(x, 2) は float 誤差の掃除（真値は整数×1.03 の
+        # 積で高々小数2桁のため、切り上げ不要な値に +1 円しない）。
         base = result.total_salary
         rate = result.GROWTH_RATE
+        y1 = math.ceil(round(round(base) * (1 + rate), 2))
+        y2 = math.ceil(round(y1 * (1 + rate), 2))
+        y3 = math.ceil(round(y2 * (1 + rate), 2))
         plan = {
             'employee_count_fte': result.employee_count_fte,
             'wage_total_base': base,
-            'wage_total_y1': base * (1 + rate),
-            'wage_total_y2': base * (1 + rate) ** 2,
-            'wage_total_y3': base * (1 + rate) ** 3,
+            'wage_total_y1': y1,
+            'wage_total_y2': y2,
+            'wage_total_y3': y3,
         }
         if total_annual_hours > 0:
             plan['total_annual_hours'] = round(total_annual_hours, 1)

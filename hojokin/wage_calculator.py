@@ -1534,11 +1534,13 @@ def create_wage_calculation(
     # 公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」を根拠に、
     # 賃上げ計画の母数は (A-B) = total_excl_row を参照する（旧実装は a_row だった）。
     _cell(ws3, r, 3, f"='給与支給総額計算'!C{total_excl_row}", fmt=NUMBER_FMT)
-    # D5, E5, F5: 前年 × 1.03（年率3%）。ROUND で円単位に丸め
+    # D5, E5, F5: 前年 × 1.03（年率3%）。常に切り上げで円単位（2026-07-21 決定。
+    # 申請書側 pipeline の逐次切り上げと同じ値になる。内側の ROUND(…,2) は
+    # 浮動小数の誤差掃除で、切り上げ不要な値への +1 円を防ぐ）
     prev_col = 'C'
     for i in range(1, 4):
         col_letter = get_column_letter(3 + i)  # D, E, F
-        _cell(ws3, r, 3 + i, f'=ROUND({prev_col}{r}*1.03, 0)', fmt=NUMBER_FMT)
+        _cell(ws3, r, 3 + i, f'=ROUNDUP(ROUND({prev_col}{r}*1.03, 2), 0)', fmt=NUMBER_FMT)
         prev_col = col_letter
 
     r += 1
