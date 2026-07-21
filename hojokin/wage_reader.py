@@ -31,6 +31,7 @@ import openpyxl
 import pandas as pd
 
 from .config import MIN_WAGE_MAP
+from .xlsx_surgical import patch_xlsx
 
 logger = logging.getLogger(__name__)
 
@@ -3180,19 +3181,6 @@ def judge_bonus_points(ledger: BonusWageLedger) -> BonusPointResult:
 # 加点措置シートへの自動入力
 # ============================================================
 
-def _bw_set(ws, row: int, col: int, value) -> None:
-    """結合セルでも安全に値を書く（結合範囲の左上に書き込む）。数式セルは呼び出さない前提。"""
-    from openpyxl.cell.cell import MergedCell
-    cell = ws.cell(row=row, column=col)
-    if isinstance(cell, MergedCell):
-        for rng in ws.merged_cells.ranges:
-            if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
-                ws.cell(row=rng.min_row, column=rng.min_col, value=value)
-                return
-        return
-    cell.value = value
-
-
 def _detect_bonus_data_start(ws, header_col: int = 2, default: int = 18) -> int:
     """データ開始行を動的検出する。
 
@@ -3218,6 +3206,24 @@ def _select_bonus1_periods(result: BonusPointResult, n: int = 3) -> list[dict]:
     return candidates[:n]
 
 
+def _bonus_period_values(
+    values: dict[str, object],
+    cols: dict[str, str],
+    employees: list[dict],
+    prefecture: str,
+    data_start: int,
+) -> None:
+    """1つの賃金計算期間ブロック分の書き込みセルを values に積む。"""
+    for i, emp in enumerate(employees):
+        row = data_start + i
+        values[f'{cols["no"]}{row}'] = i + 1
+        values[f'{cols["name"]}{row}'] = emp['name']
+        values[f'{cols["pref"]}{row}'] = prefecture
+        if emp.get('base') is not None:
+            values[f'{cols["base"]}{row}'] = round(emp['base'])
+        values[f'{cols["hourly"]}{row}'] = round(emp['hourly'])
+
+
 def fill_bonus_sheet_1(
     template_path: Path,
     output_path: Path,
@@ -3229,34 +3235,32 @@ def fill_bonus_sheet_1(
     シート構成: 3つの賃金計算期間を横並び（期間① B-K / ② M-U / ③ W-AE）。
     各期間に H/R/AB=基本給、I/S/AC=時間換算給与 を書く。判定式・VLOOKUP・COUNTIF は温存。
     データ開始行はテンプレ別に動的検出（①用=18 / 補助率引上げ①用=19）。
+
+    出力は原本 ZIP を丸ごとコピーし対象セルの値だけを差し替える外科的パッチ
+    （openpyxl 再保存だと記入例画像・図形・秘密度ラベル等が消え、原本と
+    フォーマットが変わってしまうため。人間が原本に直接入力したのと同等）。
     """
     wb = openpyxl.load_workbook(str(template_path))
     ws = wb[wb.sheetnames[0]]
+    data_start = _detect_bonus_data_start(ws, header_col=2, default=18)
+    wb.close()
 
     if selected_periods is None:
         selected_periods = _select_bonus1_periods(result, 3)
 
     # base=基本給(H/R/AB列), hourly=時間換算給与(I/S/AC列)
     period_cols = [
-        {'no': 2, 'name': 3, 'pref': 4, 'base': 8, 'hourly': 9},
-        {'no': 13, 'name': 14, 'pref': 15, 'base': 18, 'hourly': 19},
-        {'no': 23, 'name': 24, 'pref': 25, 'base': 28, 'hourly': 29},
+        {'no': 'B', 'name': 'C', 'pref': 'D', 'base': 'H', 'hourly': 'I'},
+        {'no': 'M', 'name': 'N', 'pref': 'O', 'base': 'R', 'hourly': 'S'},
+        {'no': 'W', 'name': 'X', 'pref': 'Y', 'base': 'AB', 'hourly': 'AC'},
     ]
-    data_start = _detect_bonus_data_start(ws, header_col=2, default=18)
 
+    values: dict[str, object] = {}
     for period_idx, detail in enumerate(selected_periods[:3]):
-        cols = period_cols[period_idx]
-        for i, emp in enumerate(detail.get('employees', [])):
-            row = data_start + i
-            _bw_set(ws, row, cols['no'], i + 1)
-            _bw_set(ws, row, cols['name'], emp['name'])
-            _bw_set(ws, row, cols['pref'], result.prefecture)
-            if emp.get('base') is not None:
-                _bw_set(ws, row, cols['base'], round(emp['base']))
-            _bw_set(ws, row, cols['hourly'], round(emp['hourly']))
+        _bonus_period_values(values, period_cols[period_idx],
+                             detail.get('employees', []), result.prefecture, data_start)
 
-    wb.save(str(output_path))
-    wb.close()
+    patch_xlsx(template_path, output_path, values)
     logger.info(f'加点措置①シート保存: {output_path}')
     return output_path
 
@@ -3272,37 +3276,34 @@ def fill_bonus_sheet_2(
     横並び。F/N=基本給, G/O=時間換算給与 を書く。事業場内最低賃金 D7/D8 は時間換算給与列の
     MIN 配列式・D10 の判定式で自動算出されるため温存。
     交付申請月を D5 に日付で書き込み、N14=EDATE(D5,-1) の直近月ラベルを駆動する。
+
+    出力は原本 ZIP を丸ごとコピーし対象セルの値だけを差し替える外科的パッチ
+    （fill_bonus_sheet_1 と同様。原本とフォーマットが同一の成果物を作る）。
     """
     wb = openpyxl.load_workbook(str(template_path))
     ws = wb[wb.sheetnames[0]]
+    data_start = _detect_bonus_data_start(ws, header_col=2, default=17)
+    wb.close()
 
     # base=基本給(F/N列), hourly=時間換算給与(G/O列)
     period_cols = [
-        {'no': 2, 'name': 3, 'pref': 4, 'base': 6, 'hourly': 7},
-        {'no': 10, 'name': 11, 'pref': 12, 'base': 14, 'hourly': 15},
+        {'no': 'B', 'name': 'C', 'pref': 'D', 'base': 'F', 'hourly': 'G'},
+        {'no': 'J', 'name': 'K', 'pref': 'L', 'base': 'N', 'hourly': 'O'},
     ]
-    data_start = _detect_bonus_data_start(ws, header_col=2, default=17)
 
+    values: dict[str, object] = {}
     # D5（申請月）を日付で設定 → N14=EDATE(D5,-1) が直近月を表示・D7/D8 の集計対象を駆動
     if result.application_ym:
         import datetime as _dt
-        _bw_set(ws, 5, 4, _dt.datetime(result.application_ym[0], result.application_ym[1], 1))
+        values['D5'] = _dt.datetime(result.application_ym[0], result.application_ym[1], 1)
 
     details = [result.bonus2_july_detail, result.bonus2_latest_detail]
     for period_idx, detail in enumerate(details):
         if not detail:
             continue
-        cols = period_cols[period_idx]
-        for i, emp in enumerate(detail.get('employees', [])):
-            row = data_start + i
-            _bw_set(ws, row, cols['no'], i + 1)
-            _bw_set(ws, row, cols['name'], emp['name'])
-            _bw_set(ws, row, cols['pref'], result.prefecture)
-            if emp.get('base') is not None:
-                _bw_set(ws, row, cols['base'], round(emp['base']))
-            _bw_set(ws, row, cols['hourly'], round(emp['hourly']))
+        _bonus_period_values(values, period_cols[period_idx],
+                             detail.get('employees', []), result.prefecture, data_start)
 
-    wb.save(str(output_path))
-    wb.close()
+    patch_xlsx(template_path, output_path, values)
     logger.info(f'加点措置②シート保存: {output_path}')
     return output_path
