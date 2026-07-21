@@ -135,6 +135,12 @@ def main(argv):
               '違う可能性。ヘッダー行/データ開始行を確認。', file=sys.stderr)
         return 2
 
+    # 原本転記シート（SKILL.md §4.1.2・2026-07-21 決定）の有無は表示のみの注意喚起。
+    # 旧スキル出力・ツール出力には無いため FAIL/要対応にはしない（advisory）。
+    if not any(str(t or '').strip().startswith('原本転記') for t in wb.sheetnames):
+        print('⚠ 原本転記シートなし（2026-07-21 以降のスキル出力では §4.1.2 で必須。'
+              '旧スキル出力・ツール出力ならこのままで可。省略理由を §9 報告に明記）\n')
+
     rows = []
     for r in range(DATA_START_ROW, ws.max_row + 1):
         name = ws.cell(r, COL_NAME).value
