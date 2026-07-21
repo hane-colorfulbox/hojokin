@@ -28,10 +28,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import openpyxl
-import pandas as pd
 
 from .config import MIN_WAGE_MAP
 from .xlsx_surgical import patch_xlsx
+
+# pandas は CSV 経路（_read_csv / _csv_to_tsv）でのみ使うため関数内で遅延 import する。
+# 引き継ぎパック同梱の加点判定ローカル実行（katen-judge スキル）を openpyxl だけで
+# 動かすための依存最小化（xlsx 経路は pandas 不要）。
 
 logger = logging.getLogger(__name__)
 
@@ -718,6 +721,8 @@ def _read_csv(path: Path, emp_data: dict | None = None) -> None:
     対応範囲：氏名列＋年間給与列がある単純な集計表型 CSV のみ。
     医療機関の月別行型（YYYYMM 1行=1月）には対応しない（AI 経路で処理）。
     """
+    import pandas as pd
+
     if emp_data is None:
         emp_data = {}
 
@@ -1209,6 +1214,8 @@ def _csv_to_tsv(path: Path) -> str:
     複数エンコーディング（UTF-8 / CP932）を順次試す。
     gzip圧縮 CSV (magic 0x1F 0x8B) の場合は自動解凍してから decode。
     """
+    import pandas as pd
+
     # gzip magic を見て解凍を試みる
     try:
         with open(path, 'rb') as f:
