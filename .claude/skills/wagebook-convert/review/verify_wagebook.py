@@ -42,6 +42,15 @@ OFFICER_TRIGGERS = ('代表取締役', '取締役', '監査役', '監事', '理�
 PART_TRIGGERS = ('パート', 'アルバイト', '非常勤')
 BONUS_SPIKE_RATIO = 1.5  # その人の非空月の中央値×この倍率を超える月は賞与混入の疑い
 
+# 出力ブックに存在してよい可視シート（§4.1.2）。これ以外の可視シートはツールが表として読む＝FAIL。
+ALLOWED_SHEET_NAMES = (SHEET_NAME, '記入ルール')
+ALLOWED_SHEET_PREFIXES = ('原本転記', '変換メモ')
+# FLAG-R（§4.1.2 🔴 全項目転記）: 原本転記シート群に明細行の項目名がこの数以上見つからなければ
+# 「課税支給額など集計行だけの転記」の疑い。手掛かり語は給与台帳の典型的な明細項目。
+TRANSCRIPT_ITEM_HINTS = ('基本給', '通勤手当', '所得税', '住民税', '健康保険', '厚生年金',
+                         '雇用保険', '社会保険', '控除', '残業', '時間外', '出勤', '労働時間', '差引')
+TRANSCRIPT_MIN_HINTS = 3
+
 
 def _num(v):
     """数値化できれば float、できなければ None。空文字・None は None。"""
@@ -173,6 +182,51 @@ def main(argv):
 
     fail = []       # 修正必須（PASSをブロック）
     confirm = []    # 要確認（PDFで素性確認し報告に解決を明記してから進む）
+
+    # --- 規格外シート名（FAIL: ツールのリーダーは「原本転記*」以外の可視シートを表として読む） ---
+    irregular_sheets = []
+    for t in wb.sheetnames:
+        title = str(t or '').strip()
+        if wb[t].sheet_state != 'visible':
+            continue
+        if title in ALLOWED_SHEET_NAMES:
+            continue
+        if any(title.startswith(p) for p in ALLOWED_SHEET_PREFIXES):
+            continue
+        irregular_sheets.append(t)
+    if irregular_sheets:
+        print('[FAIL 規格外シート名]（ツールは「原本転記*」以外の可視シートを賃金表として読む。'
+              '独自名の転記シートは R215/R216 を壊す）')
+        for t in irregular_sheets:
+            print(f'  「{t}」 → 転記シートなら「原本転記_...」へ改名（§4.1.2 🔴）。'
+                  '作業用シートなら削除 or 非表示に')
+        fail.append(f'規格外シート名 {len(irregular_sheets)}件')
+        print()
+
+    # --- FLAG-R 集計行のみ転記の疑い（§4.1.2 🔴 全項目転記） ---
+    transcript_sheets = [t for t in wb.sheetnames
+                         if str(t or '').strip().startswith('原本転記')]
+    if transcript_sheets:
+        found_hints = set()
+        for t in transcript_sheets:
+            for row_vals in wb[t].iter_rows(values_only=True):
+                for v in row_vals:
+                    if isinstance(v, str):
+                        for h in TRANSCRIPT_ITEM_HINTS:
+                            if h in v:
+                                found_hints.add(h)
+                if len(found_hints) >= TRANSCRIPT_MIN_HINTS:
+                    break
+            if len(found_hints) >= TRANSCRIPT_MIN_HINTS:
+                break
+        if len(found_hints) < TRANSCRIPT_MIN_HINTS:
+            print(f'[FLAG-R 原本転記が集計行のみの疑い]（明細項目名の検出 {len(found_hints)}種'
+                  f'（{sorted(found_hints)}）< {TRANSCRIPT_MIN_HINTS}種）')
+            print('  → §4.1.2 🔴 は全項目転記（基本給・各手当（通勤手当）・控除・勤怠の明細行まで'
+                  '原本どおり）。「課税支給額」等の集計行だけの転記は仕様違反。PDFの印字行と比べて'
+                  '不足行を転記すること。原本に明細行が本当に無い台帳ならその旨を§9報告に明記。')
+            confirm.append('FLAG-R 原本転記が集計行のみの疑い（全項目転記か確認）')
+            print()
 
     # --- ① S列二重控除（要確認: 月列の素性は機械では決められないのでPDF確認必須） ---
     s_rows = [e for e in rows if e['S'] is not None and e['S'] > 0]

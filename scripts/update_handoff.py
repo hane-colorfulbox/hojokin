@@ -11,7 +11,7 @@
 やること:
   - 入力を復号・検証（ZIPとして壊れていないか＝DL切れの検知）
   - 補助金フォルダ直下（このスクリプトの2階層上）に差分適用
-    - 引き継ぎ/ と .claude/skills/wagebook-convert/ は丸ごと入替（消えたファイルも反映）
+    - 引き継ぎ/ と .claude/skills/（wagebook-convert / case-docs-check / katen-judge）は丸ごと入替（消えたファイルも反映）
     - docs 等の許可ファイルは更新、前回 manifest から消えたものは削除
     - あなた自身の CLAUDE.md は保護（配布版マーカーが無ければ上書きせず CLAUDE.handoff.md に退避）
   - 反映後は Claude Code を再起動
@@ -34,7 +34,8 @@ LOCAL_VERSION = ROOT / '.handoff_version'
 CLAUDE_MD = 'CLAUDE.md'
 CLAUDE_MARKER = '<!-- handoff-distributed-claude-md -->'
 # 丸ごと入れ替える（stale ファイルも消す）管理ディレクトリ。
-MANAGED_DIRS = ('引き継ぎ', '.claude/skills/wagebook-convert', '.claude/skills/case-docs-check')
+MANAGED_DIRS = ('引き継ぎ', '.claude/skills/wagebook-convert', '.claude/skills/case-docs-check',
+                '.claude/skills/katen-judge')
 ZIP_MAGIC = b'PK\x03\x04'
 
 
