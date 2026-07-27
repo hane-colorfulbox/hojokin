@@ -113,7 +113,7 @@ JUDGE_NEED_AMOUNT = '要確認（金額の確認）'
 WARN_NEED_TYPE = '⚠雇用形態をプルダウンから選択してください'
 WARN_NEED_HOURS = '⚠パート・アルバイトは年間労働時間の入力が必要です'
 WARN_NEED_AMOUNT = '⚠年間通勤手当が支給合計を上回っています。金額をご確認ください'
-WARN_HOURS_OVER = f'⚠年間労働時間が{STANDARD_ANNUAL_HOURS}時間を超えています。桁をご確認ください'
+WARN_HOURS_OVER = '⚠年間労働時間が正社員の年間所定労働時間を超えています。桁をご確認ください'
 WARN_PERIOD_EMPTY = '⚠対象期間が未入力です（決算期の開始日と終了日をご記入ください）'
 WARN_PERIOD_NOT12 = '⚠対象期間が12ヶ月ちょうどになっていません（例：2025/7/1 〜 2026/6/30）'
 WARN_PERIOD_BADDATE = '⚠対象期間の日付が読み取れません（日付形式でご入力ください）'
@@ -124,7 +124,6 @@ C_INPUT = 'FFFF00'    # 黄（入力欄）
 C_CALC = 'E2EFDA'     # 薄緑（自動計算）
 C_SAMPLE = 'F2F2F2'   # 薄グレー（記入例）
 C_NOTE = 'FFF2CC'     # 薄オレンジ（注意）
-C_DEN = 'D9D9D9'      # グレー（固定定数）
 
 # ── フォント／罫線 ──
 FONT = '游ゴシック'
@@ -152,7 +151,6 @@ FILL_INPUT = PatternFill(start_color=C_INPUT, end_color=C_INPUT, fill_type='soli
 FILL_CALC = PatternFill(start_color=C_CALC, end_color=C_CALC, fill_type='solid')
 FILL_SAMPLE = PatternFill(start_color=C_SAMPLE, end_color=C_SAMPLE, fill_type='solid')
 FILL_NOTE = PatternFill(start_color=C_NOTE, end_color=C_NOTE, fill_type='solid')
-FILL_DEN = PatternFill(start_color=C_DEN, end_color=C_DEN, fill_type='solid')
 
 UNLOCKED = Protection(locked=False)
 LOCKED = Protection(locked=True)
@@ -205,7 +203,7 @@ def f_fte(r: int) -> str:
     return (
         f'=IF({L_JUDGE}{r}<>"{JUDGE_TARGET}",0,'
         f'IF(OR({L_EMP}{r}="{FULLTIME_TYPES[0]}",{L_EMP}{r}="{FULLTIME_TYPES[1]}"),1,'
-        f'N({L_HOURS}{r})/$C${DEN_ROW}))'
+        f'N({L_HOURS}{r})/IF(N($C${DEN_ROW})>0,$C${DEN_ROW},{STANDARD_ANNUAL_HOURS})))'
     )
 
 
@@ -215,7 +213,7 @@ def f_warn(r: int) -> str:
         f'IF({L_JUDGE}{r}="{JUDGE_NEED_HOURS}","{WARN_NEED_HOURS}",'
         f'IF({L_JUDGE}{r}="{JUDGE_NEED_AMOUNT}","{WARN_NEED_AMOUNT}",'
         f'IF(AND({L_JUDGE}{r}="{JUDGE_TARGET}",{L_EMP}{r}="{PART_TYPE}",'
-        f'N({L_HOURS}{r})>{STANDARD_ANNUAL_HOURS}),"{WARN_HOURS_OVER}",""))))'
+        f'N({L_HOURS}{r})>IF(N($C${DEN_ROW})>0,$C${DEN_ROW},{STANDARD_ANNUAL_HOURS})),"{WARN_HOURS_OVER}",""))))'
     )
 
 
@@ -287,7 +285,8 @@ def build_help_sheet(ws):
         ('　 内容をご確認のうえ、そのシートだけをPDF化してご提出ください。', F_NORMAL, None),
         ('', None, None),
         ('【入力欄の色】', F_BOLD, None),
-        ('　黄色のセル＝ご入力いただく欄　／　緑色のセル＝自動計算（入力不要）です。', F_NORMAL, None),
+        ('　←この色のセルがご入力いただく欄です。', F_NORMAL, None, FILL_INPUT),
+        ('　←この色のセルは自動計算です（入力不要）。', F_NORMAL, None, FILL_CALC),
         ('', None, None),
         ('【毎月の金額に入れるもの（重要）】', F_BOLD, None),
         ('・各月の「総支給額」（基本給＋残業・役職・家族・住宅などの各種手当＋通勤手当を含む、', F_NORMAL, None),
@@ -299,8 +298,8 @@ def build_help_sheet(ws):
         ('', None, None),
         ('【賞与（ボーナス）】', F_BOLD, None),
         ('・毎月の欄には混ぜず、「年間賞与」欄にまとめてご入力ください。', F_NORMAL, None),
-        ('・入れるのは「対象期間中に支給日がある賞与」の合計です（支給日ベース。', F_NORMAL, None),
-        ('　査定の対象期間ではなく、実際に支払った日で判断してください）。', F_SMALL, None),
+        ('・入れるのは対象期間（決算期）の決算に費用計上した賞与の合計です', F_NORMAL, None),
+        ('　（経費として計上した日で判断。決算書の賞与計上額と一致させてください）。', F_SMALL, None),
         ('', None, None),
         ('【年間通勤手当（非課税分）】', F_BOLD, None),
         ('・毎月の欄に通勤手当を含めた場合は、非課税分の年間合計を必ずご記入ください。', F_NORMAL, None),
@@ -318,12 +317,14 @@ def build_help_sheet(ws):
         ('　記入した場合も、雇用形態で「役員」を選べば自動で集計から外れます。', F_SMALL, None),
         ('・中途入社・退職・休職などで12ヶ月そろわない方は、自動で集計対象外になります', F_NORMAL, None),
         ('　（補助金は「その年度に全月分の給与を受けた方」だけを数える決まりのためです）。', F_SMALL, None),
-        ('・賞与のみ支給の月（月給0円・賞与だけ支給）がある方を集計に入れたい場合は、', F_NORMAL, None),
-        ('　その月の欄に賞与額を記入し、同額を「年間賞与」欄から差し引いてください（重複防止）。', F_SMALL, None),
+        ('・賞与のみ支給の月（月給0円・賞与だけ支給）がある方も、給与の支給がない月がある方として', F_NORMAL, None),
+        ('　集計対象外になります（12ヶ月すべて給与の支給がある方だけを数える決まりのためです）。', F_SMALL, None),
         ('・パート・アルバイトの方は「年間労働時間」を必ずご入力ください', F_NORMAL, None),
         ('　（人数を正社員の労働時間に換算するために使います。未入力の間は集計に入りません）。', F_SMALL, None),
         ('・週の労働時間が正社員より短い契約社員の方は「パート・アルバイト」を選び、', F_NORMAL, None),
         ('　年間労働時間をご入力ください（労働時間で人数換算する決まりのためです）。', F_SMALL, None),
+        ('・パート・アルバイトの人数換算に使う「正社員の年間所定労働時間」は、計算用シート下部で', F_NORMAL, None),
+        ('　ご確認・変更できます（初期値2080時間＝週40h×52週。自社の所定労働時間に合わせてください）。', F_SMALL, None),
         ('', None, None),
         ('【この様式が使えないケース（担当までご相談ください）】', F_BOLD, None),
         (f'・従業員が{DATA_ROWS + 1}名以上いる／従業員を雇用していない（役員のみの）法人／', F_NORMAL, None),
@@ -335,13 +336,19 @@ def build_help_sheet(ws):
         ('個人明細は印刷されない設定にしてあります）', F_NOTE, FILL_NOTE),
     ]
     r = 2
-    for text, font, fill in lines:
+    for spec in lines:
+        text, font, fill = spec[0], spec[1], spec[2]
+        swatch = spec[3] if len(spec) > 3 else None
         cell = ws.cell(row=r, column=2, value=text)
         if font:
             cell.font = font
         cell.alignment = Alignment(horizontal='left', vertical='center')
         if fill:
             cell.fill = fill
+        if swatch is not None:
+            chip = ws.cell(row=r, column=1)
+            chip.fill = swatch
+            chip.border = BORDER
         r += 1
 
 
@@ -482,16 +489,24 @@ def build_calc_sheet(ws, with_sample=False):
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=2)
         put(ws, row, 3, formula, fill=FILL_CALC, fmt=fmt, font=font, align='center')
 
-    # 分母セル（固定定数）
+    # 年間所定労働時間（FTE換算の分母・顧客入力／初期値2080）
     lab = ws.cell(row=DEN_ROW, column=1,
-                  value='労働時間換算の分母（時間／年・固定）')
-    lab.font = F_SMALL_GRAY
+                  value='正社員の年間所定労働時間（FTE換算の分母）')
+    lab.font = F_NORMAL
     lab.alignment = Alignment(horizontal='left', vertical='center')
     ws.merge_cells(start_row=DEN_ROW, start_column=1, end_row=DEN_ROW, end_column=2)
-    put(ws, DEN_ROW, 3, STANDARD_ANNUAL_HOURS, fill=FILL_DEN, fmt='#,##0',
-        font=F_SMALL_GRAY, locked=True)
+    put(ws, DEN_ROW, 3, STANDARD_ANNUAL_HOURS, fill=FILL_INPUT, fmt='#,##0',
+        font=F_NORMAL, locked=False)
+    dv_hours = DataValidation(
+        type='whole', operator='greaterThan', formula1='0',
+        allow_blank=True, showErrorMessage=True,
+    )
+    dv_hours.error = '1以上の整数（例：2080）でご入力ください'
+    dv_hours.prompt = '正社員がフルタイムで1年間に働く所定労働時間（例：2080）'
+    ws.add_data_validation(dv_hours)
+    dv_hours.add(f'C{DEN_ROW}')
     note = ws.cell(row=DEN_ROW, column=4,
-                   value='※正社員の年間所定労働時間相当（週40h×52週）。変更しないでください。')
+                   value='※例：2080時間（週40h×52週）。自社の正社員フルタイムの所定労働時間に変更できます。パート人数の換算に使います。')
     note.font = F_SMALL_GRAY
     note.alignment = Alignment(horizontal='left', vertical='center')
 
