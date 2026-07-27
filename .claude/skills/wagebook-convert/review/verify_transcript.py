@@ -14,9 +14,15 @@ verify_wagebook.py が「従業員別明細」を検算するのに対し、こ�
   T2 数値セル     : 課税支給額と内訳が数値型（文字列だと Excel 関数が計算できない）。
   T3 合計の一致   : 原本の「合計」列 ＝ 転記値の SUM が全行一致（読み取り誤りの検出）。
                     原本側の不整合で一致しない行は、合計セルに色を付けておけば別枠で報告される。
-  T4 加点転用     : 各月次ページに 基本給 と 労働時間の手掛かり（日額単価／出勤日数／労働時間）がある。
+  T4 加点転用     : 各月次ページに 基本給 と 労働時間の手掛かり（日額単価／時給／出勤日数／労働時間）がある。
+  T5 通勤手当     : 通勤手当が課税支給額に含まれているか（included / excluded）を2式で判定し、
+                    従業員別明細の S列と突合する。控除漏れ（included なのに S列が空）と
+                    二重控除（excluded なのに S列に値）を検知する（SKILL.md §3.1 の全額控除方式）。
+                    どちらの式も成立しない場合は「判定不能」＝控除せず報告に明記させる。
 
 1ページ内に複数ブロック（月次／賞与／総合計）が横並びの形式に対応する（項目名列で区切る）。
+T5 は行=項目×列=従業員（月次ページ型）と行=従業員×列=項目（一覧型）の両レイアウトを扱う
+（entity_maps で正規化。後者を無言で素通りさせない）。
 終了コード: 0=全項目OK / 1=要確認あり / 2=転記シートなし・構造解析不可。
 """
 import re
@@ -27,7 +33,6 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
 from openpyxl import load_workbook  # noqa: E402
-from openpyxl.utils import get_column_letter  # noqa: E402
 
 if len(sys.argv) < 2:
     print('使い方: python verify_transcript.py <出力xlsx>', file=sys.stderr)
@@ -40,18 +45,26 @@ LABEL_HEADS = ('項目', '氏名', 'No.', 'No')
 SKIP_HEADS = ('合計', '検算', '項目', '氏名')
 TAXABLE = ('課税支給額', '総支給額(課税)', '課税分給与額')
 BASE = ('基本給', '賞与額', '基本給区分')
-COMMUTE = '通勤手当'
-NONTAX = ('非課税支給額', '非課税分', '非課税計')
+COMMUTE = ('通勤手当', '通勤費', '交通費', '通勤')
 NONTAX_COMMUTE = ('非課税通勤',)      # 「非課税通勤費」等＝通勤の非課税分が単独で印字される形式
 TAXED_COMMUTE = ('課税通勤',)         # 「課税通勤費」等
-# 国税庁 No.2585 マイカー・自転車通勤の非課税限度額（月額）。片道2km未満は0円＝全額課税が正。
-COMMUTE_LIMITS = (4200, 7100, 12900, 18700, 24400, 28000, 31600)
+# 従業員別明細（同じブック内）の S列＝年間通勤手当。T5 でこの値と転記シートの判定を突合する。
+LEDGER_SHEET, LEDGER_HDR_ROW = '従業員別明細', 5
+LEDGER_COL_NAME, LEDGER_COL_S = 3, 19
+# 支給項目の和（T1・T5）から除外するラベル。**完全一致**で判定する
+# （前方一致にすると「休日出勤」が「休日出勤手当」を巻き添えで除外して和が崩れる）。
+# 単価行（金額でなく単価）も除外対象。時給・日額の単価が支給欄に並ぶ台帳がある。
 NON_PAY = ('項目', '氏名', '扶養家族', '出勤日数', '休日出勤', '有給休暇', '普通残業', '休日残業',
            '欠勤日数', '遅刻早退', '期間', '所属', '日額単価', 'No', '支給日', '出勤時間数',
            '欠勤', '不就労', '平日普通', '平日深夜', '休日普通', '休日深夜', '法定休日普通',
            '法定休日深夜', '内60時間超過', '内45時間超過', '有休日数', '有休残日数', '性別',
-           '生年月日', '入社日', '退社日', '月額表区分', '役職')
-TIME_HINTS = ('日額単価', '出勤日数', '出勤時間数', '労働時間', '時間数', '平日普通')
+           '生年月日', '入社日', '退社日', '月額表区分', '役職',
+           '時給単価', '時間単価', '単価')
+# 単価の行（加点判定の時間換算給与の分子）。時給者・日給者でラベルが違う
+RATE_HINTS = ('日額単価', '時給', '時間単価', '単価')
+# 加点判定に転用できるか（T4）＝分子（単価/基本給）と分母（時間）の手掛かりがあるか。前方一致。
+TIME_HINTS = RATE_HINTS + ('出勤日数', '出勤時間数', '労働時間', '総労働時間', '実労働時間',
+                           '所定労働時間', '就業時間', '稼働時間', '時間数', '平日普通')
 
 results, notes = [], []
 
@@ -104,17 +117,130 @@ def blocks_of(ws, hdr):
     return out
 
 
-def pay_items(ws, blk):
-    base_r = next((v for k, v in blk['rows'].items() if k.startswith(BASE)), None)
-    tax_r = next((v for k, v in blk['rows'].items() if k.startswith(TAXABLE)), None)
-    if base_r is None or tax_r is None or tax_r <= base_r:
-        return None, tax_r
-    items = []
-    for r in range(base_r, tax_r):
-        lab = norm(ws.cell(r, blk['label_col']).value)
-        if lab and lab not in NON_PAY and not lab.startswith('日額単価'):
-            items.append((r, lab))
-    return items, tax_r
+def is_transposed(blk):
+    """行=従業員 × 列=項目 の形式か（一覧型ページ）。列見出しに項目名が並ぶ。"""
+    heads = blk['heads']
+    return (any(h.startswith(BASE) for h in heads)
+            and any(h.startswith(TAXABLE) for h in heads))
+
+
+def entity_maps(ws, p, blk):
+    """ブロックを [(氏名, {項目ラベル: Cell})] に正規化する。
+
+    形式①（行=項目・列=従業員）と形式②（行=従業員・列=項目）を同じ形にして、
+    どちらでも同一ロジックで判定できるようにする（②を素通りさせない）。
+    dict は挿入順＝原本の印字順を保つので、支給項目の範囲を順序で決められる。
+    Cell を返すので、値だけでなくセル位置（coordinate）も報告に使える。
+    """
+    if is_transposed(blk):
+        cols = [(norm(ws.cell(p['hdr'], c).value), c) for c in blk['data']]
+        return [(name, {lab: ws.cell(r, c) for lab, c in cols})
+                for name, r in blk['rows'].items()]
+    out = []
+    for c in blk['data']:
+        name = norm(ws.cell(p['name_row'], c).value) or norm(ws.cell(p['hdr'], c).value)
+        out.append((name, {lab: ws.cell(r, c) for lab, r in blk['rows'].items()}))
+    return out
+
+
+def numof(v):
+    return v if isinstance(v, (int, float)) else None
+
+
+def item_sum(cells):
+    """支給項目（基本給〜課税支給額の直前）と課税支給額を返す。
+
+    returns ([(ラベル, Cell)] または None, 課税支給額の値 または None)
+    順序は原本の印字順（entity_maps が挿入順を保つ）。
+    """
+    keys = list(cells)
+    i_base = next((i for i, k in enumerate(keys) if k.startswith(BASE)), None)
+    i_tax = next((i for i, k in enumerate(keys) if k.startswith(TAXABLE)), None)
+    tax = numof(cells[keys[i_tax]].value) if i_tax is not None else None
+    if i_base is None or i_tax is None or i_tax <= i_base:
+        return None, tax
+    items = [(k, cells[k]) for k in keys[i_base:i_tax]
+             if k not in NON_PAY and not k.startswith('日額単価')]
+    return items, tax
+
+
+def sum_verdict(cells):
+    """T1 の判定。returns (verdict, detail)。
+
+    ok      : 課税支給額 ＝ 支給項目の和
+    partial : 非課税項目が内訳に混在し、部分集合が課税支給額に一致（課税対象を特定できた）
+    ng      : どの部分集合とも一致しない＝転記漏れ・読み取り誤りの疑い
+    noitem  : 課税支給額はあるが支給項目が無い（集計行のみの転記の疑い）
+    skip    : 課税支給額が数値でない（この列/行は対象外）
+    """
+    items, tax = item_sum(cells)
+    if tax is None:
+        return 'skip', ''
+    if items is None:
+        return 'noitem', ''
+    vals = [(k, c.value) for k, c in items if numof(c.value)]
+    s = sum(v for _, v in vals)
+    if abs(s - tax) < 0.5:
+        return 'ok', ''
+    if len(vals) <= 14:
+        for k in range(len(vals), 0, -1):
+            for comb in combinations(range(len(vals)), k):
+                if abs(sum(vals[i][1] for i in comb) - tax) < 0.5:
+                    excl = [vals[i][0] for i in range(len(vals)) if i not in comb]
+                    return 'partial', f'課税対象外＝{excl}'
+    return 'ng', f'内訳和{s:,.0f} vs 課税{tax:,.0f}'
+
+
+def commute_state(cells):
+    """通勤手当が課税支給額に含まれているかを2式で判定する（SKILL.md §3.1 の判定表）。
+
+    included : 課税支給額 ＝ Σ支給項目（通勤手当を含む）→ S列に通勤手当の年額を入れて控除する
+    excluded : 課税支給額 ＝ Σ支給項目 − 通勤手当        → 既に除外済み。S列は空が正
+    unknown  : どちらの式も成立しない（内訳が読めない）  → 控除せず §9 に「未控除」を明記
+    none     : 通勤手当の印字がない（＝支給なし）
+
+    T1 の部分集合探索は複数解があり得るのでここでは使わない。この2式だけで決める。
+    """
+    keys = list(cells)
+    tc = numof(next((cells[k].value for k in keys if k.startswith(TAXED_COMMUTE)), None))
+    nc = numof(next((cells[k].value for k in keys if k.startswith(NONTAX_COMMUTE)), None))
+    if tc or nc:
+        # 課税通勤費／非課税通勤費が別行で印字される形式は、その値でそのまま決まる
+        return ('included', tc) if tc else ('excluded', nc)
+
+    com_k = next((k for k in keys if k.startswith(COMMUTE)
+                  and not k.startswith(NONTAX_COMMUTE + TAXED_COMMUTE)), None)
+    com = numof(cells[com_k].value) if com_k else None
+    if not (com and com > 0):
+        return 'none', 0.0
+
+    items, tax = item_sum(cells)
+    if items is None or tax is None:
+        return 'unknown', com
+    s = 0.0
+    for _, c in items:
+        v = numof(c.value)
+        if v:
+            s += v
+    if abs(s - tax) < 0.5:
+        return 'included', com
+    if abs((s - com) - tax) < 0.5:
+        return 'excluded', com
+    return 'unknown', com
+
+
+def ledger_transport(wb):
+    """従業員別明細の S列（年間通勤手当）を氏名キーで読む。シートが無ければ None。"""
+    if LEDGER_SHEET not in wb.sheetnames:
+        return None
+    ws = wb[LEDGER_SHEET]
+    out = {}
+    for r in range(LEDGER_HDR_ROW + 1, ws.max_row + 1):
+        nm = norm(ws.cell(r, LEDGER_COL_NAME).value)
+        if nm:
+            v = ws.cell(r, LEDGER_COL_S).value
+            out[nm] = v if isinstance(v, (int, float)) else None
+    return out
 
 
 wb = load_workbook(BOOK, data_only=False)
@@ -149,44 +275,33 @@ print(f'解析: {len(parsed)}シート / {nblocks}ブロック'
 print('=== T1 内訳の完全性（課税支給額 ＝ 支給項目の和） ===')
 ok1, ng1, partial, noitem = 0, [], [], []
 for sn, p in parsed.items():
-    ws = p['ws']
     for bi, blk in enumerate(p['blocks']):
-        items, tax_r = pay_items(ws, blk)
-        if items is None:
-            is_summary_block = blk['heads'] and all(
-                h.startswith(('賞与', '総合計')) for h in blk['heads'])
-            if tax_r is not None and not is_summary_block:
-                # 課税支給額はあるのに内訳行が1つもない＝集計行だけの転記（§4.1.2 🔴 違反）
-                ng1.append(f'{sn}: 課税支給額はあるが支給項目（基本給・各手当）の行が無い'
-                           '＝集計行のみの転記の疑い')
-            else:
-                noitem.append(f'{sn}#b{bi}')
-            continue
-        for c in blk['data']:
-            tax = ws.cell(tax_r, c).value
-            if not isinstance(tax, (int, float)):
+        # 賞与欄・総合計欄は支給項目の内訳を持たないのが正常（集計のみでも違反にしない）
+        is_summary_block = blk['heads'] and all(
+            h.startswith(('賞与', '総合計')) for h in blk['heads'])
+        bkey, seen = f'{sn}#b{bi}', 0
+        for name, cells in entity_maps(p['ws'], p, blk):
+            verdict, detail = sum_verdict(cells)
+            if verdict == 'skip':
                 continue
-            vals = [(lab, ws.cell(r, c).value) for r, lab in items
-                    if isinstance(ws.cell(r, c).value, (int, float)) and ws.cell(r, c).value]
-            s = sum(v for _, v in vals)
-            head = norm(ws.cell(p['hdr'], c).value)
-            if abs(s - tax) < 0.5:
+            seen += 1
+            if verdict == 'ok':
                 ok1 += 1
-                continue
-            sub = None
-            if len(vals) <= 14:
-                for k in range(len(vals), 0, -1):
-                    for comb in combinations(range(len(vals)), k):
-                        if abs(sum(vals[i][1] for i in comb) - tax) < 0.5:
-                            sub = comb
-                            break
-                    if sub:
-                        break
-            if sub is not None:
-                partial.append(f'{sn}/{head}: 課税対象外＝{[vals[i][0] for i in range(len(vals)) if i not in sub]}')
+            elif verdict == 'partial':
+                partial.append(f'{sn}/{name}: {detail}')
                 ok1 += 1
+            elif verdict == 'noitem':
+                # 課税支給額はあるのに内訳が1つもない＝集計行だけの転記（§4.1.2 🔴 違反）
+                if is_summary_block:
+                    if bkey not in noitem:
+                        noitem.append(bkey)
+                else:
+                    ng1.append(f'{sn}/{name}: 課税支給額はあるが支給項目（基本給・各手当）が'
+                               '無い＝集計行のみの転記の疑い')
             else:
-                ng1.append(f'{sn}/{head}: 内訳和{s:,.0f} vs 課税{tax:,.0f}')
+                ng1.append(f'{sn}/{name}: {detail}')
+        if not seen and bkey not in noitem:
+            noitem.append(bkey)
 if partial:
     uniq = sorted({x.split(': ', 1)[1] for x in partial})
     print(f'    非課税項目が内訳に混在: {len(partial)}件（部分集合一致で課税対象を特定）→ {uniq[:3]}')
@@ -197,16 +312,16 @@ check('T1', f'課税支給額＝内訳の和が全列で成立（{ok1}列）', n
 print('=== T2 関数計算の可能性（数値セルであること） ===')
 bad2 = []
 for sn, p in parsed.items():
-    ws = p['ws']
     for blk in p['blocks']:
-        items, tax_r = pay_items(ws, blk)
-        if items is None:
-            continue
-        for c in blk['data']:
-            for r, lab in [(tax_r, '課税支給額')] + items:
-                v = ws.cell(r, c).value
-                if v is not None and not isinstance(v, (int, float)):
-                    bad2.append(f'{sn}!{get_column_letter(c)}{r}({lab})={v!r}')
+        for name, cells in entity_maps(p['ws'], p, blk):
+            items, _tax = item_sum(cells)
+            if items is None:
+                continue
+            tax_k = next((k for k in cells if k.startswith(TAXABLE)), None)
+            targets = ([(tax_k, cells[tax_k])] if tax_k else []) + items
+            for lab, c in targets:
+                if c.value is not None and not isinstance(c.value, (int, float)):
+                    bad2.append(f'{sn}!{c.coordinate}({lab})={c.value!r}')
 check('T2', '課税支給額と内訳がすべて数値セル', not bad2, '; '.join(bad2[:4]))
 
 print('=== T3 原本の網羅性（合計列 ＝ 転記値のSUM） ===')
@@ -247,101 +362,91 @@ for sn, p in parsed.items():
     if not monthly:
         continue          # 賞与/総合計だけのページは月次の勤怠を持たない
     for blk in monthly:
-        has_base = any(k.startswith(BASE) for k in blk['rows'])
-        has_time = any(k.startswith(TIME_HINTS) for k in blk['rows'])
+        # 形式②（行=従業員・列=項目）では項目名が列見出し側にある
+        labels = blk['heads'] if is_transposed(blk) else list(blk['rows'])
+        has_base = any(h.startswith(BASE) for h in labels)
+        has_time = any(h.startswith(TIME_HINTS) for h in labels)
         if not (has_base and has_time):
             ng4.append(f'{sn}: 基本給={has_base} 時間手掛かり={has_time}')
-    rr = next((v for blk in monthly for k, v in blk['rows'].items() if k.startswith('日額単価')), None)
+    rr = next((v for blk in monthly if not is_transposed(blk)
+               for k, v in blk['rows'].items() if k.startswith(RATE_HINTS)), None)
     if rr:
         n = sum(1 for blk in monthly for c in blk['data']
                 if isinstance(p['ws'].cell(rr, c).value, (int, float)))
         rate_pages.append((sn, n))
 check('T4', f'月次ページすべてで基本給＋労働時間の手掛かりあり', not ng4, '; '.join(ng4[:4]))
-print(f'    日額単価が転記されたページ: {len(rate_pages)}/{len(parsed)}'
-      + (f' {rate_pages}' if rate_pages else '（この台帳形式には日額単価の印字なし）'))
+print(f'    単価（日額/時給）が転記されたページ: {len(rate_pages)}/{len(parsed)}'
+      + (f' {rate_pages}' if rate_pages else '（この台帳形式には単価の印字なし）'))
 
-print('=== T5 通勤手当の課税区分（課税扱いなら R216 に含まれる。§3.1.1） ===')
-taxed_commute, nontax_ok, undecidable = {}, 0, {}
+print('=== T5 通勤手当のS列整合（控除漏れ・二重控除の検知。§3.1） ===')
+states, amounts = {}, {}
+anon = {'included': 0, 'excluded': 0, 'unknown': 0}
 for sn, p in parsed.items():
-    ws = p['ws']
     for blk in p['blocks']:
-        rows = blk['rows']
-        com_r = next((v for k, v in rows.items()
-                      if k.startswith(COMMUTE) and not k.startswith(NONTAX_COMMUTE + TAXED_COMMUTE)), None)
-        ntcom_r = next((v for k, v in rows.items() if k.startswith(NONTAX_COMMUTE)), None)
-        txcom_r = next((v for k, v in rows.items() if k.startswith(TAXED_COMMUTE)), None)
-        nt_r = next((v for k, v in rows.items() if k.startswith(NONTAX)), None)
-        tax_r = next((v for k, v in rows.items() if k.startswith(TAXABLE)), None)
-        gross_r = next((v for k, v in rows.items()
-                        if k.startswith('総支給額') and v != tax_r), None)
-        for c in blk['data']:
-            head = norm(ws.cell(p['name_row'], c).value) or norm(ws.cell(p['hdr'], c).value)
-            def num(r):
-                v = ws.cell(r, c).value if r else None
-                return v if isinstance(v, (int, float)) else None
-
-            # ケースA: 通勤費が課税/非課税で別行に分かれている形式＝そのまま確定できる
-            if txcom_r or ntcom_r:
-                tc, nc = num(txcom_r) or 0, num(ntcom_r) or 0
-                if tc > 0:
-                    taxed_commute.setdefault(head, []).append((sn, tc))
-                elif nc > 0:
-                    nontax_ok += 1
+        for name, m in entity_maps(p['ws'], p, blk):
+            st, amt = commute_state(m)
+            if st == 'none':
                 continue
-
-            com = num(com_r)
-            if not (com and com > 0):
+            if not name or name in LABEL_HEADS:
+                anon[st] += 1          # 氏名が取れないブロック（No.見出しだけ等）
                 continue
+            states.setdefault(name, set()).add(st)
+            if amt:
+                amounts.setdefault(name, []).append(amt)
 
-            # ケースB: 全体の非課税額が分かる（非課税支給額の行 or 総支給額−課税支給額）
-            nt = num(nt_r)
-            if nt is None and gross_r and tax_r:
-                g, t = num(gross_r), num(tax_r)
-                nt = (g - t) if (g is not None and t is not None) else None
-            if nt is None:
-                undecidable.setdefault(head, []).append((sn, com))     # 区分の手掛かりが台帳に無い
-            elif nt == 0:
-                taxed_commute.setdefault(head, []).append((sn, com))   # 非課税0＝通勤手当は全額課税で確定
-            elif abs(nt - com) < 0.5:
-                nontax_ok += 1                                         # 非課税額＝通勤手当額＝非課税処理で確定
-            else:
-                undecidable.setdefault(head, []).append((sn, com))     # 他の非課税項目と混在＝切り分け不能
+s_col = ledger_transport(wb)
+missing, doubled, unknown_names, mixed, ok5 = [], [], [], [], 0
+for name, sts in sorted(states.items()):
+    if 'included' in sts and 'excluded' in sts:
+        mixed.append(name)
+        continue
+    st = 'included' if 'included' in sts else ('excluded' if 'excluded' in sts else 'unknown')
+    if st == 'unknown':
+        unknown_names.append(name)
+        continue
+    if s_col is None:
+        ok5 += 1
+        continue
+    sv = s_col.get(name)
+    if st == 'included' and not sv:
+        missing.append((name, sum(amounts.get(name, []))))
+    elif st == 'excluded' and sv:
+        doubled.append((name, sv))
+    else:
+        ok5 += 1
 
-msgs = []
-if nontax_ok:
-    msgs.append(f'非課税処理と確定 {nontax_ok}件（課税支給合計から自動的に除外＝対応不要）')
-if not taxed_commute and not undecidable:
-    print('    ' + ('／'.join(msgs) if msgs else '通勤手当の支給なし、または区分の手掛かりが無い'))
-    check('T5', '通勤手当の課税区分に確認事項なし', True)
+n_inc = sum(1 for s in states.values() if s == {'included'})
+n_exc = sum(1 for s in states.values() if s == {'excluded'})
+if not states and not any(anon.values()):
+    print('    通勤手当の印字なし＝支給なし（控除不要）。§9 には「対象なし（支給なし）」と書く')
 else:
-    if msgs:
-        print('    ' + '／'.join(msgs))
-    suspicious = []
-    if taxed_commute:
-        print(f'    [課税扱いで確定] {len(taxed_commute)}名 → R216 に含まれる扱いになる:')
-        for nm, recs in taxed_commute.items():
-            amounts = sorted({v for _, v in recs})
-            within = max(amounts) <= max(COMMUTE_LIMITS)
-            print(f'      {nm}: {len(recs)}ヶ月 / 月額 {min(amounts):,}〜{max(amounts):,} 円'
-                  + ('  ← 非課税限度額（最大31,600円）の範囲内' if within else ''))
-            if within:
-                suspicious.append(nm)
-        print('    → 公募要領 p.10 は「給与所得として課税対象となる経費」を算定対象とするので、'
-              '課税扱いのままなら R216 に含めるのが正しい（勝手に減算しない）。')
-        if suspicious:
-            print(f'    → ただし {len(suspicious)}名は支給額が非課税限度額の範囲内。'
-                  '本来非課税（会社の課税処理が誤り）の可能性があるため、'
-                  '**通勤距離・通勤手段を顧客に確認**し §9 報告に判断を明記する（§3.1.1）。')
-    if undecidable:
-        print(f'    [課税/非課税を台帳から切り分けられない] {len(undecidable)}名:')
-        for nm, recs in list(undecidable.items())[:8]:
-            amounts = sorted({v for _, v in recs})
-            print(f'      {nm}: {len(recs)}ヶ月 / 月額 {min(amounts):,}〜{max(amounts):,} 円')
-        print('    → 台帳に通勤手当ごとの課税区分が印字されていない（または他の非課税項目と'
-              '混在して差分から特定できない）。**原本PDFで課税欄／非課税欄のどちらに'
-              '計上されているかを確認**し、判断を §9 に明記する。')
-    check('T5', '通勤手当の課税区分を確認済みか（顧客・原本確認が必要）', False,
-          f'課税扱い{len(taxed_commute)}名（限度額内{len(suspicious)}名）/ 切り分け不能{len(undecidable)}名')
+    print(f'    判定: 課税支給額に含まれる {n_inc}名 / 非課税処理済み {n_exc}名 / '
+          f'判定不能 {len(unknown_names)}名 / 混在 {len(mixed)}名'
+          + (f' / 氏名が取れないブロック {anon}' if any(anon.values()) else ''))
+if s_col is None and states:
+    print(f'    ⚠ 同じブックに「{LEDGER_SHEET}」シートが無いため S列との突合はスキップした')
+if missing:
+    print(f'    🔴 [控除漏れ] {len(missing)}名 — 課税支給額に通勤手当が含まれているのに S列が空:')
+    for nm, tot in missing[:10]:
+        print(f'      {nm}: 転記シート上の通勤手当合計 {tot:,.0f} 円')
+    print('    → 2026-07-27 運用では課税扱いの通勤手当も控除する（§3.1）。転記シートは対象年度外の'
+          'ページも含むので、S列には**対象12ヶ月分だけ**を集計した年額を入れる')
+if doubled:
+    print(f'    🔴 [二重控除] {len(doubled)}名 — 非課税処理済みなのに S列に値がある:')
+    for nm, sv in doubled[:10]:
+        print(f'      {nm}: S列={sv:,.0f} 円 → 空欄にする')
+    print('    → 課税支給合計にはそもそも通勤手当が入っていない。S列を埋めると引かれるのは'
+          '基本給・残業手当で、R216 が過小になる')
+if mixed:
+    print(f'    ⚠ [判定が混在] {mixed[:10]} — ページによって課税/非課税処理が違う。'
+          '対象事業年度のページの処理に合わせ、根拠を §9 に書く')
+if unknown_names:
+    print(f'    ℹ [判定不能] {len(unknown_names)}名 {unknown_names[:8]} — 内訳から課税支給額との関係が'
+          '決まらない（諸手当に合算・項目の取り違え等）。**控除せず** §9 に「未控除（内訳不明）」と'
+          '理由・人数を書く（顧客に内訳を催促しない。§3.1.1）')
+check('T5', f'S列が §3.1 の判定表と整合（整合 {ok5}名）',
+      not (missing or doubled or mixed),
+      f'控除漏れ{len(missing)}名 / 二重控除{len(doubled)}名 / 混在{len(mixed)}名')
 
 nfail = sum(1 for _, ok in results if not ok)
 print()
@@ -349,6 +454,6 @@ if nfail:
     print(f'=== 要確認 {nfail}件 ===（NGはPDF原本で確認し、§9 報告に判断を明記してから完了報告へ。'
           '原本側の不整合なら該当セルを黄色にして注記する）')
 else:
-    print('=== PASS ===（T1〜T4 すべて成立。ただし転記の「真」はPDF原本なので '
+    print('=== PASS ===（T1〜T5 すべて成立。ただし転記の「真」はPDF原本なので '
           '§5.5-3 の目視突合は別途必要）')
 sys.exit(1 if nfail else 0)

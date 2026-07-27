@@ -31,6 +31,7 @@ DATA_START_ROW = 6
 COL_NAME = 3        # C
 COL_TYPE = 4        # D 雇用形態
 COL_HOURS = 5       # E 月平均時間
+COL_HOURLY = 6      # F 時給
 COL_MONTH_FIRST = 7   # G (1月)
 COL_MONTH_LAST = 18   # R (12月)
 COL_TRANSPORT = 19    # S 年間通勤手当
@@ -161,6 +162,7 @@ def main(argv):
             'name': str(name).strip(),
             'type': str(ws.cell(r, COL_TYPE).value or '').strip(),
             'hours': _num(ws.cell(r, COL_HOURS).value),
+            'hourly': _num(ws.cell(r, COL_HOURLY).value),
             'months': months,
             'S': _num(ws.cell(r, COL_TRANSPORT).value),
             'T': _num(ws.cell(r, COL_BONUS).value),
@@ -228,18 +230,24 @@ def main(argv):
             confirm.append('FLAG-R 原本転記が集計行のみの疑い（全項目転記か確認）')
             print()
 
-    # --- ① S列二重控除（要確認: 月列の素性は機械では決められないのでPDF確認必須） ---
+    # --- ① 通勤手当S列（2026-07-27 運用: 月列に含まれる通勤手当を控除する）---
+    # 月列の素性（課税支給合計か通勤費込み合計か）と通勤手当の課税区分は、従業員別明細だけを
+    # 見るこのスクリプトでは決められない。転記シートがあれば verify_transcript.py の T5 が
+    # 機械判定する（§5.5-2b）。ここでは値の有無を提示して報告への明記を促す。
     s_rows = [e for e in rows if e['S'] is not None and e['S'] > 0]
-    print('[FLAG-S 通勤手当S列に値がある行]（バグ①二重控除の候補）')
+    print(f'[FLAG-S 通勤手当S列]（値あり {len(s_rows)}行 / 空 {len(rows) - len(s_rows)}行）')
+    for e in s_rows:
+        print(f"  行{e['row']} {e['name']}: S={e['S']:,.0f}")
+    print('  → S列に入れるのは「月列（G〜R）の値に**含まれている**通勤手当の年額」（§3.1 の判定表）:')
+    print('     ・月列=課税支給合計 かつ 通勤手当が課税支給額に含まれる → S列に年額（控除する）')
+    print('     ・月列=課税支給合計 かつ 通勤手当が非課税処理済み       → S列は空（埋めると基本給を削る）')
+    print('     ・月列=「合計（通勤費込み）」                          → S列に通勤手当の全額')
     if s_rows:
-        for e in s_rows:
-            print(f"  行{e['row']} {e['name']}: S={e['S']:,.0f}")
-        print('  → 月列に「課税支給合計」を入れたなら S列は空が正（§3.1/§5-F：埋めると二重控除で'
-              'R216過小）。月列が「合計（通勤費込み）」ならS列保持が正。'
-              '**PDFで月列の素性を確認し、報告に判断を明記**。')
-        confirm.append(f'FLAG-S {len(s_rows)}件（S列の要否をPDFで確認）')
+        confirm.append(f'FLAG-S {len(s_rows)}件（S列の値が §3.1 判定表どおりか確認）')
     else:
-        print('  なし（S列は全行空 or 0）')
+        print('  → S列が全行空。**「支給なし」「未控除（内訳不明）」「判定して空が正」のどれなのかを'
+              '§9 報告に1行書く**（無言の未控除を許さない。§3.1.1）')
+        confirm.append('FLAG-S S列が全行空（支給なし/未控除/空が正 のどれかを報告に明記）')
     print()
 
     # --- ② 月配置ズレ（観測材料のみ。確定はPDF突合＝§5.5-3で人手必須） ---
@@ -328,6 +336,31 @@ def main(argv):
         for e in part_no_hours:
             print(f"  行{e['row']} {e['name']}: 雇用形態=「{e['type']}」だがE列空")
         fail.append(f'パートでE列空 {len(part_no_hours)}件')
+        print()
+
+    # --- ④-c パートの時給（F列）: 要確認。FTE は E列のみに依存するので FAIL にはしない ---
+    # F列は R215/R216 の計算には使わないが、最低賃金判定・加点①の材料になる。
+    # 欠落と桁誤り（E列・F列・月列のどれかの取り違え）を検知する。
+    rate_missing, rate_odd = [], []
+    for e in rows:
+        if not any(t in e['type'] for t in PART_TRIGGERS):
+            continue
+        paid = [v for v in e['months'] if v]
+        if e['hourly'] is None:
+            if paid:
+                rate_missing.append(e)
+        elif e['hours'] and paid and e['hourly'] > 0:
+            est = _median(paid) / e['hours']
+            if not 0.75 <= est / e['hourly'] <= 1.25:
+                rate_odd.append((e, est))
+    if rate_missing or rate_odd:
+        print('[要確認 パートの時給(F列)]（最賃判定・加点①の材料。原本転記の時給/単価行から埋める）')
+        for e in rate_missing:
+            print(f"  行{e['row']} {e['name']}: F列(時給)が空")
+        for e, est in rate_odd:
+            print(f"  行{e['row']} {e['name']}: F列={e['hourly']:,.0f} だが 月額中位÷E列={est:,.0f}"
+                  '（±25%超の乖離。E列・F列・月列のどれかが誤り）')
+        confirm.append(f'F列(時給) {len(rate_missing) + len(rate_odd)}件（欠落 or 月額との乖離）')
         print()
 
     # --- FLAG-H 月ヘッダー規格外（注記付き等。ツールが月列を検出できず0名誤読する事故の pre-ship 検知）---
