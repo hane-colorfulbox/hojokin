@@ -42,6 +42,8 @@ TAXABLE = ('課税支給額', '総支給額(課税)', '課税分給与額')
 BASE = ('基本給', '賞与額', '基本給区分')
 COMMUTE = '通勤手当'
 NONTAX = ('非課税支給額', '非課税分', '非課税計')
+NONTAX_COMMUTE = ('非課税通勤',)      # 「非課税通勤費」等＝通勤の非課税分が単独で印字される形式
+TAXED_COMMUTE = ('課税通勤',)         # 「課税通勤費」等
 # 国税庁 No.2585 マイカー・自転車通勤の非課税限度額（月額）。片道2km未満は0円＝全額課税が正。
 COMMUTE_LIMITS = (4200, 7100, 12900, 18700, 24400, 28000, 31600)
 NON_PAY = ('項目', '氏名', '扶養家族', '出勤日数', '休日出勤', '有給休暇', '普通残業', '休日残業',
@@ -259,56 +261,87 @@ print(f'    日額単価が転記されたページ: {len(rate_pages)}/{len(pars
       + (f' {rate_pages}' if rate_pages else '（この台帳形式には日額単価の印字なし）'))
 
 print('=== T5 通勤手当の課税区分（課税扱いなら R216 に含まれる。§3.1.1） ===')
-taxed_commute, nontax_commute = {}, 0
+taxed_commute, nontax_ok, undecidable = {}, 0, {}
 for sn, p in parsed.items():
     ws = p['ws']
     for blk in p['blocks']:
-        com_r = next((v for k, v in blk['rows'].items() if k.startswith(COMMUTE)), None)
-        nt_r = next((v for k, v in blk['rows'].items() if k.startswith(NONTAX)), None)
-        tax_r = next((v for k, v in blk['rows'].items() if k.startswith(TAXABLE)), None)
-        gross_r = next((v for k, v in blk['rows'].items()
+        rows = blk['rows']
+        com_r = next((v for k, v in rows.items()
+                      if k.startswith(COMMUTE) and not k.startswith(NONTAX_COMMUTE + TAXED_COMMUTE)), None)
+        ntcom_r = next((v for k, v in rows.items() if k.startswith(NONTAX_COMMUTE)), None)
+        txcom_r = next((v for k, v in rows.items() if k.startswith(TAXED_COMMUTE)), None)
+        nt_r = next((v for k, v in rows.items() if k.startswith(NONTAX)), None)
+        tax_r = next((v for k, v in rows.items() if k.startswith(TAXABLE)), None)
+        gross_r = next((v for k, v in rows.items()
                         if k.startswith('総支給額') and v != tax_r), None)
-        if com_r is None or (nt_r is None and not (tax_r and gross_r)):
-            continue          # 課税/非課税の区別が台帳から読めない形式は判定対象外
         for c in blk['data']:
-            com = ws.cell(com_r, c).value
-            if not (isinstance(com, (int, float)) and com > 0):
-                continue
-            if nt_r is not None:
-                nt = ws.cell(nt_r, c).value
-            else:                              # 非課税欄が無い台帳は 総支給額 − 課税支給額 で算出
-                g, t = ws.cell(gross_r, c).value, ws.cell(tax_r, c).value
-                nt = (g - t) if isinstance(g, (int, float)) and isinstance(t, (int, float)) else None
             head = norm(ws.cell(p['name_row'], c).value) or norm(ws.cell(p['hdr'], c).value)
-            if isinstance(nt, (int, float)) and nt > 0:
-                nontax_commute += 1          # 非課税処理済み＝課税支給合計から自動的に除かれる
-            elif isinstance(nt, (int, float)):
-                taxed_commute.setdefault(head, []).append((sn, com))
-if not taxed_commute:
-    print('    課税扱いの通勤手当なし'
-          + (f'（非課税処理された通勤手当 {nontax_commute}件＝課税支給合計から自動的に除外）'
-             if nontax_commute else '（通勤手当の行に値なし、または非課税欄の行が無い）'))
+            def num(r):
+                v = ws.cell(r, c).value if r else None
+                return v if isinstance(v, (int, float)) else None
+
+            # ケースA: 通勤費が課税/非課税で別行に分かれている形式＝そのまま確定できる
+            if txcom_r or ntcom_r:
+                tc, nc = num(txcom_r) or 0, num(ntcom_r) or 0
+                if tc > 0:
+                    taxed_commute.setdefault(head, []).append((sn, tc))
+                elif nc > 0:
+                    nontax_ok += 1
+                continue
+
+            com = num(com_r)
+            if not (com and com > 0):
+                continue
+
+            # ケースB: 全体の非課税額が分かる（非課税支給額の行 or 総支給額−課税支給額）
+            nt = num(nt_r)
+            if nt is None and gross_r and tax_r:
+                g, t = num(gross_r), num(tax_r)
+                nt = (g - t) if (g is not None and t is not None) else None
+            if nt is None:
+                undecidable.setdefault(head, []).append((sn, com))     # 区分の手掛かりが台帳に無い
+            elif nt == 0:
+                taxed_commute.setdefault(head, []).append((sn, com))   # 非課税0＝通勤手当は全額課税で確定
+            elif abs(nt - com) < 0.5:
+                nontax_ok += 1                                         # 非課税額＝通勤手当額＝非課税処理で確定
+            else:
+                undecidable.setdefault(head, []).append((sn, com))     # 他の非課税項目と混在＝切り分け不能
+
+msgs = []
+if nontax_ok:
+    msgs.append(f'非課税処理と確定 {nontax_ok}件（課税支給合計から自動的に除外＝対応不要）')
+if not taxed_commute and not undecidable:
+    print('    ' + ('／'.join(msgs) if msgs else '通勤手当の支給なし、または区分の手掛かりが無い'))
     check('T5', '通勤手当の課税区分に確認事項なし', True)
 else:
-    print(f'    通勤手当が課税扱い（非課税支給額=0）の従業員 {len(taxed_commute)}名'
-          '→ R216 に含まれる扱いになる:')
+    if msgs:
+        print('    ' + '／'.join(msgs))
     suspicious = []
-    for nm, recs in taxed_commute.items():
-        amounts = sorted({v for _, v in recs})
-        mx = max(amounts)
-        within = mx <= max(COMMUTE_LIMITS)
-        print(f'      {nm}: {len(recs)}ヶ月 / 月額 {min(amounts):,}〜{mx:,} 円'
-              + ('  ← 非課税限度額（最大31,600円）の範囲内' if within else ''))
-        if within:
-            suspicious.append(nm)
-    print('    → 公募要領 p.10 は「給与所得として課税対象となる経費」を算定対象とするので、'
-          '課税扱いのままなら R216 に含めるのが正しい（勝手に減算しない）。')
-    if suspicious:
-        print(f'    → ただし {len(suspicious)}名は支給額が非課税限度額の範囲内。'
-              '本来非課税（会社の課税処理が誤り）の可能性があるため、'
-              '**通勤距離・通勤手段を顧客に確認**し §9 報告に判断を明記する（§3.1.1 の限度額表）。')
-    check('T5', '通勤手当の課税区分を確認済みか（顧客確認が必要）', False,
-          f'{len(taxed_commute)}名が課税扱い（うち限度額内 {len(suspicious)}名）')
+    if taxed_commute:
+        print(f'    [課税扱いで確定] {len(taxed_commute)}名 → R216 に含まれる扱いになる:')
+        for nm, recs in taxed_commute.items():
+            amounts = sorted({v for _, v in recs})
+            within = max(amounts) <= max(COMMUTE_LIMITS)
+            print(f'      {nm}: {len(recs)}ヶ月 / 月額 {min(amounts):,}〜{max(amounts):,} 円'
+                  + ('  ← 非課税限度額（最大31,600円）の範囲内' if within else ''))
+            if within:
+                suspicious.append(nm)
+        print('    → 公募要領 p.10 は「給与所得として課税対象となる経費」を算定対象とするので、'
+              '課税扱いのままなら R216 に含めるのが正しい（勝手に減算しない）。')
+        if suspicious:
+            print(f'    → ただし {len(suspicious)}名は支給額が非課税限度額の範囲内。'
+                  '本来非課税（会社の課税処理が誤り）の可能性があるため、'
+                  '**通勤距離・通勤手段を顧客に確認**し §9 報告に判断を明記する（§3.1.1）。')
+    if undecidable:
+        print(f'    [課税/非課税を台帳から切り分けられない] {len(undecidable)}名:')
+        for nm, recs in list(undecidable.items())[:8]:
+            amounts = sorted({v for _, v in recs})
+            print(f'      {nm}: {len(recs)}ヶ月 / 月額 {min(amounts):,}〜{max(amounts):,} 円')
+        print('    → 台帳に通勤手当ごとの課税区分が印字されていない（または他の非課税項目と'
+              '混在して差分から特定できない）。**原本PDFで課税欄／非課税欄のどちらに'
+              '計上されているかを確認**し、判断を §9 に明記する。')
+    check('T5', '通勤手当の課税区分を確認済みか（顧客・原本確認が必要）', False,
+          f'課税扱い{len(taxed_commute)}名（限度額内{len(suspicious)}名）/ 切り分け不能{len(undecidable)}名')
 
 nfail = sum(1 for _, ok in results if not ok)
 print()
