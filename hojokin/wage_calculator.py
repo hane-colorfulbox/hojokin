@@ -902,7 +902,7 @@ def create_wage_calculation(
     _cell(
         ws1, r, 2,
         '【給与支給総額の算定】※公募要領 p.10／応募申請の手引き p.24：'
-        '給与支給総額は賃金台帳の課税給与（役員報酬・通勤費非課税分・中途者除外）',
+        '給与支給総額は賃金台帳の課税給与（役員報酬・通勤手当・中途者を除外）',
         HEADER_FONT, border=None,
     )
     r += 1
@@ -919,7 +919,7 @@ def create_wage_calculation(
         _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', fmt=NUMBER_FMT)
         _cell(ws1, r, 4,
               f'機械計算: =C{a_row}-C{b_row}（決算書PL値ベース。賃金台帳ベース値との'
-              f'突合チェックに使用。通勤費非課税分・中途者を含むため R216 母数とは差が出る）',
+              f'突合チェックに使用。通勤手当・中途者を含むため R216 母数とは差が出る）',
               SMALL_FONT)
         r += 1
     # メイン: 賃金台帳ベース給与支給総額（R216）
@@ -934,7 +934,8 @@ def create_wage_calculation(
               f'機械計算: ={ledger_total_cell}（「従業員別明細」シートの12ヶ月在籍合計を参照。'
               f'出典: 賃金台帳「{ledger_source}」の各従業員の課税支給合計列を12ヶ月分集計し、'
               f'12ヶ月在籍者のみを抽出した値。'
-              f'公募要領 p.10／実務知識ベース R216 定義：役員報酬・非課税通勤手当を除外）',
+              f'公募要領 p.10／実務知識ベース R216 定義：役員報酬を除外。'
+              f'通勤手当は課税・非課税を問わず除外（2026-07-27 社内運用））',
               SMALL_FONT, fill=FILL_GREEN)
     else:
         # フォールバック: 賃金台帳由来データなし → 決算書PL値 (A-B) を採用
@@ -943,7 +944,7 @@ def create_wage_calculation(
         _cell(ws1, r, 3, f'=C{a_row}-C{b_row}', BOLD_FONT, NUMBER_FMT, FILL_YELLOW)
         _cell(ws1, r, 4,
               f'機械計算: =C{a_row}-C{b_row}（賃金台帳由来データが無いため決算書PL値で代用。'
-              f'通勤費非課税分・中途者を含むため R216 厳密値より過大評価の可能性あり）',
+              f'通勤手当・中途者を含むため R216 厳密値より過大評価の可能性あり）',
               SMALL_FONT, fill=FILL_YELLOW)
 
     # 従業員数

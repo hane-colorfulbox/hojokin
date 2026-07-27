@@ -214,9 +214,11 @@ class WageEmployee:
     )
     # データソース（抽出根拠の元ファイル名）。複数ファイル統合時は '統合(Nファイル)'
     source_file: str = ''
-    # 年間通勤手当（非課税分のみ、円）。AI が抽出できた場合のみ > 0。
-    # R216 算定対象から除外するため、ツール側で在籍月数で均等割して各月から減算する。
-    # 既存呼出は 0.0（未設定）で動作、賃金台帳の作成タスクで S列に書き出す用途に使う。
+    # 年間通勤手当（円）。**monthly_wages に含まれている通勤手当の年額**を入れる。
+    # 課税・非課税は問わない（2026-07-27 運用：どちらも R216 から控除する）。
+    # 逆に monthly_wages に含まれていない通勤手当（非課税処理済みの台帳など）を入れてはいけない。
+    # 入れると減算されるのは通勤手当ではなく基本給・残業手当になり R216 が過小になる。
+    # ツール側で在籍月数で均等割して各月から減算し、減算後は 0.0 に消費する（二重減算防止）。
     annual_transport_allowance: float = 0.0
     # 年間賞与（課税賞与の合計、円）。R216（給与支給総額）に算入するが、月次セル
     # （monthly_wages）には混ぜない。賞与を月次に混ぜると最低賃金判定（加点①）や
@@ -240,6 +242,14 @@ class WageEmployee:
     # AI が誤った年月を付けた賞与が無言で R216 から落ちるのを変換メモで可視化するための情報。
     # 多年度台帳での正常な除外でも > 0 になり得る（アラートではなく情報表示用）。
     bonus_dropped_total: float = 0.0
+    # 通勤手当として monthly_wages から実際に減算した額（円）。annual_transport_allowance は
+    # 減算後に 0.0 へ消費されるため、消費前の額をここに残さないと「いくら引いたか」が
+    # writer・変換メモ・報告から追えなくなる（監査可能性のための記録。算定には使わない）。
+    transport_deducted_total: float = 0.0
+    # 通勤手当の減算で月額が 0 円に床止めされた月数。> 0 なら is_full_year が False になり、
+    # その従業員が R215/R216 から丸ごと落ちる（中途入社・退職とは原因が違う）。
+    # 控除額が増える 2026-07-27 運用で発生確率が上がるため、警告 surfacing 用に記録する。
+    transport_clamped_months: int = 0
 
     @property
     def is_full_year(self) -> bool:
@@ -378,8 +388,10 @@ _HEADER_ALIASES = {
     'total':      ['支給合計額', '支給合計', '総支給額', '総支給'],
     'paid_date':  ['支給日', '支払日'],
     'month_col':  ['対象年月', '給与年月', '支給年月', '年月'],
-    # 年間通勤手当（非課税分）。集計表型のみ有効。在籍月数で均等割して
-    # monthly_wages から減算する（R216 公募要領 p.10 の課税給与定義に揃える）
+    # 年間通勤手当。集計表型のみ有効。在籍月数で均等割して monthly_wages から減算する。
+    # 入る額は「月列の値に含まれている通勤手当の年額」（課税・非課税を問わない。2026-07-27 運用）。
+    # ★このヘッダー文字列が減算のトリガー★ なので変更するときは wage_ledger_writer の
+    #   S5 見出し・スキル側テンプレ・_debug/test_fiscal_window_roundtrip と同時に直すこと。
     'transport_annual': ['年間通勤手当', '年間通勤費',
                          '通勤手当(年間)', '通勤費(年間)',
                          '非課税通勤手当(年間)'],
@@ -561,12 +573,20 @@ def _new_emp_record(name: str, emp_type: str = '') -> dict:
         'hourly_rate_flat': 0.0,
         'avg_hours_flat': 0.0,
         'annual_bonus': 0.0,
+        'transport_deducted_total': 0.0,
+        'transport_clamped_months': 0,
     }
 
 
 def _parse_section_rowwise(ws, header_row: int, end_row: int,
                            fmap: dict, emp_data: dict) -> None:
-    """月別行型 or YYYYMM月次型 のデータ行を処理（月=行方向）"""
+    """月別行型 or YYYYMM月次型 のデータ行を処理（月=行方向）
+
+    ⚠ この形式は S列「年間通勤手当」（transport_annual）を読まない（集計表型専用）。
+    月額は「課税支給合計」列、無ければ「支給合計 − 非課税額」で決まるため、**課税処理された
+    通勤手当は月額に残る**（2026-07-27 運用の全額控除が効かない）。控除まで効かせるには
+    ローカル（wagebook-convert スキル）で標準テンプレ＝集計表型に変換してから読ませる。
+    """
     col_name = fmap['name']
     col_total_taxable = fmap.get('total_taxable')
     col_total = fmap.get('total')
@@ -696,14 +716,27 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
                 ]
                 if non_null:
                     per_month = ta / len(non_null)
+                    clamped = 0
                     for m in non_null:
-                        rec['monthly_wages'][m] = max(
-                            0.0, rec['monthly_wages'][m] - per_month
-                        )
+                        v = rec['monthly_wages'][m] - per_month
+                        if v <= 0:
+                            clamped += 1      # 0\u5186\u5316\uff1d\u3053\u306e\u4eba\u306f\u5168\u6708\u652f\u7d66\u3067\u306a\u304f\u306a\u308a\u7b97\u5b9a\u304b\u3089\u843d\u3061\u308b
+                            v = 0.0
+                        rec['monthly_wages'][m] = v
+                    rec['transport_deducted_total'] = (
+                        rec.get('transport_deducted_total') or 0.0) + ta
+                    rec['transport_clamped_months'] = clamped
                     logger.info(
                         f'\u901a\u52e4\u624b\u5f53\u6e1b\u7b97: {name} \u5e74\u9593{ta:,.0f}\u5186 \u00f7 '
                         f'\u5728\u7c4d{len(non_null)}\u30f6\u6708 = \u6708{per_month:,.0f}\u5186\u6e1b'
                     )
+                    if clamped:
+                        logger.warning(
+                            f'\u901a\u52e4\u624b\u5f53\u6e1b\u7b97\u3067\u6708\u984d0\u5186\u5316: {name} {clamped}\u30f6\u6708'
+                            f'\uff08\u5e74\u9593{ta:,.0f}\u5186 \u00f7 \u5728\u7c4d{len(non_null)}\u30f6\u6708'
+                            f' = \u6708{per_month:,.0f}\u5186\uff09\u2192 \u5168\u6708\u652f\u7d66\u3067\u306a\u304f\u306a\u308a'
+                            ' R215/R216 \u304b\u3089\u9664\u5916\u3055\u308c\u308b\u3002S\u5217\u306e\u984d\u3068\u5728\u7c4d\u6708\u6570\u3092\u78ba\u8a8d\u3059\u308b\u3053\u3068'
+                        )
 
         # \u5e74\u9593\u8cde\u4e0e\uff08T\u5217\uff09: \u6708\u6b21\u30bb\u30eb\u306b\u306f\u6df7\u305c\u305a\u5c02\u7528\u30d5\u30a3\u30fc\u30eb\u30c9\u306b\u4fdd\u6301 \u2192 R216 \u306b\u52a0\u7b97\uff08\u516c\u52df\u8981\u9818 p.10\uff09\u3002
         # \u8cde\u4e0e\u3092\u6708\u6b21\u306b\u6df7\u305c\u308b\u3068\u6700\u4f4e\u8cc3\u91d1\u5224\u5b9a\u30fb\u76f4\u8fd13\u30f6\u6708\u304c\u6b6a\u3080\u305f\u3081\u9694\u96e2\u3059\u308b\u3002
@@ -1118,6 +1151,8 @@ def _emp_dict_to_list(emp_data: dict) -> list[WageEmployee]:
             monthly_hourly_rates=data['monthly_hourly_rates'],
             monthly_hours=data['monthly_hours'],
             annual_bonus=float(data.get('annual_bonus') or 0.0),
+            transport_deducted_total=float(data.get('transport_deducted_total') or 0.0),
+            transport_clamped_months=int(data.get('transport_clamped_months') or 0),
         ))
     return employees
 
@@ -1745,25 +1780,41 @@ def _ai_data_to_wage_employees(
         if atransport_val < 0:
             atransport_val = 0.0  # 負値は無視
 
-        # 非課税通勤手当が monthly_wages（支給合計＝通勤込み）に含まれている場合の課税額補正。
-        # AI プロンプトは「monthly_wages に課税支給合計を入れた場合は通勤費除外済み→atransport=0」
-        # を指示しているが、課税列が無い台帳で AI が通勤込みを入れ atransport>0 を返すことがある。
-        # その場合は在籍月数で均等割して monthly_wages から減算し、課税額（R216 母数）に揃える
+        # monthly_wages に含まれている通勤手当の控除（2026-07-27 運用：課税・非課税を問わず控除）。
+        # AI プロンプトは「monthly_wages に含まれている通勤手当の年額」を返すよう指示している。
+        # 在籍月数で均等割して monthly_wages から減算し、R216 の母数に揃える
         # （決定論パーサー _parse_section_summary の S列減算と同一ロジック）。
         # 減算後は atransport_val=0 とする（消費済み）。これにより賃金台帳作成タスクで S列に
-        # 二重計上→再読込時に二重減算、という不整合を防ぐ。不変条件「monthly_wages＝課税額」を担保。
+        # 二重計上→再読込時に二重減算、という不整合を防ぐ。
+        # ⚠ monthly_hourly_rates は減算**前**の月額で算出済み（上方の処理）。時給・最低賃金系の
+        #   値を通勤控除で歪めないための順序なので、この減算ブロックを前に動かさないこと。
+        _deducted, _clamped = 0.0, 0
         if atransport_val > 0:
             _non_null = [m for m in range(12) if monthly_wages[m] is not None]
             if _non_null:
                 _per_month = atransport_val / len(_non_null)
-                monthly_wages = [
-                    (max(0.0, w - _per_month) if w is not None else None)
-                    for w in monthly_wages
-                ]
+                _new_wages = []
+                for w in monthly_wages:
+                    if w is None:
+                        _new_wages.append(None)
+                        continue
+                    v = w - _per_month
+                    if v <= 0:
+                        _clamped += 1     # 0円化＝この人は全月支給でなくなり算定から落ちる
+                        v = 0.0
+                    _new_wages.append(v)
+                monthly_wages = _new_wages
+                _deducted = atransport_val
                 logger.info(
                     f'AI抽出: {emp_name} の年間通勤手当{atransport_val:,.0f}円を'
                     f'在籍{len(_non_null)}ヶ月で均等割し monthly_wages から減算（課税額補正）'
                 )
+                if _clamped:
+                    logger.warning(
+                        f'通勤手当減算で月額0円化: {emp_name} {_clamped}ヶ月'
+                        f'（年間{atransport_val:,.0f}円 ÷ 在籍{len(_non_null)}ヶ月）'
+                        ' → 全月支給でなくなり R215/R216 から除外される'
+                    )
             atransport_val = 0.0
 
         employees.append(WageEmployee(
@@ -1781,6 +1832,8 @@ def _ai_data_to_wage_employees(
             fiscal_window_note=window_note,
             bonus_undated_total=float(sum(emp.get('_bonus_undated') or [])),
             bonus_dropped_total=float(sum(emp.get('_bonus_dropped') or [])),
+            transport_deducted_total=_deducted,
+            transport_clamped_months=_clamped,
         ))
     return employees
 
@@ -2110,6 +2163,12 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
         bonus_dropped_total=max(
             a.bonus_dropped_total or 0.0, b.bonus_dropped_total or 0.0
         ),
+        transport_deducted_total=max(
+            a.transport_deducted_total or 0.0, b.transport_deducted_total or 0.0
+        ),
+        transport_clamped_months=max(
+            a.transport_clamped_months or 0, b.transport_clamped_months or 0
+        ),
     )
 
 
@@ -2276,6 +2335,90 @@ def _reconcile_midyear_positions_with_deterministic(
     return ai_employees
 
 
+def _read_ledger_transport_column(file_paths: list[Path]) -> dict[str, float]:
+    """標準テンプレの S列「年間通勤手当」を氏名キーで読む（減算前の生値）。
+
+    AI 経路は入力形式で分岐せず xlsx でも優先されるため（read_wage_ledgers）、S列に値のある
+    台帳で AI が annual_transport_allowance を返さないと控除が黙って落ちる。決定論なら
+    ヘッダー文字列で確実に読めるので、この列だけを読んで補正材料にする。
+    """
+    out: dict[str, float] = {}
+    aliases_tr = _HEADER_ALIASES['transport_annual']
+    aliases_nm = _HEADER_ALIASES['name']
+    for path in file_paths:
+        if path.suffix.lower() not in ('.xlsx', '.xlsm'):
+            continue
+        try:
+            wb = openpyxl.load_workbook(path, data_only=True)
+        except Exception as e:                       # 壊れたファイル等は黙って諦める
+            logger.debug(f'S列読み取りスキップ {path.name}: {e}')
+            continue
+        try:
+            for ws in _visible_worksheets(wb):
+                hdr = col_nm = col_tr = None
+                for r in range(1, min(ws.max_row, 12) + 1):
+                    nm_c = tr_c = None
+                    for c in range(1, min(ws.max_column, 40) + 1):
+                        lab = str(ws.cell(r, c).value or '').replace(' ', '').replace('　', '')
+                        if lab in aliases_nm and nm_c is None:
+                            nm_c = c
+                        if lab in aliases_tr and tr_c is None:
+                            tr_c = c
+                    if nm_c and tr_c:
+                        hdr, col_nm, col_tr = r, nm_c, tr_c
+                        break
+                if hdr is None:
+                    continue
+                for r in range(hdr + 1, ws.max_row + 1):
+                    nm = str(ws.cell(r, col_nm).value or '').replace('　', ' ').strip()
+                    v = _to_float(ws.cell(r, col_tr).value)
+                    if nm and v and v > 0:
+                        out[nm] = max(out.get(nm, 0.0), v)
+        finally:
+            wb.close()
+    return out
+
+
+def _apply_missing_transport_deduction(
+    employees: list[WageEmployee], file_paths: list[Path],
+) -> list[WageEmployee]:
+    """AI が取り落とした S列（年間通勤手当）の控除を決定論の値で補う。
+
+    AI 経路で既に減算済みの従業員（transport_deducted_total > 0）は触らない。
+    2026-07-27 運用で S列が常用されるようになり、この取りこぼしが実害化するため入れた補正。
+    """
+    s_col = _read_ledger_transport_column(file_paths)
+    if not s_col:
+        return employees
+    by_key = {_normalize_name_key(k): v for k, v in s_col.items()}
+    for emp in employees:
+        if emp.transport_deducted_total > 0:
+            continue
+        ta = by_key.get(_normalize_name_key(emp.name))
+        if not ta or ta <= 0:
+            continue
+        non_null = [m for m in range(12) if emp.monthly_wages[m] is not None]
+        if not non_null:
+            continue
+        per_month = ta / len(non_null)
+        clamped = 0
+        for m in non_null:
+            v = emp.monthly_wages[m] - per_month
+            if v <= 0:
+                clamped += 1
+                v = 0.0
+            emp.monthly_wages[m] = v
+        emp.transport_deducted_total = ta
+        emp.transport_clamped_months = clamped
+        emp.annual_transport_allowance = 0.0     # 消費済み（writer が S列に書き戻さない）
+        logger.warning(
+            f'AI が S列（年間通勤手当）を取り落としたため決定論で補正: {emp.name} '
+            f'年間{ta:,.0f}円 ÷ 在籍{len(non_null)}ヶ月 = 月{per_month:,.0f}円減'
+            + (f'（うち{clamped}ヶ月が0円化）' if clamped else '')
+        )
+    return employees
+
+
 def read_wage_ledgers(
     file_paths: list[Path],
     extractor=None,
@@ -2331,6 +2474,9 @@ def read_wage_ledgers(
                 ai_employees = _reconcile_midyear_positions_with_deterministic(
                     ai_employees, file_paths, fiscal_period_hint,
                 )
+                # S列（年間通勤手当）に値のある標準テンプレを AI 経路で読んだとき、AI が
+                # annual_transport_allowance を返さないと控除が落ちる。決定論で補う。
+                ai_employees = _apply_missing_transport_deduction(ai_employees, file_paths)
                 logger.info(f'賃金台帳合算結果(AI): {len(ai_employees)}名 ({len(file_paths)}ファイル)')
                 return ai_employees
             logger.warning('AI抽出が0件を返したため、決定論パーサーにフォールバック')
@@ -2532,7 +2678,7 @@ def export_wage_ledger_summary(
         row=3, column=1,
         value=(
             '※採用列: 賃金台帳の「課税支給合計」（給与所得として課税対象となる経費。'
-            '非課税通勤手当・社保等控除前）。'
+            '社保等控除前。月列に含まれていた通勤手当は控除済み）。'
             '出典: デジタル化・AI導入補助金2026 通常枠 公募要領 p.10。'
             '抽出経路と公募要領原文の引用は「算定根拠」シートを参照。'
         ),
@@ -2837,7 +2983,8 @@ def _write_calculation_basis_sheet(
         (
             '含まない経費',
             '福利厚生費・法定福利費・退職金・'
-            '非課税通勤手当（限度額内分、国税庁 No.2585 により給与所得に含まれない）',
+            '通勤手当（非課税分は国税庁 No.2585 により給与所得に含まれない。'
+            '課税分も 2026-07-27 の社内運用で除外）',
         ),
         ('役員の扱い', '集計対象外（デジタル化・AI導入補助金2026 通常枠 公募要領 p.10「役員報酬…は除く」）。ただし従業員0名の法人のみ役員で読み替え可'),
         (

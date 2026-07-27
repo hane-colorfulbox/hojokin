@@ -1128,6 +1128,15 @@ def run_application_transfer(
                 f'（除外は任意）は該当月を実支給額に修正、0円月に賞与支給があった場合は'
                 f'該当月に賞与額を記入し年間賞与欄から同額を差し引いて再実行してください'
             )
+            _tc_names = wage_plan.get('transport_clamped_names') or []
+            if _tc_names:
+                _tc_more = f' ほか{len(_tc_names) - 3}名' if len(_tc_names) > 3 else ''
+                wage_warning += (
+                    f' ⚠ {warn_tag("W-WAGE-004")}うち {", ".join(_tc_names[:3])}{_tc_more} は'
+                    f'通勤手当（S列）の月割減算で月額が0円になったことが原因です'
+                    f'（中途入社・退職ではありません）。S列の年額・在籍月数・月額の桁を確認し、'
+                    f'S列を実額に直して再実行してください'
+                )
 
         # 賞与のみ受給者（月次給与が全月0円）を算定対象外にした場合の通知
         # （v0.2.70、2026-06-11 ルール確定。賞与が R216 から落ちることを黙らせない）
@@ -1979,6 +1988,22 @@ def _calc_wage_plan_from_ledger(
                 f'({", ".join(result.excluded_partial_zero_names[:5])}'
                 f'{"..." if len(result.excluded_partial_zero_names) > 5 else ""})'
             )
+            # 除外理由の切り分け: 通勤手当（S列）の月割減算で0円化した人は中途入退社と
+            # 原因が違う。W-WAGE-002 の案内（「中途入社・退職なら正しい挙動」）が
+            # 誤誘導にならないよう別キーで持ち、警告文を分岐させる。
+            _clamped = {
+                getattr(e, 'name', '?') for e in employees_raw
+                if int(getattr(e, 'transport_clamped_months', 0) or 0) > 0
+            }
+            _clamped_excluded = [
+                n for n in result.excluded_partial_zero_names if n in _clamped
+            ]
+            if _clamped_excluded:
+                plan['transport_clamped_names'] = _clamped_excluded
+                logger.warning(
+                    f'うち{len(_clamped_excluded)}名は通勤手当（S列）の月割減算で'
+                    f'月額が0円化したことが原因: {_clamped_excluded}'
+                )
         if result.excluded_bonus_only_names:
             plan['excluded_bonus_only_count'] = len(
                 result.excluded_bonus_only_names
@@ -2698,6 +2723,32 @@ def _bonus_period_shift_warning(
     )
 
 
+def _transport_clamp_warning(employees) -> str | None:
+    """通勤手当（S列）の月割減算で月額が0円化した従業員の警告。該当なければ None。
+
+    0円の月があると is_full_year_paid が False になり、その従業員が R215/R216 から丸ごと
+    落ちる。中途入退社と同じ経路で除外されるため、原因が通勤手当だと分からないと誤った対処
+    （休職として実支給額に戻す）に誘導される。課税分も控除する 2026-07-27 運用で控除額が
+    増え、発生確率が上がるため明示する。
+    """
+    rows = [
+        (getattr(e, 'name', '?'),
+         int(getattr(e, 'transport_clamped_months', 0) or 0),
+         float(getattr(e, 'transport_deducted_total', 0.0) or 0.0))
+        for e in (employees or [])
+        if int(getattr(e, 'transport_clamped_months', 0) or 0) > 0
+    ]
+    if not rows:
+        return None
+    detail = '、'.join(f'{n}（{m}ヶ月・年額{t:,.0f}円）' for n, m, t in rows[:5])
+    return (
+        f'⚠ {warn_tag("W-WAGE-004")}通勤手当の月割減算で月額が0円になった従業員 {len(rows)}名: '
+        f'{detail}。0円の月があると「全月分の給与等の支給を受けた従業員」に非該当となり、'
+        'この従業員は R215/R216 から丸ごと除外されます（中途入社・退職とは原因が違います）。'
+        'S列の年額・在籍月数・月額の桁を確認してください'
+    )
+
+
 def _bonus_dropped_info_note(employees) -> str | None:
     """対象事業年度ウィンドウ外として除外した賞与（支給年月あり）を情報表示（③の補足）。
 
@@ -3073,6 +3124,10 @@ def run_wage_ledger_conversion(
         _bonus_note = _bonus_period_shift_warning(employees, fiscal_month_override)
         if _bonus_note:
             window_notes.append(_bonus_note)
+        # 通勤手当の月割減算で0円化＝その人が算定から落ちる件を surface（W-WAGE-004）
+        _tc_note = _transport_clamp_warning(employees)
+        if _tc_note:
+            window_notes.append(_tc_note)
         # 対象年度外として除外した「支給年月あり」賞与の情報表示（E1）。AI 年月誤読の見逃し防止。
         _dropped_note = _bonus_dropped_info_note(employees)
         if _dropped_note:

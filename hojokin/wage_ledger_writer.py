@@ -608,8 +608,12 @@ def _write_employee_row(
         cell = ws.cell(row=row, column=COL_MONTH_START + pos, value=int(round(val)))
         cell.number_format = '#,##0'
 
-    # S列: 年間通勤手当（AI が任意で抽出。> 0 のときのみ書込）
-    # ツール側が読込時に在籍月数で均等割して各月から減算 → R216 を課税給与基準に補正
+    # S列: 年間通勤手当（月列に含まれている通勤手当の年額。> 0 のときのみ書込）
+    # ツール側が読込時に在籍月数で均等割して各月から減算 → R216 の母数に補正。
+    # 2026-07-27 運用では課税・非課税を問わず控除するが、読込側は減算後に
+    # annual_transport_allowance を 0 へ消費するため、AI 経路を通った台帳ではここが 0 に
+    # なり S列は空で出力される（再読込時の二重減算を防ぐための設計）。
+    # 「いくら引いたか」は emp.transport_deducted_total に残る（変換メモ・報告用）。
     atransport = getattr(emp, 'annual_transport_allowance', 0) or 0
     if atransport > 0:
         s_cell = ws.cell(row=row, column=COL_TRANSPORT, value=int(round(atransport)))
