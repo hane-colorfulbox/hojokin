@@ -1,0 +1,466 @@
+{
+  "_readme": "公式ダウンロードページの資料スナップショット。scripts/check_seido_freshness.py が突合に使う。depends には、その資料が変わったら読み直すべき自社ドキュメントを書く。depends が空の資料は「更新は知らせるが対応不要」の扱い（参考表示）。",
+  "download_page": "https://it-shien.smrj.go.jp/download/",
+  "last_verified": "2026-07-28",
+  "documents": [
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_addition_list.pdf",
+      "title": "加点項目一覧",
+      "label": "加点項目一覧",
+      "official_updated": "2026-06-03",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §3 加点項目マトリクス",
+        "引き継ぎ/02_制度知識ベース.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:30 GMT",
+      "content_length": "293616"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_chingin_houkoku1_hojyoritsu_katen.xlsx",
+      "title": "賃金状況報告シート（補助率引上げ・加点措置 ①用）※2",
+      "label": "賃金状況報告シート（補助率引上げ・加点措置①用）",
+      "official_updated": "2026-03-26",
+      "depends": [
+        "補助金加点/補助率引き上げ・加点措置①用.xlsx（原本）",
+        "hojokin/wage_reader.py（最賃マスタ）",
+        ".claude/skills/katen-judge/SKILL.md",
+        "docs/チェックリスト_加点判定.md",
+        "docs/補助金_実務知識ベース.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:30 GMT",
+      "content_length": "262751"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_chingin_houkoku1_katen.xlsx",
+      "title": "賃金状況報告シート（加点措置 ①用）※2",
+      "label": "賃金状況報告シート（加点措置①用）",
+      "official_updated": "2026-03-26",
+      "depends": [
+        "補助金加点/加点措置①用.xlsx（原本）",
+        ".claude/skills/katen-judge/SKILL.md",
+        "docs/補助金_実務知識ベース.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:30 GMT",
+      "content_length": "262577"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_chingin_houkoku2_katen.xlsx",
+      "title": "賃金状況報告シート（加点措置 ②用）※2",
+      "label": "賃金状況報告シート（加点措置②用）",
+      "official_updated": "2026-03-26",
+      "depends": [
+        "補助金加点/加点措置②用.xlsx（原本）",
+        "hojokin/config.py（MIN_WAGE_MAP）",
+        ".claude/skills/katen-judge/SKILL.md",
+        "docs/チェックリスト_加点判定.md",
+        "docs/補助金_実務知識ベース.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:30 GMT",
+      "content_length": "146801"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_fukusu_flyer.pdf",
+      "title": "デジタル化・AI導入補助金2026 複数者連携デジタル化・AI導入枠案内チラシ",
+      "label": "デジタル化・AI導入補助金2026 複数者連携デジタル化・AI導入枠案内チラシ",
+      "official_updated": "2026-04-10",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "1009156"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_hanbai_it_jigyousya.xlsx",
+      "title": "販売実績一覧_IT導入支援事業者向け ※1",
+      "label": "販売実績一覧_IT導入支援事業者向け ※1",
+      "official_updated": "2026-01-23",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "329610"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_it_consortium_list.pdf",
+      "title": "IT導入支援事業者一覧(コンソーシアム)",
+      "label": "IT導入支援事業者一覧（コンソーシアム）",
+      "official_updated": "2026-07-23",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §9 コンソーシアム"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "3394880"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_it_vendor_list.pdf",
+      "title": "IT導入支援事業者一覧(法人)",
+      "label": "IT導入支援事業者一覧（法人）",
+      "official_updated": "2026-07-23",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "1698457"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kakakusetsumei_cate5.xlsx",
+      "title": "価格説明資料_カテゴリ5 申請用 ※2",
+      "label": "価格説明資料_カテゴリ5 申請用 ※2",
+      "official_updated": "2026-02-27",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "382084"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kakakusetsumei_cate6.xlsx",
+      "title": "価格説明資料_カテゴリ6 申請用 ※2",
+      "label": "価格説明資料_カテゴリ6 申請用 ※2",
+      "official_updated": "2026-02-27",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "203887"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kakakusetsumei_cate7.xlsx",
+      "title": "価格説明資料_カテゴリ7 申請用 ※2",
+      "label": "価格説明資料_カテゴリ7 申請用 ※2",
+      "official_updated": "2026-02-27",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "117367"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kakuninjikou_it.pdf",
+      "title": "ITツール登録における注意ポイント",
+      "label": "ITツール登録における注意ポイント",
+      "official_updated": "2026-06-12",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "2581757"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kakuninjikou_jisseki.pdf",
+      "title": "事業実施・実績報告における注意ポイント",
+      "label": "事業実施・実績報告における注意ポイント",
+      "official_updated": "2026-06-12",
+      "depends": [
+        "docs/運用マニュアル.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "1622349"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kitei_denshi.pdf",
+      "title": "交付規程",
+      "label": "交付規程（インボイス枠・電子取引類型）",
+      "official_updated": "2026-03-30",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "500658"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kitei_fukusu.pdf",
+      "title": "交付規程",
+      "label": "交付規程（複数者連携枠）",
+      "official_updated": "2026-01-23",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "460257"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kitei_invoice.pdf",
+      "title": "交付規程",
+      "label": "交付規程（インボイス枠・インボイス対応類型）",
+      "official_updated": "2026-03-30",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "432089"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kitei_security.pdf",
+      "title": "交付規程",
+      "label": "交付規程（セキュリティ対策推進枠）",
+      "official_updated": "2026-03-30",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "425215"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kitei_tsujyo.pdf",
+      "title": "交付規程",
+      "label": "交付規程（通常枠）",
+      "official_updated": "2026-03-30",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §12 事業承継・廃業・解約"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "464850"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_denshi.pdf",
+      "title": "公募要領",
+      "label": "公募要領（インボイス枠・電子取引類型）",
+      "official_updated": "2026-05-15",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §2 補助率・補助額"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
+      "content_length": "955474"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_fukusu.pdf",
+      "title": "公募要領",
+      "label": "公募要領（複数者連携枠）",
+      "official_updated": "2026-05-15",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "1031639"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_invoice.pdf",
+      "title": "公募要領",
+      "label": "公募要領（インボイス枠・インボイス対応類型）",
+      "official_updated": "2026-05-15",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §2 補助率・補助額",
+        "docs/補助金_実務知識ベース.md",
+        "引き継ぎ/02_制度知識ベース.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "975848"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_security.pdf",
+      "title": "公募要領",
+      "label": "公募要領（セキュリティ対策推進枠）",
+      "official_updated": "2026-05-15",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §2 補助率・補助額",
+        "docs/補助金_制度リファレンス.md §10 サイバーセキュリティお助け隊"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "856786"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_tsujyo.pdf",
+      "title": "公募要領",
+      "label": "公募要領（通常枠）",
+      "official_updated": "2026-05-15",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §2 補助率・補助額",
+        "docs/補助金_制度リファレンス.md §3 加点項目",
+        "docs/補助金_制度リファレンス.md §4 減点項目",
+        "docs/補助金_制度リファレンス.md §5 賃上げの要件と加点",
+        "docs/補助金_制度リファレンス.md §6 補助対象者",
+        "docs/補助金_制度リファレンス.md §7 必要書類",
+        "docs/補助金_制度リファレンス.md §8 補助対象経費",
+        "docs/補助金_実務知識ベース.md",
+        "引き継ぎ/02_制度知識ベース.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "1153682"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_2ndopinion_shinsei.pdf",
+      "title": "【申請者向け】デジタル化セカンドオピニオンマニュアル",
+      "label": "デジタル化セカンドオピニオンマニュアル（申請者向け）",
+      "official_updated": "2026-07-22",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §11 デジタル化セカンドオピニオン",
+        "docs/セカンドオピニオン加点/配布物テンプレ/00_予約フォーム仕様.md",
+        "docs/セカンドオピニオン加点/配布物テンプレ/08_面談回答例_汎用中立版.md",
+        "docs/セカンドオピニオン加点/配布物テンプレ/10_経営者向け_一問一答の回答例_汎用.md",
+        "docs/補助金_業務フロー全体マップ.md §5 面談型加点"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "2293471"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_it_jigyosha.pdf",
+      "title": "IT導入支援事業者登録マニュアル",
+      "label": "IT導入支援事業者登録マニュアル",
+      "official_updated": "2026-06-24",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "8329060"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_it_tool.pdf",
+      "title": "ITツール登録マニュアル",
+      "label": "ITツール登録マニュアル",
+      "official_updated": "2026-07-09",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "7637118"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_jisseki.pdf",
+      "title": "事業実施・実績報告マニュアル_通常枠、セキュリティ対策推進枠、インボイス枠（インボイス対応類型、電子取引類型）",
+      "label": "事業実施・実績報告マニュアル（通常枠等）",
+      "official_updated": "2026-06-12",
+      "depends": [
+        "docs/運用マニュアル.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "10475076"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_jisseki_fukusu.pdf",
+      "title": "事業実施・実績報告マニュアル_複数者連携デジタル化・AI導入枠",
+      "label": "事業実施・実績報告マニュアル（複数者連携枠）",
+      "official_updated": "2026-07-17",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "6017678"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_kofu.pdf",
+      "title": "交付申請マニュアル_通常枠、セキュリティ対策推進枠、インボイス枠（インボイス対応類型、電子取引類型）",
+      "label": "交付申請マニュアル（通常枠・セキュリティ枠・インボイス枠）",
+      "official_updated": "2026-06-12",
+      "depends": [
+        "docs/補助金_実務知識ベース.md",
+        "引き継ぎ/02_制度知識ベース.md",
+        "docs/案件メモ/申請MTG_リファレンス/申請手順_実務リファレンス.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "14835722"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_kofu_fukusu.pdf",
+      "title": "交付申請マニュアル_複数者連携デジタル化・AI導入枠",
+      "label": "交付申請マニュアル（複数者連携枠）",
+      "official_updated": "2026-05-25",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "9933437"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_konen.pdf",
+      "title": "後年手続きマニュアル",
+      "label": "後年手続きマニュアル",
+      "official_updated": "2026-07-24",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §12 事業承継・廃業・解約"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "5760694"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_kouka_fukusu.pdf",
+      "title": "事業実施効果報告マニュアル",
+      "label": "事業実施効果報告マニュアル",
+      "official_updated": "(更新日なし)",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
+      "content_length": "41267"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_preregistration.pdf",
+      "title": "事前登録手続きのご案内",
+      "label": "事前登録手続きのご案内",
+      "official_updated": "2026-01-23",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "4217585"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_registration.pdf",
+      "title": "IT導入支援事業者・ITツールの事前登録および登録要件の見直しについて",
+      "label": "IT導入支援事業者・ITツールの事前登録および登録要件の見直しについて",
+      "official_updated": "2026-01-23",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "283395"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_seikyushiharaiuchiwake_jisseki.xlsx",
+      "title": "請求・支払内訳シート",
+      "label": "請求・支払内訳シート",
+      "official_updated": "2026-06-12",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "35697"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_sentei_gaibu_fukusu.docx",
+      "title": "外部専門家選定理由書_複数者連携デジタル化・AI導入枠",
+      "label": "外部専門家選定理由書_複数者連携デジタル化・AI導入枠",
+      "official_updated": "2026-03-26",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "79570"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_sentei_it_fukusu.docx",
+      "title": "IT提供事業者選定理由書_複数者連携デジタル化・AI導入枠",
+      "label": "IT提供事業者選定理由書_複数者連携デジタル化・AI導入枠",
+      "official_updated": "2026-03-26",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "80031"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_torihiki_denshi.xlsx",
+      "title": "申請様式_取引先 記入リスト（エクセル）_インボイス枠（電子取引類型）",
+      "label": "申請様式_取引先 記入リスト（エクセル）_インボイス枠（電子取引類型）",
+      "official_updated": "2026-03-26",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "570795"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_torihiki_security.xlsx",
+      "title": "申請様式_取引先 記入リスト（エクセル）_セキュリティ対策推進枠のみ",
+      "label": "申請様式_取引先 記入リスト（エクセル）_セキュリティ対策推進枠のみ",
+      "official_updated": "2026-03-26",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "40862"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_touroku_it_jigyosha.pdf",
+      "title": "IT導入支援事業者 登録要領",
+      "label": "IT導入支援事業者 登録要領",
+      "official_updated": "2026-01-23",
+      "depends": [
+        "docs/補助金_制度リファレンス.md §9 コンソーシアム",
+        "docs/補助金_制度リファレンス.md §10 サイバーセキュリティお助け隊"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "604899"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_touroku_it_tool.pdf",
+      "title": "ITツール登録要領",
+      "label": "ITツール登録要領",
+      "official_updated": "2026-05-15",
+      "depends": [
+        "docs/ツール情報/INDEX.md"
+      ],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "1111710"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_yoshikikeisan_fukusu.xlsx",
+      "title": "規定様式・計算用Excelツール_複数者連携デジタル化・AI導入枠",
+      "label": "規定様式・計算用Excelツール_複数者連携デジタル化・AI導入枠",
+      "official_updated": "2026-05-25",
+      "depends": [],
+      "last_modified": "Fri, 24 Jul 2026 01:58:33 GMT",
+      "content_length": "689436"
+    },
+    {
+      "url": "https://www.chusho.meti.go.jp/koukai/yosan/r7/r6_it.pdf",
+      "title": "デジタル化・AI導入補助金2026 案内チラシ",
+      "label": "デジタル化・AI導入補助金2026 案内チラシ",
+      "official_updated": "2026-04-10",
+      "depends": [],
+      "last_modified": "Mon, 06 Jul 2026 02:00:02 GMT",
+      "content_length": "789676"
+    },
+    {
+      "url": "https://www.chusho.meti.go.jp/koukai/yosan/r8/digital_ai_summary.pdf",
+      "title": "デジタル化・AI導入補助金2026 概要",
+      "label": "デジタル化・AI導入補助金2026 概要",
+      "official_updated": "2026-04-10",
+      "depends": [],
+      "last_modified": "Sat, 20 Jun 2026 03:10:52 GMT",
+      "content_length": "2117688"
+    }
+  ]
+}
