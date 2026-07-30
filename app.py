@@ -1851,7 +1851,7 @@ st.markdown(
 # 中身は脱PIIの知識パック(引き継ぎ/)＋索引CLAUDE.md＋参照docs＋スキル(.claude/skills/wagebook-convert)
 # ＋更新スクリプト(scripts/update_handoff.py)。v2 でスキルを同梱し 1 本化。
 # scripts/build_handoff_zip.py で生成し、Drive「補助金ツール」の hojokin-handoff.zip を版差し替え。
-_HANDOFF_CONTEXT_VERSION = '2026-07-28'
+_HANDOFF_CONTEXT_VERSION = '2026-07-30'
 # Drive 共有リンク（hojokin-handoff.zip = コンテキスト一式）。配布先: マイドライブ/補助金ツール/
 _HANDOFF_CONTEXT_ZIP_URL = 'https://drive.google.com/file/d/1FWubpOrg0crtoz6cF2Jdp3otRi5_GslJ/view?usp=sharing'
 with st.expander(
@@ -2804,4 +2804,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.95 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.96 | カラフルボックス株式会社')
