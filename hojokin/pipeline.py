@@ -1160,6 +1160,10 @@ def run_application_transfer(
         pl_accounting_warning = _check_pl_accounting_consistency(extraction.financial)
         # 業種コードのフォーマット検証（旧3桁体系・自己流コード検出）
         industry_code_warning = _check_industry_code_format(extraction.ai_judgment)
+        # ツールマスタ連動（v0.2.96）の引当て漏れ検証（VLOOKUP の実質空欄を無言にしない）
+        tool_master_warning = _check_tool_master_coverage(
+            template_path, template_type, extraction,
+        )
         # 役員名の誤入力検出（従業員代表者・事業所内最低賃金者の欄に役員名が入っていたら警告）
         officer_alert_warning = _check_representative_against_officers(
             hearing_data, extraction.company,
@@ -1188,6 +1192,7 @@ def run_application_transfer(
             + wage_pdf_warning
             + pl_accounting_warning
             + industry_code_warning
+            + tool_master_warning
             + officer_alert_warning
         )
         logger.info(f'申請書作成完了: {output_path.name} (空欄{len(empty_cells)}件{wage_warning})')
@@ -2221,6 +2226,63 @@ def _check_representative_against_officers(hearing_data: dict, company) -> str:
         f' ⚠ 役員名の誤入力の可能性: {"、".join(hits)} が履歴事項証明書の役員と一致します。'
         '役員は従業員代表者・事業所内最低賃金者の対象外です。従業員の氏名に修正してください。'
     )
+
+
+def _check_tool_master_coverage(template_path: Path, template_type: str, extraction) -> str:
+    """v0.2.96: 申請内容の3項目（通常枠C179〜C181／インボイス法人C164・C165）は
+    テンプレ内マスタ（シート9／ツールマスタ）の VLOOKUP が自動入力する。
+
+    ツール名がマスタに無い・登録行の内容が空だと、成果物は「式はあるが実質空欄」になり、
+    値ベースの空欄チェックにも掛からない。無言の欠落を防ぐためここで明示警告する。
+    マスタシート非搭載のテンプレ（旧版・ユーザーアップロード原本）は対象外。
+    """
+    import openpyxl
+
+    if template_type.startswith('通常枠'):
+        sheet, key_rows, value_cols, cells_label = 'シート9', range(5, 13), (2, 3, 4), 'C179〜C181'
+    elif template_type.startswith('インボイス枠') and '個人' not in template_type:
+        sheet, key_rows, value_cols, cells_label = 'ツールマスタ', range(4, 12), (2, 3), 'C164・C165'
+    else:
+        return ''
+    try:
+        wb = openpyxl.load_workbook(template_path, read_only=True, data_only=False)
+    except OSError:
+        return ''
+    try:
+        if sheet not in wb.sheetnames:
+            return ''
+        ws = wb[sheet]
+        # ツール名 -> 引当て列（B〜）がすべて埋まっているか
+        filled_by_tool = {}
+        for r in key_rows:
+            key = ws.cell(r, 1).value
+            if key not in (None, ''):
+                filled_by_tool[str(key).strip()] = all(
+                    ws.cell(r, c).value not in (None, '') for c in value_cols
+                )
+    finally:
+        wb.close()
+
+    tool_name = (getattr(extraction.estimate, 'tool_name', '') or '').strip()
+    if not tool_name:
+        return (
+            f' ⚠ {warn_tag("W-TOOL-001")}見積書からツール名が特定できなかったため、'
+            f'ツールマスタ連動の申請内容 {cells_label} が空欄になります。'
+            f'出力Excelのツール名セルをプルダウンで選択してください'
+        )
+    if tool_name not in filled_by_tool:
+        return (
+            f' ⚠ {warn_tag("W-TOOL-001")}ツール名「{tool_name}」がテンプレ「{sheet}」の'
+            f'マスタに未登録のため、申請内容 {cells_label} が空欄になります。'
+            f'出力Excelの「{sheet}」に該当ツールの行を追記するか、{cells_label} を手動入力してください'
+        )
+    if not filled_by_tool[tool_name]:
+        return (
+            f' ⚠ {warn_tag("W-TOOL-001")}ツール名「{tool_name}」は「{sheet}」にありますが'
+            f'引当て内容が未入力のため、申請内容 {cells_label} が空欄になります。'
+            f'出力Excelの「{sheet}」該当行を埋めるか、{cells_label} を手動入力してください'
+        )
+    return ''
 
 
 def _check_industry_code_format(ai_judgment) -> str:

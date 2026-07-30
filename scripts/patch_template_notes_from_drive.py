@@ -16,14 +16,12 @@
 取り込むもの（許可リスト = NOTE_CELLS）:
     - 記入ガイド・注記セル（D列）と、通常枠 B1 の提出前警告
     - リポジトリ側のタイポ修正（「プルダウンを選択選択」→「選択」）
+    - セルにハイパーリンクが付いていればリンクごとコピー（通常枠 D240 の様式DLリンク等）
 
 取り込まないもの（意図的に除外。理由は EXCLUDED を参照）:
     - 費用内訳マスタ / シート9 / ツールマスタ の新シートとその VLOOKUP 配線
-      → ツール側（config のマッピング）の対応が要るため別タスク
+      → patch_adopt_drive_masters.py が担当（v0.2.96 で採用済み）
     - リポジトリ側にだけある URL セル（Drive 側は空。取り込むと情報が消える）
-    - 役員（8）→（８）の全角化（リポジトリの半角統一を維持）
-    - インボイス法人 D164/D165（リポジトリのツール別記入例のほうが実務的）
-    - 通常枠 D240（Drive はラベル、リポジトリは別セルに実URL。構造が違う）
 
 実行方法:
     python scripts/patch_template_notes_from_drive.py <Drive版通常枠.xlsx> <Drive版インボイス法人.xlsx>
@@ -55,23 +53,24 @@ NOTE_CELLS = {
         # B1=提出前警告 / D151-153=人数の注記 / D168・D182=選択肢の明示
         # D178=セキュリティ設問の選択肢 / D179・D181=タイポ修正 / D180・D183・D184=選択指示
         # D225=日付の注記 / D227=担当者欄の代替指示
+        # D240=賃金状況報告シート（加点措置②用）の様式DLリンク（ハイパーリンク付き）
         ('B1', 'D151', 'D152', 'D153', 'D168', 'D178', 'D179', 'D180',
-         'D181', 'D182', 'D183', 'D184', 'D225', 'D227'),
+         'D181', 'D182', 'D183', 'D184', 'D225', 'D227', 'D240'),
     ),
     'インボイス法人': (
         '【原本_法人】企業名_インボイス枠_法人2026_v2.xlsx',
         # D143-145=人数の注記 / D187=画面共有の手順注記
-        ('D143', 'D144', 'D145', 'D187'),
+        # D164/D165=ツールによる内容確認の選択肢（C164/C165 の VLOOKUP 化=
+        # patch_adopt_drive_masters.py に伴い、旧C列の記入例はD列注記へ引き継ぎ）
+        ('D143', 'D144', 'D145', 'D164', 'D165', 'D187'),
     ),
 }
 
 # 除外理由の記録（レビュー時に「なぜ入れていないか」を追えるようにする）
 EXCLUDED = {
-    '費用内訳マスタ・シート9・ツールマスタと配線': 'ツール側マッピングの対応が要る（別タスク）',
+    '費用内訳マスタ・シート9・ツールマスタと配線': 'patch_adopt_drive_masters.py が担当（v0.2.96 で採用済み）',
     'URL セル（通常枠 D114/D115/D204/D231・インボイス法人 D189/D217/D228）': 'Drive 側が空。取り込むと実URLが消える',
-    '役員（8）→（８）の全角化': 'リポジトリの半角統一を維持（表示のみ・実害なし）',
-    'インボイス法人 D164/D165': 'リポジトリのツール別記入例のほうが実務的',
-    '通常枠 D240': 'Drive はラベル、リポジトリは別セルに実URL。構造が異なる',
+    '役員（8）→（８）の全角化': 'patch_adopt_drive_masters.py が担当（Drive 準拠へ変更）',
 }
 
 # Drive 版ファイルの判別キーワード（エクスポート名に含まれる語）
@@ -122,18 +121,23 @@ def apply_one(kind: str, drive_path: Path) -> int:
 
     changes, skipped = [], []
     for coord in cells:
-        new = ws_drive[coord].value
+        src = ws_drive[coord]
+        new = src.value
+        new_link = src.hyperlink.target if src.hyperlink else None
         old = ws_repo[coord].value
+        old_link = ws_repo[coord].hyperlink.target if ws_repo[coord].hyperlink else None
         rng = merged_at.get(coord)
         # 結合範囲の左上以外は書き込めない（openpyxl の MergedCell は読み取り専用）。
         # 結合を解くとレイアウトが変わるため、ここでは触らず一覧に出して判断に回す。
         if rng is not None and str(rng).split(':')[0] != coord:
             skipped.append((coord, str(rng), new))
             continue
-        if old == new:
+        if old == new and old_link == new_link:
             continue
         ws_repo[coord] = new
-        changes.append((coord, old, new))
+        if new_link:
+            ws_repo[coord].hyperlink = new_link
+        changes.append((coord, old, new if not new_link else f'{new} [link:{new_link}]'))
 
     print(f'\n=== {kind} ({repo_path.name})')
     if skipped:

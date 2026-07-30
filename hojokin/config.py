@@ -351,9 +351,9 @@ MAPPING_2026_TSUJO = TemplateMapping(
         'it_investment_amount': 174,
         'it_investment_process': 177,
         'security_status': 178,
-        'improvement_process': 179,
-        'expected_effect_dept': 180,
-        'expected_effect': 181,
+        # 179 (改善プロセス) / 180 (強化部門) / 181 (期待効果) は v0.2.96 から
+        # テンプレの VLOOKUP（C71 のツール名 → シート9 マスタ）が自動入力するため
+        # マッピングから除外し preserve_rows で式を温存する（インボイス 163-165 と同型）
         'future_goals': 182,
 
         # 計画数値入力 ※+9
@@ -388,7 +388,7 @@ MAPPING_2026_TSUJO = TemplateMapping(
     },
     shinsei_clear_range=(5, 270),
     tenki_text_range=(15, 26),
-    preserve_rows=[173, 175],
+    preserve_rows=[173, 175, 179, 180, 181],
     hearing_wage_raise_row=82,
 )
 
