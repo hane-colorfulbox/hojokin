@@ -687,10 +687,127 @@ MAPPING_2026_INVOICE_KOJIN = TemplateMapping(
 )
 
 
+# ── 2026 通常枠（個人事業主）──
+# テンプレート原本: ツール/【原本_個人】企業名_通常枠_個人2026.xlsx
+# ヒアリングシート: ツール/ヒアリングシート2026_通常枠個人.xlsx
+# 🔴 この定数は scripts/gen_mapping_tsujo_kojin.py が機械生成する。
+#    原本を組み直したら手で直さず、生成し直して差し替えること
+#    （通常枠法人v2 と インボイス個人 の行セグメント写像から導出＋ラベル照合で検証）。
+MAPPING_2026_TSUJO_KOJIN = TemplateMapping(
+    hearing_to_tenki=[
+        (6, 6, False),   # GビズIDプライム
+        (8, 8, False),   # 屋号・商号
+        (10, 10, False),   # 屋号・商号（フリガナ）
+        (12, 12, False),   # 現住所：郵便番号
+        (14, 14, False),   # 現住所
+        (16, 16, False),   # 生年月日
+        (18, 18, False),   # 事業所所在地：郵便番号
+        (20, 20, False),   # 事業所所在地
+        (22, 22, False),   # 事業開始年月日
+        (24, 24, False),   # 店舗事業所数
+        (26, 26, False),   # 事業者URL
+        (29, 28, False),   # 主な事業内容
+        (30, 29, False),   # 他社に負けない貴社の「強み」は何ですか？
+        (31, 30, False),   # 現在「時間がかかっている業務」は何ですか？
+        (32, 31, False),   # その業務に「月間何時間」ほど費やしていますか？
+        (33, 32, False),   # 導入するツールのどの機能を使って、どう楽にしたいです
+        (34, 33, False),   # 導入後、事務作業時間は「何％（あるいは何時間）」削減
+        (35, 34, False),   # 作業が楽になり「浮いた時間」で、どのような価値を生む
+        (36, 35, False),   # 3年後の「売上目標」を教えてください
+        (37, 36, False),   # どのような属性の取引先が多いですか？
+        (39, 38, True),   # 代表電話番号
+        (41, 40, False),   # 担当者氏名
+        (43, 42, False),   # 担当者氏名フリガナ
+        (45, 44, False),   # 担当者メールアドレス
+        (47, 46, True),   # 担当者電話番号
+        (49, 48, True),   # 担当者携帯番号
+        (51, 50, False),   # 従業員数：正規雇用
+        (51, 76, False),   # 従業員数：正規雇用
+        (53, 52, False),   # 従業員数：契約社員
+        (53, 77, False),   # 従業員数：契約社員
+        (55, 54, False),   # 従業員数：パートアルバイト
+        (55, 78, False),   # 従業員数：パートアルバイト
+        (57, 56, False),   # 従業員数：派遣社員
+        (59, 58, False),   # 従業員数：その他
+        (61, 60, False),   # 過去にサービス等生産性向上IT導入支援事業の補助金の
+        (63, 62, False),   # 申請年度
+        (64, 63, False),   # 申請枠
+        (65, 64, False),   # 申請回
+        (66, 65, False),   # 申請ツール名
+        (69, 67, False),   # 女性活躍推進法に基づく一般事業主行動計画
+        (70, 68, False),   # えるぼし認定取得状況
+        (72, 70, False),   # 次世代法に基づく一般事業主行動計画
+        (73, 71, False),   # くるみん認定取得状況
+        (75, 73, False),   # SECURITY ACTION自己宣言ID
+        (81, 79, False),   # 年間の平均労働時間
+        (84, 82, False),   # 自社の強み（複数選択可）
+        (85, 83, False),   # 自社の弱み（複数選択可）
+        (86, 84, False),   # これまでのIT投資の年間金額
+        (87, 85, False),   # どのようなプロセスに対してIT投資を行いましたか。（
+        (90, 88, False),   # 事業所内最低賃金時給
+        (92, 90, False),   # 賃金引上げ計画を、従業員へ表明しましたか？
+        (95, 92, False),   # 賃金引上げ計画における地域別最低賃金に対する賃上げ幅
+        (97, 94, False),   # 従業員代表者
+        (98, 95, False),   # 給与担当者
+        (99, 96, False),   # 事業所内最低賃金者
+        (102, 99, False),   # 指定する一定期間（令和6年10月〜令和7年9月）にお
+        (103, 100, False),   # 交付申請の直近月における事業場内最低賃金が令和7年7
+    ],
+    shinsei={
+        'headquarters_address': 55,   # 現在住所
+        'industry_code': 56,   # 業種コード　（数字４桁）
+        'industry_text': 57,   # 業種_大分類/中分類/小分類/細分類
+        'capital': 62,   # 資本金
+        'business_description': 76,   # 事業内容（255文字以内）
+        'fiscal_month': 77,   # 決算月
+        'tool_name': 74,   # ツール名
+        'rep_name': 78,   # 代表者氏名
+        'rep_kana': 79,   # 代表者氏名（フリガナ）
+        'past_subsidies': 92,   # 過去年度交付決定
+        'eruboshi': 96,   # えるぼし認定
+        'kurumin': 97,   # くるみん認定
+        'business_types': 117,   # 行っている事業に該当するものすべて選択
+        'officer_count_prev': 126,   # 代表者・役員数
+        'fin_revenue': 128,   # 売上高
+        'fin_gross_profit': 129,   # 粗利益
+        'fin_operating_profit': 130,   # 営業利益
+        'fin_ordinary_profit': 131,   # 経常利益
+        'fin_depreciation': 132,   # 減価償却費
+        'fin_personnel': 133,   # 人件費
+        'fin_capital': 134,   # 資本金
+        'management_intent': 140,   # 経営意欲
+        'strength': 142,   # 強み
+        'weakness': 144,   # 弱み
+        'it_investment_amount': 146,   # これまでのIT投資の年間金額
+        'it_investment_process': 149,   # どのようなプロセスに対してＩＴ投資を行ったか
+        'security_status': 150,   # セキュリティの状況
+        'future_goals': 154,   # 事業をどのように変えていきますか？（将来目標）
+        'min_wage': 191,   # 主たる事業場の所在地/地域別最低賃金
+        'min_wage_hourly': 192,   # 事業所内最低賃金時給
+        'employee_count_fte': 193,   # 従業員数（全期間在籍していない従業員は除外、パートな
+        'wage_total_base': 194,   # 事業計画期間における給与支給総額
+        'wage_total_y1': 195,   # 給与支給総額
+        'wage_total_y2': 196,   # 給与支給総額
+        'wage_total_y3': 197,   # 給与支給総額
+        'wage_raise_declaration': 200,   # 上記の賃上げ計画を従業員へ表明しましたか？
+        'wage_raise_amount': 201,   # 賃上げ幅を選択
+        'wage_raise_method': 202,   # 表明を行った方法
+        'wage_raise_date': 203,   # 表明を行った日付
+    },
+    kyuyo_sheet_name='生産性指標給与支給総額計算',
+    kyuyo={'revenue': (10, 2), 'gross_profit': (11, 2), 'operating_profit': (12, 2), 'ordinary_profit': (13, 2), 'depreciation': (21, 5), 'salary': (5, 5), 'misc_wages': (6, 5), 'bonus': (7, 5), 'travel_expense': (9, 5)},
+    shinsei_clear_range=(5, 245),
+    tenki_text_range=(28, 37),
+    is_kojin=True,
+    preserve_rows=[145, 147, 151, 152, 153],
+    hearing_wage_raise_row=95,
+)
+
 def get_mapping(template_type: str) -> TemplateMapping:
     """テンプレートタイプからマッピングを取得"""
     mappings = {
         '通常枠_2026': MAPPING_2026_TSUJO,
+        '通常枠_個人_2026': MAPPING_2026_TSUJO_KOJIN,
         'インボイス枠_2026': MAPPING_2026_INVOICE,
         'インボイス枠_個人_2026': MAPPING_2026_INVOICE_KOJIN,
     }

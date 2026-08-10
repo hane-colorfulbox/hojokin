@@ -2239,7 +2239,9 @@ def _check_tool_master_coverage(template_path: Path, template_type: str, extract
     import openpyxl
 
     if template_type.startswith('通常枠'):
-        sheet, key_rows, value_cols, cells_label = 'シート9', range(5, 13), (2, 3, 4), 'C179〜C181'
+        # 個人版は行構成が違うため引当て先セルの表示も変える（マスタの位置は同じシート9）
+        cells_label = 'C151〜C153' if '個人' in template_type else 'C179〜C181'
+        sheet, key_rows, value_cols = 'シート9', range(5, 13), (2, 3, 4)
     elif template_type.startswith('インボイス枠') and '個人' not in template_type:
         sheet, key_rows, value_cols, cells_label = 'ツールマスタ', range(4, 12), (2, 3), 'C164・C165'
     else:

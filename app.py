@@ -177,16 +177,19 @@ def _cached_drive_can_write(folder_id: str) -> bool | None:
 
 # ── 定数 ──
 # 個人事業主テンプレの種別値。is_kojin 判定の単一の真実（複数箇所での文字列重複を防ぐ）。
+# 枠が増えても取りこぼさないよう、単一値ではなく集合で持つ。
 _KOJIN_TEMPLATE_TYPE = 'インボイス枠_個人_2026'
+_KOJIN_TEMPLATE_TYPES = frozenset({'インボイス枠_個人_2026', '通常枠_個人_2026'})
 
 
 def _derive_is_kojin(template_type: str | None) -> bool:
     """テンプレ種別から個人事業主フラグを導出する単一経路。"""
-    return template_type == _KOJIN_TEMPLATE_TYPE
+    return template_type in _KOJIN_TEMPLATE_TYPES
 
 
 TEMPLATE_OPTIONS = {
     '通常枠 2026（法人）': '通常枠_2026',
+    '通常枠 2026（個人）': '通常枠_個人_2026',
     'インボイス枠 2026（法人）': 'インボイス枠_2026',
     'インボイス枠 2026（個人）': _KOJIN_TEMPLATE_TYPE,
 }
@@ -440,7 +443,8 @@ def _kojin_fiscal_month_warning(
     モジュール定数/ヘルパー（_KOJIN_TEMPLATE_TYPE / _derive_is_kojin）に依存させず
     リテラル比較のまま自己完結させる（_check_size_warnings と同じ運用）。
     """
-    if template_type == 'インボイス枠_個人_2026' and fiscal_month_override not in (None, 12):
+    if template_type in ('インボイス枠_個人_2026', '通常枠_個人_2026') \
+       and fiscal_month_override not in (None, 12):
         return (
             '個人事業主は会計期間が暦年（1〜12月）固定です。決算月は「12月」を選択してください。'
             '申請書は12月で出力されるため、12月以外を選ぶと賃金台帳の対象期間と食い違います。'
@@ -480,8 +484,11 @@ def find_template(base_dir: Path, template_type: str) -> Path | None:
     ルートとツール/の両方から候補を集め、v2を優先して返す。
     """
     import unicodedata
+    # 🔴 個人版が増えたので、通常枠(法人)にも '法人' を必須キーワードに入れる。
+    #    入れないと 【原本_個人】企業名_通常枠_個人2026.xlsx が法人側の候補に混入する
     keywords = {
-        '通常枠_2026': ['原本', '通常枠', '2026'],
+        '通常枠_2026': ['原本', '通常枠', '法人', '2026'],
+        '通常枠_個人_2026': ['原本', '通常枠', '個人', '2026'],
         'インボイス枠_2026': ['原本', 'インボイス', '法人', '2026'],
         'インボイス枠_個人_2026': ['原本', 'インボイス', '個人', '2026'],
     }
@@ -2804,4 +2811,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.96 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.97 | カラフルボックス株式会社')

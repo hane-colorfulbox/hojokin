@@ -47,8 +47,10 @@ def setup_logging(verbose: bool = False):
 def find_template(base_dir: Path, template_type: str) -> Path | None:
     """テンプレートファイルを検索（v2を優先）"""
     keywords = {
-        '通常枠_2026': ['原本', '通常枠', '2026'],
-        'インボイス枠_2026': ['原本', 'インボイス', '2026'],
+        '通常枠_2026': ['原本', '通常枠', '法人', '2026'],
+        '通常枠_個人_2026': ['原本', '通常枠', '個人', '2026'],
+        'インボイス枠_2026': ['原本', 'インボイス', '法人', '2026'],
+        'インボイス枠_個人_2026': ['原本', 'インボイス', '個人', '2026'],
     }
     kws = keywords.get(template_type, [])
     candidates = []
@@ -256,7 +258,9 @@ def main():
     local.add_argument('--company', required=True, help='顧客名')
     local.add_argument('--folder', required=True, help='資料フォルダパス')
     local.add_argument('--template', default='通常枠_2026',
-                       choices=['通常枠_2026', 'インボイス枠_2026'], help='テンプレートタイプ')
+                       choices=['通常枠_2026', '通常枠_個人_2026',
+                                'インボイス枠_2026', 'インボイス枠_個人_2026'],
+                       help='テンプレートタイプ')
     local.add_argument('--template-path', help='テンプレートExcelの直接パス')
     local.add_argument('--task', default='all',
                        choices=['all', 'application', 'wage', 'per_employee_wage'],

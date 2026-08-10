@@ -80,3 +80,6 @@ docs/セカンドオピニオン加点/参考_*.md
 
 # ローカル個別設定
 .gitignore.local
+
+# 通常枠個人 原本ビルドのログ（成果物ではない）
+scripts/build_log.txt

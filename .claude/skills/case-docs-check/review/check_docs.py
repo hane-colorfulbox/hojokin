@@ -144,8 +144,19 @@ BWL_PREF_CELL = 'C2'    # 事業場所在地（都道府県）
 BWL_APPYM_CELL = 'C3'   # 交付申請月（yyyy/mm）— 空欄だと加点②判定不能
 
 # ヒアリングシート様式フィンガープリント（原本: ツール/ヒアリングシート2026_*.xlsx 実測
-# 2026-07-16。基本情報シートB列ラベルの行位置。2行以上一致で様式確定。
+# 2026-08-10 に4様式で再実測。基本情報シートB列ラベルの行位置。2行以上一致で様式確定。
 # 様式改訂時はここと required_rows を再実測すること）
+#
+# 🔴 指紋は「自分の様式で最高点・他様式では1点以下」になるよう選ぶこと。
+#    判定は最高点が同点だと『判別不能』に落ちて後続チェックごと落ちる。
+#    2つの個人様式（通常枠個人／インボイス個人）は基本情報の r8〜r26 が完全一致するため、
+#    見分けは r62（過去交付の条件行）と r84（通常枠=自社の強み／インボイス=事業所内最低賃金時給）で行う。
+#    2026-08-10 実測のスコア行列（行=実ファイル・列=様式定義。対角3・他1以下）:
+#                   通常枠法人 インボイス法人 インボイス個人 通常枠個人
+#      通常枠法人        3        1        0        0
+#      インボイス法人      0        3        0        0
+#      インボイス個人      0        1        3        1
+#      通常枠個人        0        1        1        3
 HEARING_SHEET = '基本情報'
 HEARING_FORMS = {
     '通常枠法人': {
@@ -170,11 +181,24 @@ HEARING_FORMS = {
     },
     'インボイス個人': {
         'frame': 'インボイス枠', 'entity': '個人',
-        'fingerprint': {8: '屋号・商号', 16: '生年月日', 22: '事業開始年月日'},
+        # r16 生年月日 / r22 事業開始年月日 は通常枠個人と完全一致するため指紋から外した
+        'fingerprint': {8: '屋号・商号', 62: '過去にサービス等生産性向上IT導入支援事業',
+                        84: '事業所内最低賃金時給'},
         'required_rows': [
             6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 29, 30, 31, 32, 33, 34,
             35, 36, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 70, 73,
             75, 78, 79, 80, 81, 84, 88, 91, 92, 93, 96, 101, 102,
+        ],
+        'sa_id_row': 75,
+    },
+    '通常枠個人': {
+        'frame': '通常枠', 'entity': '個人',
+        'fingerprint': {8: '屋号・商号', 84: '自社の強み',
+                        87: 'どのようなプロセスに対してIT投資を行いました'},
+        'required_rows': [
+            6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 29, 30, 31, 32, 33, 34,
+            35, 36, 39, 41, 43, 45, 47, 49, 51, 53, 55, 57, 59, 61, 70, 73,
+            75, 78, 79, 80, 81, 84, 85, 86, 87, 90, 95, 97, 98, 99, 102, 103,
         ],
         'sa_id_row': 75,
     },
@@ -503,6 +527,24 @@ def check_excel_structures(rep: Report, detected, task: str, frame: str, entity:
             'hearing_form': hearing_form}
 
 
+def _sa_id_row_by_label(ws):
+    """B列ラベルから SECURITY ACTION の行を探す（様式が判別できないとき用）"""
+    for r in range(1, 120):
+        if 'SECURITY ACTION' in norm(ws.cell(row=r, column=2).value).upper():
+            return r
+    return None
+
+
+def _check_sa_id(rep: Report, ws, row: int, name: str):
+    """SECURITY ACTION 自己宣言IDが旧システムの「40」始まりでないか（FAIL 相当）"""
+    digits = re.sub(r'\D', '', norm(ws.cell(row=row, column=3).value))
+    if digits.startswith('40'):
+        rep.fail('SA-ID-OLD',
+                 f'{name}: SECURITY ACTION自己宣言IDが「40」始まりです。'
+                 '旧システムのIDのため新システムでの再取得が必要です（即時発行可）',
+                 [name])
+
+
 def _check_hearing(rep: Report, hearings, frame: str, entity: str):
     """ヒアリングシートの様式判定（フィンガープリント）＋必須セル未記入チェック"""
     from openpyxl import load_workbook
@@ -538,6 +580,16 @@ def _check_hearing(rep: Report, hearings, frame: str, entity: str):
             rep.warn('HEARING-FORM-UNKNOWN',
                      f'{e["name"]}: 様式を判別できません（フィンガープリント一致 {scores}）。'
                      '独自改変か旧様式の可能性。目視確認してください', [e['name']])
+            # 様式が分からなくても、SECURITY ACTION の旧ID（FAIL相当）だけは必ず見る。
+            # ここで continue して全部飛ばすと「未記入なし・SA-ID問題なし」と誤読される
+            sa_row = _sa_id_row_by_label(ws)
+            if sa_row:
+                _check_sa_id(rep, ws, sa_row, e['name'])
+            else:
+                rep.warn('SA-ID-UNCHECKED',
+                         f'{e["name"]}: 様式不明かつSECURITY ACTION欄を特定できず、'
+                         '旧ID（40始まり）の確認ができていません。目視で確認してください',
+                         [e['name']])
             continue
         best = max(scores, key=lambda k: scores[k])
         spec = HEARING_FORMS[best]
@@ -566,13 +618,7 @@ def _check_hearing(rep: Report, hearings, frame: str, entity: str):
                      f'{e["name"]}: 記入欄（黄色セル相当）に未記入が{len(empty)}件: '
                      f'{head}{more}', [e['name']])
 
-        sa_val = norm(ws.cell(row=spec['sa_id_row'], column=3).value)
-        digits = re.sub(r'\D', '', sa_val)
-        if digits.startswith('40'):
-            rep.fail('SA-ID-OLD',
-                     f'{e["name"]}: SECURITY ACTION自己宣言IDが「40」始まりです。'
-                     '旧システムのIDのため新システムでの再取得が必要です（即時発行可）',
-                     [e['name']])
+        _check_sa_id(rep, ws, spec['sa_id_row'], e['name'])
     return form_found
 
 
