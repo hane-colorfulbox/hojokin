@@ -1,9 +1,15 @@
-# 通常枠×個人事業主の申請書原本（下書き）を機械組み立てする。
+# 🔴 引退（2026-08-17）: 通常枠×個人の原本は、原本管理担当者が Drive で作成した正本
+#    （独自レイアウト）に切り替わり、リポジトリ原本は scripts/patch_genpon_tsujo_kojin_from_drive.py
+#    がそのエクスポートから生成する。本スクリプト（素材連結方式）はもう実行しないこと
+#    （実行すると OUT_NAME の本番原本を旧レイアウトで上書きしてしまう）。
+#    8/10 生成版が必要なときは git 履歴（コミット 13f4e0e）から取得する。
+#
+# 通常枠×個人事業主の申請書原本を機械組み立てする（旧方式）。
 # 素材:
 #   E = ツール/【原本_法人】企業名_通常枠_法人2026_v2.xlsx   … 骨格（通常枠の全ブロック）
 #   G = ツール/【原本_個人】企業名_インボイス枠_個人2026.xlsx … 個人事業主ブロックの前例
-# 出力:
-#   ツール/【原本_個人】企業名_通常枠_個人2026_下書き.xlsx
+# 出力（🔴 本番ファイルを直接上書きする。「_下書き」サフィックスは付かない）:
+#   ツール/【原本_個人】企業名_通常枠_個人2026.xlsx
 # 方式: 行セグメント単位のコピー + 意味ベース行マップで数式/DV/CF/結合/行高を全付け替え。
 import sys, re, shutil, unicodedata
 from copy import copy, deepcopy
@@ -13,6 +19,14 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 sys.stdout.reconfigure(encoding='utf-8')
+
+# 引退ガード: 現行の原本（坂平さん版レイアウト）を旧レイアウトで上書きしないための停止。
+# 歴史的な再現目的で本当に実行する場合のみ --force-legacy を付ける。
+if '--force-legacy' not in sys.argv:
+    print('このスクリプトは引退しました（2026-08-17）。現行の原本生成は')
+    print('scripts/patch_genpon_tsujo_kojin_from_drive.py を使ってください。')
+    print('（旧方式を意図して実行する場合のみ --force-legacy を付与）')
+    raise SystemExit(1)
 
 BASE = Path(r'C:\Users\user\projects\カラフルボックス\補助金')
 OUT_NAME = 'ツール/【原本_個人】企業名_通常枠_個人2026.xlsx'

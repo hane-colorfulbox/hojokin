@@ -492,7 +492,16 @@ def find_template(base_dir: Path, template_type: str) -> Path | None:
         'インボイス枠_2026': ['原本', 'インボイス', '法人', '2026'],
         'インボイス枠_個人_2026': ['原本', 'インボイス', '個人', '2026'],
     }
+    # 🔴 法人テンプレ種別は「個人」を含むファイル名を除外する。
+    #    Drive の通常枠個人正本はタイトル都合で DL 名が
+    #    【原本_法人】企業名_通常枠_個人2026.xlsx になり「法人」「個人」の両方を含む。
+    #    両属ファイルは個人テンプレとして扱う（法人側の候補に混入させない）。
+    exclude = {
+        '通常枠_2026': ['個人'],
+        'インボイス枠_2026': ['個人'],
+    }
     kws = keywords.get(template_type, [])
+    ng_kws = exclude.get(template_type, [])
     candidates = []
     # ルートとツール/の両方から候補を集める
     search_dirs = [base_dir]
@@ -502,7 +511,8 @@ def find_template(base_dir: Path, template_type: str) -> Path | None:
     for d in search_dirs:
         for p in d.iterdir():
             name = unicodedata.normalize('NFC', p.name)
-            if p.suffix == '.xlsx' and all(kw in name for kw in kws) and not name.startswith('~$'):
+            if (p.suffix == '.xlsx' and all(kw in name for kw in kws)
+                    and not any(kw in name for kw in ng_kws) and not name.startswith('~$')):
                 candidates.append(p)
     if not candidates:
         return None
@@ -510,6 +520,11 @@ def find_template(base_dir: Path, template_type: str) -> Path | None:
     for c in candidates:
         if 'v2' in c.name:
             return c
+    if len({unicodedata.normalize('NFC', c.name) for c in candidates}) > 1:
+        # 同一種別に別名の候補が複数（原本の新旧混在など）。先頭を採用するが、
+        # 版ズレは書き込み前の W-TPL-001 ゲートが止めるため無警告転記にはならない
+        print(f'[find_template] {template_type} の候補が複数: '
+              f'{[c.name for c in candidates]} → {candidates[0].name} を採用')
     return candidates[0]
 
 
@@ -1858,7 +1873,7 @@ st.markdown(
 # 中身は脱PIIの知識パック(引き継ぎ/)＋索引CLAUDE.md＋参照docs＋スキル(.claude/skills/wagebook-convert)
 # ＋更新スクリプト(scripts/update_handoff.py)。v2 でスキルを同梱し 1 本化。
 # scripts/build_handoff_zip.py で生成し、Drive「補助金ツール」の hojokin-handoff.zip を版差し替え。
-_HANDOFF_CONTEXT_VERSION = '2026-07-30'
+_HANDOFF_CONTEXT_VERSION = '2026-08-17'
 # Drive 共有リンク（hojokin-handoff.zip = コンテキスト一式）。配布先: マイドライブ/補助金ツール/
 _HANDOFF_CONTEXT_ZIP_URL = 'https://drive.google.com/file/d/1FWubpOrg0crtoz6cF2Jdp3otRi5_GslJ/view?usp=sharing'
 with st.expander(

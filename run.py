@@ -45,14 +45,21 @@ def setup_logging(verbose: bool = False):
 
 
 def find_template(base_dir: Path, template_type: str) -> Path | None:
-    """テンプレートファイルを検索（v2を優先）"""
+    """テンプレートファイルを検索（v2を優先。app.py の同名関数と同期を保つこと）"""
     keywords = {
         '通常枠_2026': ['原本', '通常枠', '法人', '2026'],
         '通常枠_個人_2026': ['原本', '通常枠', '個人', '2026'],
         'インボイス枠_2026': ['原本', 'インボイス', '法人', '2026'],
         'インボイス枠_個人_2026': ['原本', 'インボイス', '個人', '2026'],
     }
+    # 法人テンプレ種別は「個人」を含むファイル名を除外（Drive の通常枠個人正本の DL 名は
+    # 【原本_法人】…通常枠_個人2026.xlsx で両方のキーワードを含むため。個人側として扱う）
+    exclude = {
+        '通常枠_2026': ['個人'],
+        'インボイス枠_2026': ['個人'],
+    }
     kws = keywords.get(template_type, [])
+    ng_kws = exclude.get(template_type, [])
     candidates = []
     search_dirs = [base_dir]
     tool_dir = base_dir / 'ツール'
@@ -60,13 +67,17 @@ def find_template(base_dir: Path, template_type: str) -> Path | None:
         search_dirs.append(tool_dir)
     for d in search_dirs:
         for p in d.iterdir():
-            if p.suffix == '.xlsx' and all(kw in p.name for kw in kws) and not p.name.startswith('~$'):
+            if (p.suffix == '.xlsx' and all(kw in p.name for kw in kws)
+                    and not any(kw in p.name for kw in ng_kws) and not p.name.startswith('~$')):
                 candidates.append(p)
     if not candidates:
         return None
     for c in candidates:
         if 'v2' in c.name:
             return c
+    if len({c.name for c in candidates}) > 1:
+        print(f'[find_template] {template_type} の候補が複数: '
+              f'{[c.name for c in candidates]} → {candidates[0].name} を採用')
     return candidates[0]
 
 

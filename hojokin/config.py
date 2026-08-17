@@ -689,12 +689,15 @@ MAPPING_2026_INVOICE_KOJIN = TemplateMapping(
 
 # ── 2026 通常枠（個人事業主）──
 # テンプレート原本: ツール/【原本_個人】企業名_通常枠_個人2026.xlsx
-# ヒアリングシート: ツール/ヒアリングシート2026_通常枠個人.xlsx
-# 🔴 この定数は scripts/gen_mapping_tsujo_kojin.py が機械生成する。
-#    原本を組み直したら手で直さず、生成し直して差し替えること
-#    （通常枠法人v2 と インボイス個人 の行セグメント写像から導出＋ラベル照合で検証）。
+#   正本は原本管理担当者が Drive で管理する「【原本/法人】企業名_通常枠/個人2026」。
+#   リポジトリ原本は scripts/patch_genpon_tsujo_kojin_from_drive.py がそのエクスポートに
+#   機械的修正のみ当てて生成する（2026-08-17〜。旧 build_genpon_tsujo_kojin.py は引退）。
+# ヒアリングシート: ツール/ヒアリングシート2026_通常枠個人.xlsx（Drive 原本バイトの写し）
+# 🔴 この定数は scripts/gen_mapping_tsujo_kojin.py が機械生成する（新原本の B/A 列ラベル引き当て方式）。
+#    原本・ヒアリングシートの行が変わったら手で直さず、生成し直して差し替えること。
 MAPPING_2026_TSUJO_KOJIN = TemplateMapping(
     hearing_to_tenki=[
+        # (ヒアリング行, 転記行, 電話番号変換)
         (6, 6, False),   # GビズIDプライム
         (8, 8, False),   # 屋号・商号
         (10, 10, False),   # 屋号・商号（フリガナ）
@@ -708,99 +711,98 @@ MAPPING_2026_TSUJO_KOJIN = TemplateMapping(
         (26, 26, False),   # 事業者URL
         (29, 28, False),   # 主な事業内容
         (30, 29, False),   # 他社に負けない貴社の「強み」は何ですか？
-        (31, 30, False),   # 現在「時間がかかっている業務」は何ですか？
-        (32, 31, False),   # その業務に「月間何時間」ほど費やしていますか？
-        (33, 32, False),   # 導入するツールのどの機能を使って、どう楽にしたいです
-        (34, 33, False),   # 導入後、事務作業時間は「何％（あるいは何時間）」削減
-        (35, 34, False),   # 作業が楽になり「浮いた時間」で、どのような価値を生む
-        (36, 35, False),   # 3年後の「売上目標」を教えてください
-        (37, 36, False),   # どのような属性の取引先が多いですか？
-        (39, 38, True),   # 代表電話番号
-        (41, 40, False),   # 担当者氏名
-        (43, 42, False),   # 担当者氏名フリガナ
-        (45, 44, False),   # 担当者メールアドレス
-        (47, 46, True),   # 担当者電話番号
-        (49, 48, True),   # 担当者携帯番号
-        (51, 50, False),   # 従業員数：正規雇用
-        (51, 76, False),   # 従業員数：正規雇用
-        (53, 52, False),   # 従業員数：契約社員
-        (53, 77, False),   # 従業員数：契約社員
-        (55, 54, False),   # 従業員数：パートアルバイト
-        (55, 78, False),   # 従業員数：パートアルバイト
-        (57, 56, False),   # 従業員数：派遣社員
-        (59, 58, False),   # 従業員数：その他
-        (61, 60, False),   # 過去にサービス等生産性向上IT導入支援事業の補助金の
-        (63, 62, False),   # 申請年度
-        (64, 63, False),   # 申請枠
-        (65, 64, False),   # 申請回
-        (66, 65, False),   # 申請ツール名
-        (69, 67, False),   # 女性活躍推進法に基づく一般事業主行動計画
-        (70, 68, False),   # えるぼし認定取得状況
-        (72, 70, False),   # 次世代法に基づく一般事業主行動計画
-        (73, 71, False),   # くるみん認定取得状況
-        (75, 73, False),   # SECURITY ACTION自己宣言ID
-        (81, 79, False),   # 年間の平均労働時間
-        (84, 82, False),   # 自社の強み（複数選択可）
-        (85, 83, False),   # 自社の弱み（複数選択可）
-        (86, 84, False),   # これまでのIT投資の年間金額
-        (87, 85, False),   # どのようなプロセスに対してIT投資を行いましたか。（
-        (90, 88, False),   # 事業所内最低賃金時給
-        (92, 90, False),   # 賃金引上げ計画を、従業員へ表明しましたか？
-        (95, 92, False),   # 賃金引上げ計画における地域別最低賃金に対する賃上げ幅
-        (97, 94, False),   # 従業員代表者
-        (98, 95, False),   # 給与担当者
-        (99, 96, False),   # 事業所内最低賃金者
-        (102, 99, False),   # 指定する一定期間（令和6年10月〜令和7年9月）にお
-        (103, 100, False),   # 交付申請の直近月における事業場内最低賃金が令和7年7
+        (31, 30, False),   # 現在抱えている「業務上の課題」は何ですか？
+        (32, 31, False),   # 現在抱えている「人事・組織の課題」は何ですか？
+        (33, 32, False),   # その課題によって、月間何時間ほどのロス（または機会損失）が発
+        (34, 33, False),   # 導入予定のITツールで、活用したい主要機能は何ですか？
+        (35, 34, False),   # ITツール導入により期待する効果（数値）は何ですか？
+        (36, 35, False),   # IT導入で「浮いた時間」や「正確なデータ」を使って、今度どの
+        (37, 36, False),   # 3年後の「売上目標」を教えてください
+        (38, 37, False),   # どのような属性の取引先が多いですか？
+        (40, 39, True),   # 代表電話番号
+        (42, 41, False),   # 担当者氏名
+        (44, 43, False),   # 担当者氏名フリガナ
+        (46, 45, False),   # 担当者メールアドレス
+        (48, 47, True),   # 担当者電話番号
+        (50, 49, True),   # 担当者携帯番号
+        (52, 51, False),   # 従業員数：正規雇用
+        (54, 53, False),   # 従業員数：契約社員
+        (56, 55, False),   # 従業員数：パートアルバイト
+        (58, 57, False),   # 従業員数：派遣社員
+        (60, 59, False),   # 従業員数：その他
+        (62, 61, False),   # 過去にサービス等生産性向上IT導入支援事業の補助金の交付を受
+        (64, 63, False),   # 申請年度
+        (65, 64, False),   # 申請枠
+        (66, 65, False),   # 申請回
+        (67, 66, False),   # 申請ツール名
+        (70, 69, False),   # 女性活躍推進法に基づく一般事業主行動計画
+        (71, 70, False),   # えるぼし認定取得状況
+        (73, 72, False),   # 次世代法に基づく一般事業主行動計画
+        (74, 73, False),   # くるみん認定取得状況
+        (76, 75, False),   # SECURITY ACTION自己宣言ID
+        (79, 78, False),   # 従業員数：正規雇用
+        (80, 79, False),   # 従業員数：契約社員
+        (81, 80, False),   # 従業員数：パートアルバイト
+        (82, 81, False),   # 年間の平均労働時間
+        (85, 84, False),   # 自社の強み（複数選択可）
+        (86, 85, False),   # 自社の弱み（複数選択可）
+        (87, 86, False),   # これまでのIT投資の年間金額
+        (88, 87, False),   # どのようなプロセスに対してIT投資を行いましたか。（複数選択
+        (91, 90, False),   # 事業所内最低賃金時給
+        (93, 92, False),   # 賃金引上げ計画を、従業員へ表明しましたか？
+        (96, 94, False),   # 賃金引上げ計画における地域別最低賃金に対する賃上げ幅を選択く
+        (98, 96, False),   # 従業員代表者
+        (99, 97, False),   # 給与担当者
+        (100, 98, False),   # 事業所内最低賃金者
     ],
     shinsei={
         'headquarters_address': 55,   # 現在住所
         'industry_code': 56,   # 業種コード　（数字４桁）
         'industry_text': 57,   # 業種_大分類/中分類/小分類/細分類
         'capital': 62,   # 資本金
-        'business_description': 76,   # 事業内容（255文字以内）
-        'fiscal_month': 77,   # 決算月
-        'tool_name': 74,   # ツール名
-        'rep_name': 78,   # 代表者氏名
-        'rep_kana': 79,   # 代表者氏名（フリガナ）
-        'past_subsidies': 92,   # 過去年度交付決定
-        'eruboshi': 96,   # えるぼし認定
-        'kurumin': 97,   # くるみん認定
-        'business_types': 117,   # 行っている事業に該当するものすべて選択
-        'officer_count_prev': 126,   # 代表者・役員数
-        'fin_revenue': 128,   # 売上高
-        'fin_gross_profit': 129,   # 粗利益
-        'fin_operating_profit': 130,   # 営業利益
-        'fin_ordinary_profit': 131,   # 経常利益
-        'fin_depreciation': 132,   # 減価償却費
-        'fin_personnel': 133,   # 人件費
-        'fin_capital': 134,   # 資本金
-        'management_intent': 140,   # 経営意欲
-        'strength': 142,   # 強み
-        'weakness': 144,   # 弱み
-        'it_investment_amount': 146,   # これまでのIT投資の年間金額
-        'it_investment_process': 149,   # どのようなプロセスに対してＩＴ投資を行ったか
-        'security_status': 150,   # セキュリティの状況
-        'future_goals': 154,   # 事業をどのように変えていきますか？（将来目標）
-        'min_wage': 191,   # 主たる事業場の所在地/地域別最低賃金
-        'min_wage_hourly': 192,   # 事業所内最低賃金時給
-        'employee_count_fte': 193,   # 従業員数（全期間在籍していない従業員は除外、パートな
-        'wage_total_base': 194,   # 事業計画期間における給与支給総額
-        'wage_total_y1': 195,   # 給与支給総額
-        'wage_total_y2': 196,   # 給与支給総額
-        'wage_total_y3': 197,   # 給与支給総額
-        'wage_raise_declaration': 200,   # 上記の賃上げ計画を従業員へ表明しましたか？
-        'wage_raise_amount': 201,   # 賃上げ幅を選択
-        'wage_raise_method': 202,   # 表明を行った方法
-        'wage_raise_date': 203,   # 表明を行った日付
+        'tool_name': 75,   # ツール名
+        'business_description': 77,   # 事業内容（255文字以内）
+        'fiscal_month': 78,   # 決算月
+        'rep_name': 79,   # 代表者氏名
+        'rep_kana': 80,   # 代表者氏名（フリガナ）
+        'past_subsidies': 93,   # 過去年度交付決定
+        'eruboshi': 97,   # えるぼし認定
+        'kurumin': 98,   # くるみん認定
+        'business_types': 118,   # 行っている事業に該当するものすべて選択
+        'officer_count_prev': 128,   # 代表者・役員数
+        'fin_revenue': 130,   # 売上高
+        'fin_gross_profit': 131,   # 粗利益
+        'fin_operating_profit': 132,   # 営業利益
+        'fin_ordinary_profit': 133,   # 経常利益
+        'fin_depreciation': 134,   # 減価償却費
+        'fin_personnel': 135,   # 人件費
+        'fin_capital': 136,   # 資本金
+        'management_intent': 142,   # 経営意欲
+        'strength': 144,   # 強み
+        'weakness': 146,   # 弱み
+        'it_investment_amount': 148,   # これまでのIT投資の年間金額
+        'it_investment_process': 151,   # どのようなプロセスに対してＩＴ投資を行ったか
+        'security_status': 152,   # セキュリティの状況
+        'future_goals': 156,   # 事業をどのように変えていきますか？（将来目標）
+        'min_wage': 189,   # 主たる事業場の所在地/地域別最低賃金
+        'min_wage_hourly': 190,   # 事業所内最低賃金時給
+        'employee_count_fte': 191,   # 従業員数（全期間在籍していない従業員は除外、パートなどの短時
+        'wage_total_base': 192,   # 事業計画期間における給与支給総額
+        'wage_total_y1': 193,   # 給与支給総額
+        'wage_total_y2': 194,   # 給与支給総額
+        'wage_total_y3': 195,   # 給与支給総額
+        'wage_raise_declaration': 198,   # 上記の賃上げ計画を従業員へ表明しましたか？
+        'wage_raise_amount': 199,   # 賃上げ幅
+        'wage_raise_method': 200,   # 表明を行った方法
+        'wage_raise_date': 201,   # 表明を行った日付
     },
     kyuyo_sheet_name='生産性指標給与支給総額計算',
     kyuyo={'revenue': (10, 2), 'gross_profit': (11, 2), 'operating_profit': (12, 2), 'ordinary_profit': (13, 2), 'depreciation': (21, 5), 'salary': (5, 5), 'misc_wages': (6, 5), 'bonus': (7, 5), 'travel_expense': (9, 5)},
     shinsei_clear_range=(5, 245),
-    tenki_text_range=(28, 37),
+    tenki_text_range=(28, 38),
     is_kojin=True,
-    preserve_rows=[145, 147, 151, 152, 153],
-    hearing_wage_raise_row=95,
+    preserve_rows=[147, 149, 153, 154, 155],
+    hearing_wage_raise_row=96,
 )
 
 def get_mapping(template_type: str) -> TemplateMapping:
@@ -814,5 +816,37 @@ def get_mapping(template_type: str) -> TemplateMapping:
     if template_type not in mappings:
         raise ValueError(f'未対応のテンプレートタイプ: {template_type}。対応: {list(mappings.keys())}')
     return mappings[template_type]
+
+
+# ── 申請書テンプレの転記先ラベル検証（W-TPL-001 ゲート）──
+# フィールド名 → 申請内容シート B列の期待ラベル（タプルは表記ゆれの許容形）。
+# 行番号は各 MAPPING_*.shinsei から解決するため、原本の行がズレる版替えでは
+# この辞書は変更不要（ラベルの文言が変わったときだけ直す）。
+# 比較は NFKC 正規化＋全空白除去＋先頭 ANCHOR_PREFIX_LEN 文字の「相互切詰め等値」。
+# （startswith だと「強み」が「強み（転記）」に誤一致して ±1 行ズレを見逃すため等値にする）
+# アンカーはシート上部・中部・下部に分散させてあり、区間内の行挿入/削除は
+# その下のアンカーの不一致として検知される。
+SHINSEI_ANCHOR_LABELS: dict[str, str | tuple[str, ...]] = {
+    'tool_name': 'ツール名',
+    'business_description': '事業内容（255文字以内）',
+    'fiscal_month': '決算月',
+    'rep_name': '代表者氏名',
+    'business_types': '行っている事業に該当するものすべて選択',
+    'officer_count_prev': '代表者・役員数',
+    'fin_revenue': '売上高',
+    'management_intent': '経営意欲',
+    'weakness': '弱み',
+    'security_status': 'セキュリティの状況',
+    'future_goals': '事業をどのように変えていきますか？（将来目標）',
+    'min_wage_hourly': '事業所内最低賃金時給',
+    'employee_count_fte': '従業員数（全期間在籍していない従業員は除外',
+    'wage_total_base': '事業計画期間における給与支給総額',
+    'wage_raise_declaration': '上記の賃上げ計画を従業員へ表明しましたか？',
+    # 通常枠個人（坂平さん版レイアウト）のみ「賃上げ幅」、他テンプレは「賃上げ幅を選択」
+    'wage_raise_amount': ('賃上げ幅を選択', '賃上げ幅'),
+}
+ANCHOR_PREFIX_LEN = 12
+# 緊急ロールバック用（Streamlit Cloud は Secrets で切替可能）
+TEMPLATE_LABEL_GATE = os.getenv('TEMPLATE_LABEL_GATE', 'true').strip().lower() not in ('false', '0', 'off', 'no')
 
 

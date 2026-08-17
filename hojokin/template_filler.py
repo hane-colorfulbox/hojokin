@@ -5,13 +5,16 @@ from __future__ import annotations
 import logging
 import re
 import shutil
+import unicodedata
 from pathlib import Path
 import openpyxl
 
 from openpyxl.cell.cell import MergedCell
 
+from . import config as _config
 from .models import ExtractionResult
 from .config import TemplateMapping, get_min_wage
+from .warnings_catalog import tag as warn_tag
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,83 @@ WAGE_RAISE_50 = '＋50円'
 # ヒアリング回答の表記揺れ吸収用（選択肢は「❷＋３０円以上」だが手入力で
 # 半角数字・円なし等が混ざるため、数字だけ半角に正規化して判定する）
 _ZEN2HAN_DIGITS = str.maketrans('０１２３４５６７８９', '0123456789')
+
+
+# ══════════════ 申請書テンプレの版ズレゲート（W-TPL-001）══════════════
+# 原本は Drive 上で別担当者が管理しており、行が増減した新版・枠/法人格の取り違えが
+# 起こり得る。マッピングは行番号固定のため、ズレた原本に無警告で転記すると全項目が
+# 別のセルに入る。書き込み前に「実際の B列ラベル」と「マッピングが想定するラベル」を
+# アンカー数点で照合し、不一致なら処理を止める。
+
+class TemplateLayoutMismatchError(RuntimeError):
+    """テンプレ原本の行レイアウトがツールのマッピングと不一致（処理停止用）"""
+
+
+_WS_RE = re.compile(r'\s+')
+
+
+def normalize_label(value) -> str:
+    """B列ラベル比較用の正規化: NFKC ＋ 全空白（改行・タブ・全半角スペース）除去"""
+    return _WS_RE.sub('', unicodedata.normalize('NFKC', str(value if value is not None else '')))
+
+
+def check_shinsei_anchor_labels(ws, mapping: TemplateMapping) -> list[tuple[int, str, str]]:
+    """申請内容シートのアンカー行 B列ラベルを照合し、不一致 [(行, 期待, 実際), ...] を返す。
+
+    比較は先頭 ANCHOR_PREFIX_LEN 文字の相互切詰め等値（startswith だと
+    「強み」が隣の「強み（転記）」に一致して ±1 行ズレを見逃す）。
+    """
+    n = _config.ANCHOR_PREFIX_LEN
+    mismatches = []
+    for field, expected in _config.SHINSEI_ANCHOR_LABELS.items():
+        row = mapping.shinsei.get(field)
+        if row is None:
+            continue
+        candidates = expected if isinstance(expected, tuple) else (expected,)
+        actual_raw = ws.cell(row=row, column=2).value
+        got = normalize_label(actual_raw)[:n]
+        if any(got == normalize_label(want)[:n] for want in candidates):
+            continue
+        shown = str(actual_raw)[:30] if actual_raw is not None else '（空欄）'
+        mismatches.append((row, candidates[0], shown))
+    return mismatches
+
+
+def verify_template_labels(template_path: Path, mapping: TemplateMapping, template_type: str) -> None:
+    """テンプレ原本の転記先ラベルを書き込み前に照合する（不一致なら例外で停止）。
+
+    pipeline.run_application_transfer が API 呼び出し前に呼ぶ。例外メッセージは
+    そのまま st.error で利用者に表示されるため、非エンジニア向けの文言にする。
+    """
+    if not _config.TEMPLATE_LABEL_GATE:
+        logger.warning('TEMPLATE_LABEL_GATE=false のため版ズレゲートをスキップ')
+        return
+    wb = openpyxl.load_workbook(template_path, read_only=True, data_only=False)
+    try:
+        if '申請内容' not in wb.sheetnames:
+            raise TemplateLayoutMismatchError(
+                f'⛔ {warn_tag("W-TPL-001")}申請書テンプレ「{template_path.name}」に'
+                f'「申請内容」シートがありません（{template_type} の原本ではない可能性）。'
+                f'安全のため処理を中止しました。ファイルは出力されていません。'
+            )
+        mismatches = check_shinsei_anchor_labels(wb['申請内容'], mapping)
+    finally:
+        wb.close()
+    if not mismatches:
+        return
+    row, want, got = mismatches[0]
+    others = f'（他{len(mismatches) - 1}件）' if len(mismatches) > 1 else ''
+    raise TemplateLayoutMismatchError(
+        f'⛔ {warn_tag("W-TPL-001")}申請書テンプレ原本の版が、ツールの転記対応表と合っていません'
+        f'（安全のため処理を中止しました。ファイルは出力されていません）。\n'
+        f'テンプレ「{template_path.name}」（{template_type}）の申請内容シートを書き込み前に点検したところ、'
+        f'{len(mismatches)}箇所で項目の行位置がズレています。'
+        f'例: {row}行目は「{want}」のはずですが、実際は「{got}」でした{others}。\n'
+        f'考えられる原因: (1) Drive の原本が更新され、行が増減した新しい版が配布された '
+        f'(2) 枠（通常枠/インボイス枠）や法人/個人の原本を取り違えている。\n'
+        f'対処: 原本が選択した枠の最新版か確認してください。原本の行構成が変わっている場合は、'
+        f'ツール管理者に連絡して対応表（マッピング）の更新を依頼してください。'
+    )
 
 
 def wage_raise_choice_from_hearing(hearing_data: dict, mapping: TemplateMapping) -> str | None:
@@ -537,6 +617,19 @@ def fill_template(
     logger.info(f'テンプレートコピー: {template_path.name} → {output_path.name}')
 
     wb = openpyxl.load_workbook(output_path)
+
+    # STEP 0: 版ズレゲートの防御的再検証（正規経路は pipeline が書き込み前に検証済み。
+    # 将来 fill_template を直接呼ぶ経路ができても素通りさせない）
+    if _config.TEMPLATE_LABEL_GATE and '申請内容' in wb.sheetnames:
+        _mis = check_shinsei_anchor_labels(wb['申請内容'], mapping)
+        if _mis:
+            wb.close()
+            Path(output_path).unlink(missing_ok=True)
+            row, want, got = _mis[0]
+            raise TemplateLayoutMismatchError(
+                f'⛔ {warn_tag("W-TPL-001")}テンプレ原本の行レイアウトがツールの対応表と不一致のため'
+                f'中止しました（例: {row}行目 期待「{want}」/ 実際「{got}」、計{len(_mis)}箇所）。'
+            )
 
     # STEP 1: サンプルデータクリア
     cleared = clear_manual_cells(wb, mapping)
