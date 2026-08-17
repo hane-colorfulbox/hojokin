@@ -28,6 +28,7 @@ GitHub アカウントを使わない担当者へ、引き継ぎパック（引�
     (09/11/12/13)・社長意向/設計/議事/参考_Scale・案件別・レンダー物(*.pdf/*.xlsx)は
     同梱しない。
 """
+import hashlib
 import json
 import shutil
 import sys
@@ -91,6 +92,10 @@ INCLUDE_FILES = [
     'hojokin/xlsx_surgical.py',
     'hojokin/bonus_wage_ledger_writer.py',
     'ツール/加点判定用賃金台帳テンプレート.xlsx',
+    # 通常枠×個人の申請書原本（修正版）。原本管理担当者の Drive 正本に機械的修正を当てた
+    # 配布版（2026-08-17 羽根さん指示「修正したものを配布する」）。他3テンプレは従来どおり
+    # Drive 経由の配布で、パック同梱はこの1本のみ（非対称は 00_はじめに に明記）。
+    'ツール/【原本_個人】企業名_通常枠_個人2026.xlsx',
     '補助金加点/加点措置①用.xlsx',
     '補助金加点/加点措置②用.xlsx',
     '補助金加点/補助率引き上げ・加点措置①用.xlsx',
@@ -206,6 +211,11 @@ def main() -> int:
 
     shutil.copy2(zip_dated, zip_latest)
 
+    # 版識別は built_on（日付）だけだと同日再ビルドを区別できないため、ZIP の SHA-256 を
+    # 外側の manifest にだけ追加する（ZIP 内の manifest は自身のハッシュを持てない）。
+    sha = hashlib.sha256(zip_dated.read_bytes()).hexdigest()
+    version['zip_sha256'] = sha
+    version_json = json.dumps(version, ensure_ascii=False, indent=2)
     (DIST_DIR / 'handoff_version.json').write_text(version_json, encoding='utf-8')
 
     size_kb = zip_dated.stat().st_size / 1024
