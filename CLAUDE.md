@@ -34,6 +34,9 @@
 - 環境変数: `.env` 参照（`.env.example` を雛形として）
 - 主な変数: `CLAUDE_API_KEY`, `GOOGLE_CREDENTIALS_PATH`, `MANAGEMENT_SHEET_ID`, `USE_AI_WAGE_EXTRACTION`
 - Google Sheet/Drive の各種 ID は `.env` で管理。コードにハードコードしない。
+- API キーは `.env` 経由。コードに直書き禁止（親フォルダ側の書類作成コードでは `ANTHROPIC_API_KEY`）
+- 使用ライブラリ: openpyxl / anthropic / python-dotenv。**Excel 操作は openpyxl で行う（xlwings は使わない）**。Claude API は `anthropic.Anthropic()` クライアント
+- 出力ファイル名は `{会社名}_{テンプレート種別}_AI版.xlsx` の形式を守る
 
 ## 業務体制・運用ルール
 
@@ -105,7 +108,8 @@
 - Google Sheet ID・Drive フォルダ ID・Webhook URL 等は環境変数 / Apps Script Properties に逃がす
 
 ### 本番デプロイ
-- Streamlit Cloud と GitHub の `main` ブランチが連携。push で自動再デプロイ。
+- **本番URL: Streamlit Cloud 上の hojokin アプリ**（URLは Streamlit Cloud 管理画面／社内共有を参照。ローカルで Streamlit は立てていない）
+- Streamlit Cloud と GitHub の `main` ブランチが連携。push で自動再デプロイ（通常1〜2分）。**コード修正の反映手順 = `git push` のみ**。「再起動」「Ctrl+C して起動し直し」「__pycache__ 削除」などのローカル手順は不要
 - ロールバックは `git revert` または Streamlit Cloud secrets での機能フラグ切替
 - `USE_AI_WAGE_EXTRACTION=false` で AI 抽出を旧経路（決定論パーサー）に戻せる
 - **Streamlit Cloud のログのタイムスタンプ（`[HH:MM:SS]`）は UTC**。日本時間（JST）はそれ +9時間。ログ時刻を読むときは +9 して換算する（例：ログ `[04:23]` ＝ JST 13:23）
