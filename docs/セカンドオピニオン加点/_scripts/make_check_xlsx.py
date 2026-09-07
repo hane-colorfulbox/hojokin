@@ -1,9 +1,9 @@
 """チェック可能 Excel 生成 — 営業ヒアリングシート(05)のオンライン商談・入力版。
 
 使い方:
-    python make_check_xlsx.py <05_面談ヒアリングシート.md>
-入力 md と同じ場所に `<basename>_オンライン入力用.xlsx` を出力する（md は出力名の決定だけに使う）。
-設問データは hearing_form.FORM を参照する。
+    python make_check_xlsx.py <05_面談ヒアリングシート.md>                汎用版（設問は hearing_form.FORM）
+    python make_check_xlsx.py --from-md <05_..._会社別.md> [-o 出力先]     会社別版（設問は md をパース）
+入力 md と同じ場所（-o 指定時はそこ）に `<basename>_オンライン入力用.xlsx` を出力する。
 
 設計（Google スプレッドシート互換）:
 - チェックは「未/済」のインライン list データ検証（ドロップダウン）。
@@ -18,6 +18,7 @@
    再実行して xlsx を作り直すこと（make_fillable_pdf.py / make_check_md.py も同様）。
 """
 import sys
+import argparse
 import pathlib
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -28,6 +29,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.formatting.rule import CellIsRule
 
 from hearing_form import FORM, split_check_row, freetext_items  # 設問データと共有の解釈ヘルパー
+from md_form_parser import parse_md  # 会社別版は md をパースして同じ構造にする
 
 # ---- レイアウト定数（マジックナンバーは上部に集約） ----
 FONT_NAME = "游ゴシック"
@@ -69,7 +71,9 @@ INSTR_TEXT = (
 
 
 class Sheet:
-    def __init__(self):
+    def __init__(self, form=None, title=None):
+        self.form = form if form is not None else FORM
+        self.title_text = title or TITLE_TEXT
         self.wb = openpyxl.Workbook()
         self.ws = self.wb.active
         self.ws.title = "ヒアリング"
@@ -173,22 +177,42 @@ class Sheet:
             self.r += 1
 
     def build(self):
-        self.title(TITLE_TEXT)
+        self.title(self.title_text)
         self.instruction(INSTR_TEXT)
-        for block in FORM:
+        # 会社別 md は「### 見出し＋□だけの箇条書き」が続く形。設問名のない選択肢が
+        # 縦に大量に並ぶと読めないため、直前の見出しを設問名にして1グループへまとめる。
+        pending_rows, pending_label = [], ""
+
+        def flush_group():
+            nonlocal pending_rows, pending_label
+            if pending_rows:
+                options = []
+                for segs in pending_rows:
+                    options.extend(split_check_row(segs)[1])
+                self.check_group(pending_label, options)
+                pending_rows, pending_label = [], ""
+
+        def drop_label():
+            nonlocal pending_label
+            if pending_label:
+                self.label_line(pending_label)
+                pending_label = ""
+
+        for block in self.form:
             kind = block[0]
             if kind == "title":
                 continue  # 既定タイトルは上で出力済み
-            if kind == "note":
-                self.note(block[1])
-            elif kind == "section":
-                self.section(block[1])
-            elif kind == "space":
+            if kind == "space":
                 continue
-            elif kind == "row":
+            if kind == "row":
                 segments = block[1]
                 has_c = any(s[0] == "c" for s in segments)
                 has_f = any(s[0] == "f" for s in segments)
+                if has_c and segments[0][0] == "c":   # 設問名を持たない選択肢行はまとめる
+                    pending_rows.append(segments)
+                    continue
+                flush_group()
+                drop_label()
                 if has_c:
                     prompt, options = split_check_row(segments)
                     self.check_group(prompt, options)
@@ -196,6 +220,19 @@ class Sheet:
                     self.freetext_row(freetext_items(segments))
                 else:
                     self.label_line(segments[0][1])
+                continue
+            flush_group()
+            if kind == "note":
+                drop_label()
+                self.note(block[1])
+            elif kind == "section":
+                drop_label()
+                self.section(block[1])
+            elif kind == "subsection":
+                drop_label()
+                pending_label = block[1]
+        flush_group()
+        drop_label()
         # 「済」セルを緑塗りにする条件付き書式
         if self._check_first is not None:
             rng = f"{chr(ord('A') + COL_CHECK - 1)}{self._check_first}:{chr(ord('A') + COL_CHECK - 1)}{self.r - 1}"
@@ -210,12 +247,23 @@ class Sheet:
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("input .md を指定してください（出力名の決定に使います）")
-        sys.exit(1)
-    md = pathlib.Path(sys.argv[1])
-    out = md.with_name(md.stem + "_オンライン入力用.xlsx")
-    sheet = Sheet()
+    ap = argparse.ArgumentParser(description="チェック可能Excelを作る")
+    ap.add_argument("md", help="入力 .md（出力名の決定に使う。--from-md 指定時は設問の取得元にもなる）")
+    ap.add_argument("--from-md", action="store_true",
+                    help="設問を md からパースする（会社別シート用）。既定は hearing_form.FORM")
+    ap.add_argument("-o", "--outdir", default=None, help="出力先フォルダ（既定: md と同じ場所）")
+    args = ap.parse_args()
+
+    md = pathlib.Path(args.md)
+    form, title = None, None
+    if args.from_md:
+        parsed = parse_md(md)
+        form = parsed["blocks"]
+        title = parsed["title"].replace("（営業記入用）", "（オンライン商談・入力用）")
+    outdir = pathlib.Path(args.outdir) if args.outdir else md.parent
+    outdir.mkdir(parents=True, exist_ok=True)
+    out = outdir / (md.stem + "_オンライン入力用.xlsx")
+    sheet = Sheet(form, title)
     sheet.build()
     sheet.save(out)
     print(f"OK: {out.name}  ({out.stat().st_size:,} bytes)")

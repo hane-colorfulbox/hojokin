@@ -23,6 +23,9 @@ segment（'row' の中身）:
     ('f', width)   自由記述欄（width は PDF のミリ幅。xlsx/md では幅を無視し記入欄にする）
 """
 
+# 設問名の中に現れる記入欄の代わりに置く文字（xlsx/md 生成で使う）
+BLANK_MARK = "＿＿"
+
 # 「業務名：紙 / Excel / システム」の3択行を量産するショートカット
 WORK3 = lambda name: ("row", [("t", f"{name}："), ("c", "紙"), ("c", "Excel"), ("c", "システム")])
 
@@ -115,8 +118,8 @@ FORM = [
 # ---- FORM の 'row' を解釈するヘルパー（xlsx・md 生成で共有） ----
 
 def clean_label(text):
-    """接続語付きの静的文字を選択肢ラベルに正規化（「その他（」→「その他」、「）　具体」→「具体」など）。"""
-    return text.strip(" 　（）()「」：:／/→ ").strip()
+    """接続語付きの静的文字を選択肢ラベルに正規化（「その他（」→「その他」、「〔具体：」→「具体」など）。"""
+    return text.strip(" 　（）()〔〕[]【】「」：:／/→ ").strip()
 
 
 def is_closer(text):
@@ -138,6 +141,7 @@ def split_check_row(segments):
             prompt_parts.append(seg[1])
         elif seg[0] == "f":
             prompt_has_field = True
+            prompt_parts.append(BLANK_MARK)  # 記入欄を落とすと「従業員数：約名」のように読めなくなる
         idx += 1
     prompt = "".join(prompt_parts).strip().replace("（）", "（　）")
 
@@ -146,23 +150,29 @@ def split_check_row(segments):
         options.append(("write", "内容を記入"))
 
     rest = segments[idx:]
-    j = 0
+    j, last_check = 0, None
     while j < len(rest):
         kind = rest[j][0]
         if kind == "c":
-            options.append(("check", rest[j][1]))
+            last_check = rest[j][1]
+            options.append(("check", last_check))
             j += 1
         elif kind == "t":
             if j + 1 < len(rest) and rest[j + 1][0] == "f":
-                label = clean_label(rest[j][1]) or "自由記述"
-                options.append(("write", label))
+                label = clean_label(rest[j][1])
+                if not label:  # 「（」だけの接続語 → 記入欄の後ろの語を見る（「（＿＿か所）」→「か所」）
+                    nxt = rest[j + 2][1] if j + 2 < len(rest) and rest[j + 2][0] == "t" else ""
+                    label = clean_label(nxt)
+                if not label and last_check and any(b in rest[j][1] for b in "（(〔["):
+                    label = f"{last_check}（内容）"  # 直前のチェック肢に付く括弧内の記入欄
+                options.append(("write", label or "自由記述"))
                 j += 2
                 if j < len(rest) and rest[j][0] == "t" and is_closer(rest[j][1]):
                     j += 1  # 閉じ括弧などを読み飛ばす
             else:
                 j += 1  # 単独の接続語（「）」「／」等）は読み飛ばす
-        else:  # 先頭以外に出てくる単独の f
-            options.append(("write", "自由記述"))
+        else:  # 先頭以外に出てくる単独の f。直前がチェック肢ならその内容欄（「□その他（＿＿）」）
+            options.append(("write", f"{last_check}（内容）" if last_check else "自由記述"))
             j += 1
     return prompt, options
 
