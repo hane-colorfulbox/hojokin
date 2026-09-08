@@ -14,6 +14,22 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
+MIME_BY_SUFFIX = {
+    '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    '.pdf': 'application/pdf',
+    '.csv': 'text/csv',
+    '.md': 'text/markdown',
+    '.txt': 'text/plain',
+    '.json': 'application/json',
+}
+DEFAULT_MIME = 'application/octet-stream'
+
+
+def guess_mime_type(local_path: Path) -> str:
+    """拡張子から MIME を決める。未知の拡張子は octet-stream。"""
+    return MIME_BY_SUFFIX.get(local_path.suffix.lower(), DEFAULT_MIME)
+
 
 class DriveClient:
     """Google Drive操作"""
@@ -95,12 +111,7 @@ class DriveClient:
     def upload_file(self, local_path: Path, folder_id: str, filename: str = None) -> str:
         """ファイルをアップロード。ファイルIDを返す"""
         name = filename or local_path.name
-        mime_map = {
-            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            '.pdf': 'application/pdf',
-            '.csv': 'text/csv',
-        }
-        mime_type = mime_map.get(local_path.suffix, 'application/octet-stream')
+        mime_type = guess_mime_type(local_path)
 
         file_metadata = {
             'name': name,
@@ -146,3 +157,52 @@ class DriveClient:
         if files:
             return files[0]['id']
         return self.create_folder(name, parent_id)
+
+    def find_child_by_name(self, parent_id: str, name: str) -> dict | None:
+        """フォルダ直下から名前で1件引く。無ければ None（共有ドライブ両対応）"""
+        escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+        results = self.service.files().list(
+            q=f"'{parent_id}' in parents and name = '{escaped}' and trashed = false",
+            fields='files(id, name, mimeType, size, modifiedTime)',
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+
+        files = results.get('files', [])
+        return files[0] if files else None
+
+    def update_file(self, file_id: str, local_path: Path) -> str:
+        """既存ファイルの中身だけ差し替える。ファイルIDは変わらない＝共有リンクが切れない"""
+        media = MediaFileUpload(str(local_path), mimetype=guess_mime_type(local_path))
+        self.service.files().update(
+            fileId=file_id, media_body=media, fields='id',
+            supportsAllDrives=True,
+        ).execute()
+        logger.info(f'差し替え: {local_path.name} → {file_id}')
+        return file_id
+
+    def move_file(self, file_id: str, new_parent_id: str, old_parent_id: str) -> str:
+        """ファイルを別フォルダへ移動（ファイルIDは変わらない）"""
+        self.service.files().update(
+            fileId=file_id,
+            addParents=new_parent_id,
+            removeParents=old_parent_id,
+            fields='id',
+            supportsAllDrives=True,
+        ).execute()
+        logger.info(f'移動: {file_id} → {new_parent_id}')
+        return file_id
+
+    def can_access(self, file_id: str) -> bool:
+        """このサービスアカウントが対象を読めるか。共有漏れの切り分け用。
+
+        list_files() は権限が無いとき例外を出さず0件を返すので、
+        「空なのか見えていないのか」はこのメソッドで判定する。
+        """
+        try:
+            self.service.files().get(
+                fileId=file_id, fields='id', supportsAllDrives=True,
+            ).execute()
+            return True
+        except Exception:
+            return False
