@@ -3,7 +3,7 @@
 
 記入済みの「加点判定用賃金台帳」を読み、加点措置①②を判定してレポートを
 標準出力する。--fill を付けると公式様式①②を外科的パッチ（原本無改変）で
-生成する。判定エンジンは引き継ぎパック同梱の hojokin モジュール
+生成する。判定エンジンはスキルに同梱した hojokin モジュール
 （ツール本番と同一コード）を使う。依存: Python3 + openpyxl のみ。
 
 使い方:
@@ -21,13 +21,13 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-# 補助金フォルダ（ZIP展開先 or 開発リポジトリ）を親方向に探索して hojokin を import 可能にする
+# スキルのフォルダ（配布版）か開発リポジトリを親方向に探索して hojokin を import 可能にする
 _HERE = Path(__file__).resolve()
 ROOT = next((p for p in _HERE.parents if (p / 'hojokin' / 'wage_reader.py').exists()), None)
 if ROOT is None:
-    print('❌ hojokin/（判定エンジン）が見つかりません。引き継ぎパック'
-          '（hojokin-handoff.zip）を補助金フォルダ直下に展開し、スキルは'
-          'そのフォルダ配下に置いたまま実行してください。', file=sys.stderr)
+    print('❌ hojokin/（判定エンジン）が見つかりません。katen-judge スキルのフォルダが'
+          '欠けています。補助金プラグインを入れ直すか、管理者に連絡してください。',
+          file=sys.stderr)
     sys.exit(2)
 sys.path.insert(0, str(ROOT))
 
@@ -130,7 +130,7 @@ def main(argv=None) -> int:
         missing = [p for p in (t1, TEMPLATE_S2) if not p.exists()]
         if missing:
             print(f'❌ 公式様式テンプレが見つかりません: {[str(p) for p in missing]}。'
-                  '引き継ぎパックを最新に更新してください。', file=sys.stderr)
+                  '補助金プラグインを入れ直すか、管理者に連絡してください。', file=sys.stderr)
             return 2
         out1 = outdir / f'{company}_{t1.stem}.xlsx'
         fill_bonus_sheet_1(t1, out1, res)

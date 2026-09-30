@@ -1,12 +1,12 @@
 ---
 name: case-docs-check
-description: 案件の申請書ドライブ（Google Drive の案件フォルダ）またはローカルフォルダを走査し、デジタル化・AI導入補助金2026（旧IT導入補助金）の申請書作成・加点判定に必要な書類の有無と中身（対象年度・発行日・形式・テンプレ規格）を一括チェックしてチャットに報告する実務スキル。納税証明書の年度違い・履歴事項全部証明書の3か月超過/現在事項混入・賃金台帳の対象事業年度ズレ・ヒアリング様式の取り違えなど「ファイルはあるが使えない」書類の検出に重点。1回の発動で途中質問なしに完走し、成果物ファイルは作らない（報告はチャットのみ・Drive読み取り専用）。
-when_to_use: ユーザーから「必要書類チェックして」「書類そろってる？」「〇〇社のフォルダ確認して」「足りない書類ない？」「加点に必要な書類ある？」等の依頼を受けたとき。DriveフォルダURL・顧客名・ローカルフォルダパスのいずれの指定でも発火する。申請書作成タスクや加点判定の実行前の事前チェック、顧客への追加依頼リスト作りに使う。
+description: 案件の申請書ドライブ（Google Drive の案件フォルダ）、ローカルフォルダ、またはチャットに添付した書類一式を走査し、デジタル化・AI導入補助金2026（旧IT導入補助金）の申請書作成・加点判定に必要な書類の有無と中身（対象年度・発行日・形式・テンプレ規格）を一括チェックして報告する。納税証明書の年度違い、履歴事項全部証明書の3か月超過や現在事項の混入、賃金台帳の対象事業年度ズレ、ヒアリング様式の取り違えなど「ファイルはあるが使えない」書類の検出に重点を置く。1回の発動で途中質問なしに完走し、成果物ファイルは作らない（報告は会話のみ・Drive は読み取り専用）。「必要書類チェックして」「書類そろってる？」「〇〇社のフォルダ確認して」「足りない書類ない？」「加点に必要な書類ある？」などの依頼で使う。申請書作成や加点判定の前の事前チェック、顧客への追加依頼リスト作りにも使う。
+allowed-tools: 'Read Glob Grep Bash(python "${CLAUDE_SKILL_DIR}/review/check_docs.py" *) Bash(python3 "${CLAUDE_SKILL_DIR}/review/check_docs.py" *)'
 ---
 
-<!-- allowed-tools は意図的に書かない（wagebook-convert からの意図的逸脱）。
-     Drive コネクタのツール名は環境ごとに uuid プレフィックスが異なり
-     ホワイトリスト化できないため。読み取り専用の規律は §0.3 の🔴で担保する。 -->
+<!-- allowed-tools に入れているのは読み取りと同梱スクリプトの実行だけ。Drive コネクタのツール名は
+     環境ごとに接頭辞が違って列挙できないため、事前許可には入れない（使うたびに確認が出る）。
+     読み取り専用の規律は §0.3 の🔴で担保する。 -->
 
 # case-docs-check — 案件フォルダの必要書類チェック
 
@@ -15,16 +15,47 @@ when_to_use: ユーザーから「必要書類チェックして」「書類そ�
 
 ## 0. 作業前チェック
 
-### 0.0 {SKILL_DIR} の解決と前提
+### 0.0 パスの解決と前提
 
-1. この SKILL.md が置かれているフォルダの**絶対パス**を `{SKILL_DIR}` とする（cwd に依存しない）。
-2. `{SKILL_DIR}/review/check_docs.py` が存在することを確認する。
-3. `python -c "import openpyxl"` を試す。**無くてもチェック全体は止めない**
+<!-- skill-paths:begin -->
+**パスの書き方**：この文書の `${CLAUDE_SKILL_DIR}` は、このスキルのフォルダ（この SKILL.md があるフォルダ）の絶対パス。Claude Code と Cowork では自動で置き換わる。claude.ai のチャットで `${CLAUDE_SKILL_DIR}` の文字がそのまま見えている場合は、この SKILL.md を読み込んだフォルダに読み替える。コマンドの `python` が見つからない環境では `python3` を使う。
+<!-- skill-paths:end -->
+
+<!-- legacy-pack-check:begin -->
+**旧パックの確認（Claude Code で動いているときだけ・1会話に1回）**：作業フォルダかその親に `handoff_version.json` がある、または `.claude/skills/` と `引き継ぎ/00_はじめに.md` の両方がある場合は、ZIP 配布時代の旧パックが残っている（`app.py` と `.git` もあるフォルダは開発リポジトリなので対象外）。旧パックのスキルはもう更新されないので、ユーザーに「旧パックは廃止されました。このフォルダの `.claude/skills/` と `CLAUDE.md` を削除するか別名にしてください（手順は hojokin-guide スキルの §0）」と一度だけ伝えてから作業を続ける。削除は自分でしない。
+<!-- legacy-pack-check:end -->
+
+1. `${CLAUDE_SKILL_DIR}/review/check_docs.py` が存在することを確認する。
+2. `python -c "import openpyxl"` を試す。**無くてもチェック全体は止めない**
    （Excel 構造チェックだけが「要目視」に降格される。check_docs.py が自動で降格する）。
-4. 作業フォルダ `{WORKDIR}` を確定する: セッションの scratchpad ディレクトリ
-   （無い環境では OS の temp 配下に `case-docs-check-<日付>/`）。
+3. 作業フォルダ `{WORKDIR}` を確定する: Claude Code ではセッションの scratchpad ディレクトリ、
+   それが無い環境では OS の temp 配下に `case-docs-check-<日付>/`（claude.ai のチャットでは `/tmp/case-docs-check/`）。
    > 🔴 `{WORKDIR}` 以外にファイルを作らない。**リポジトリ内・案件フォルダ内・Drive は禁止**
    > （DL した顧客ファイルは PII。セッション終了で破棄される場所にだけ置く）。
+
+### 0.0.1 実行環境ごとの経路
+
+<!-- chat-env:begin -->
+**claude.ai のチャットで使うときの注意**
+- 添付したファイルは、コード実行環境のアップロード用フォルダ（通常 `/mnt/user-data/uploads/`）にある。見つからなければ `find / -name "<ファイル名>" 2>/dev/null` で探す。
+- 作った成果物は出力用フォルダ（通常 `/mnt/user-data/outputs/`）に保存すると、ユーザーがダウンロードできる。
+- PDF は100ページ以下なら画像も含めて読める。101ページ以上は文字しか読めないので、画像PDF・手書きPDFは100ページ以下に分けて添付してもらう。
+- 1チャットに添付できるのは20ファイル、1ファイル30MBまで。
+- PyMuPDF（fitz）を使う手順は、先に `pip install pymupdf` を実行する。
+<!-- chat-env:end -->
+
+- 経路A（Drive コネクタで列挙・DL）は Claude Code 向け。Drive から DL した base64 を、ツール結果の退避ファイルから復号する手順に頼っている（[reference/Drive列挙の手引き.md](reference/Drive列挙の手引き.md) §4）。Cowork でこの退避ファイルが見つからない場合は、経路Bに切り替える。
+- claude.ai のチャットでは経路Bだけを使う。Drive のファイルをコード実行環境へ渡す方法が無いので、案件フォルダの書類をチャットに添付してもらい、アップロード用フォルダを `--local` に渡す。添付すると「申請時使用」等のサブフォルダ構造は消えるため、過去の提出物が混ざっていないかは報告の「参考: 除外したもの」で必ず確認を促す。
+- 添付は1チャット20ファイルまで。超える場合は、必須書類を優先して添付してもらい、残りは「未確認」として報告する。
+
+<!-- customer-data-rules:begin -->
+**顧客データを扱うときのルール（チャット・Cowork・Claude Code 共通）**
+- 1案件＝1会話で作業する（チャットは1チャット、Cowork は1タスク、Claude Code は1セッション）。別の案件の資料を同じ会話に混ぜない。
+- claude.ai のチャットでは、シークレットチャットが使えるならそれを使う。
+- 成果物をダウンロードするか Drive に保存したら、チャット・Cowork の会話は削除する。
+- 会話の共有リンク、Project への添付、アーティファクトの公開はしない。
+- 作業メモ・ログ・修正依頼には、顧客名・従業員名・金額を書かない（「顧客企業A」「従業員B」などに置き換える）。
+<!-- customer-data-rules:end -->
 
 ### 0.1 入力の確定（質問してよいのはここだけ・1回だけ）
 
@@ -71,8 +102,8 @@ when_to_use: ユーザーから「必要書類チェックして」「書類そ�
 ## 3. 決定論チェック（1回目）
 
 ```
-python {SKILL_DIR}/review/check_docs.py --local <フォルダ>            # 経路B
-python {SKILL_DIR}/review/check_docs.py --manifest {WORKDIR}/manifest.json   # 経路A
+python "${CLAUDE_SKILL_DIR}/review/check_docs.py" --local <フォルダ>            # 経路B
+python "${CLAUDE_SKILL_DIR}/review/check_docs.py" --manifest {WORKDIR}/manifest.json   # 経路A
   共通: --task both --entity <法人|個人|不明> --frame <通常枠|インボイス枠|不明>
         --json {WORKDIR}/check1.json
 ```
@@ -139,7 +170,7 @@ python {SKILL_DIR}/review/check_docs.py --manifest {WORKDIR}/manifest.json   # �
 
 ## 8. チャット報告（固定テンプレ）
 
-報告はチャットのみ。以下の構成で**一括**出力する（ファイルは作らない）:
+報告は会話（チャット・Cowork・Claude Code の返答）のみ。以下の構成で**一括**出力する（ファイルは作らない）:
 
 ```
 📋 必要書類チェック結果: {顧客フォルダ名 or フォルダパス}
@@ -178,5 +209,5 @@ python {SKILL_DIR}/review/check_docs.py --manifest {WORKDIR}/manifest.json   # �
 - DL ファイル・manifest は `{WORKDIR}` のみ。チェック完了後、可能なら削除する（best-effort）。
 - 保守: 分類・必須判定の定数は `hojokin/pipeline.py`（FileDetector）・`app.py` からの独立コピー。
   **原本を変えたら `review/check_docs.py` も同時に直す**（`scripts/check_docscheck_sync.py` が
-  配布 ZIP ビルド時に AST 突合して不一致なら中止する）。ヒアリング様式・テンプレの改訂時は
+  プラグインのビルド時に AST 突合して不一致なら中止する）。ヒアリング様式・テンプレの改訂時は
   check_docs.py のフィンガープリント／ヘッダー定数を再実測して更新する。

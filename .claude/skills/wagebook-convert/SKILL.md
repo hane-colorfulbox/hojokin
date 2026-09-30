@@ -1,11 +1,10 @@
 ---
 name: wagebook-convert
-description: 賃金台帳 PDF（テキスト/画像/手書き）を、補助金書類作成ツール（Streamlit Cloud 版）が読み込める Excel テンプレに変換する。役員ラベル正規化・直近事業年度12ヶ月並べ・通勤手当別欄処理・パート時間取得（FTE換算用）の落とし穴を回避する手順をパッケージ化。デジタル化・AI導入補助金2026（旧IT導入補助金）の R215（従業員数、FTE換算）/ R216（給与支給総額）算定の精度を担保するための実務スキル。
-when_to_use: ユーザーから「賃金台帳を変換して」「PDFの賃金台帳を Excel にして」「賃金台帳テンプレートを埋めて」等の依頼を受けたとき。手書き台帳・画像PDF・テキストPDF・既存JSONからの再生成いずれの入力でも発火する。Streamlit Cloud 版のツールで自動化が失敗した場合のフォールバック手作業もこのスキルが担う。
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep
+description: 賃金台帳 PDF（テキスト/画像/手書き）を、補助金書類作成ツール（Streamlit Cloud 版）が読み込める Excel テンプレに変換する。役員ラベル正規化・直近事業年度12ヶ月並べ・通勤手当別欄処理・パート時間取得（FTE換算用）の落とし穴を回避する手順をまとめたもの。デジタル化・AI導入補助金2026（旧IT導入補助金）の R215（従業員数、FTE換算）/ R216（給与支給総額）算定の精度を担保する。「賃金台帳を変換して」「PDFの賃金台帳を Excel にして」「賃金台帳テンプレートを埋めて」などの依頼で使う。手書き台帳・画像PDF・テキストPDF・既存JSONからの再生成のどれでも使える。ツールでの自動変換がうまくいかなかったときの手作業の代わりもこのスキルが担う。
+allowed-tools: 'Read Glob Grep Bash(python "${CLAUDE_SKILL_DIR}/review/verify_wagebook.py" *) Bash(python3 "${CLAUDE_SKILL_DIR}/review/verify_wagebook.py" *) Bash(python "${CLAUDE_SKILL_DIR}/review/verify_transcript.py" *) Bash(python3 "${CLAUDE_SKILL_DIR}/review/verify_transcript.py" *)'
 ---
 
-# 賃金台帳変換スキル（CC＝Claude Code 用）
+# 賃金台帳変換スキル
 
 ## 0. このスキルが扱うタスク
 
@@ -16,12 +15,15 @@ PDF（または既存JSON）の賃金台帳を、補助金書類作成ツール�
 
 **着手前に必ず確認する。ここを飛ばすと「動いたが規格外の成果物」が出る。**
 
-**パス解決（最初に確定する）**：この文書内の `{SKILL_DIR}` ＝ **この SKILL.md が置かれているフォルダ**。設置場所は3通りありうる：
-- ① 引き継ぎパック同梱 `<補助金フォルダ>/.claude/skills/wagebook-convert/`（**現行の標準**。パック解凍で自動配置）
-- ② グローバル `~/.claude/skills/wagebook-convert/`（パック外でも使う場合のみ）
-- ③ 開発リポジトリ内
+<!-- skill-paths:begin -->
+**パスの書き方**：この文書の `${CLAUDE_SKILL_DIR}` は、このスキルのフォルダ（この SKILL.md があるフォルダ）の絶対パス。Claude Code と Cowork では自動で置き換わる。claude.ai のチャットで `${CLAUDE_SKILL_DIR}` の文字がそのまま見えている場合は、この SKILL.md を読み込んだフォルダに読み替える。コマンドの `python` が見つからない環境では `python3` を使う。
+<!-- skill-paths:end -->
 
-テンプレート・verify スクリプトのパスは必ず `{SKILL_DIR}` 起点の **絶対パス** に解決してから使う（cwd が案件サブフォルダだと相対パスは解決しない）。
+テンプレート・verify スクリプトのパスは必ず `${CLAUDE_SKILL_DIR}` 起点の **絶対パス** で使う（cwd が案件サブフォルダだと相対パスは解決しない）。
+
+<!-- legacy-pack-check:begin -->
+**旧パックの確認（Claude Code で動いているときだけ・1会話に1回）**：作業フォルダかその親に `handoff_version.json` がある、または `.claude/skills/` と `引き継ぎ/00_はじめに.md` の両方がある場合は、ZIP 配布時代の旧パックが残っている（`app.py` と `.git` もあるフォルダは開発リポジトリなので対象外）。旧パックのスキルはもう更新されないので、ユーザーに「旧パックは廃止されました。このフォルダの `.claude/skills/` と `CLAUDE.md` を削除するか別名にしてください（手順は hojokin-guide スキルの §0）」と一度だけ伝えてから作業を続ける。削除は自分でしない。
+<!-- legacy-pack-check:end -->
 
 1. **Python3 + openpyxl が必須**（xlsx の生成・検算に使用。フォールバック無し）。開始時に
    `python -c "import openpyxl"`（WSL 環境なら `wsl python3 -c "import openpyxl"`）で確認する。
@@ -38,14 +40,37 @@ PDF（または既存JSON）の賃金台帳を、補助金書類作成ツール�
 
 2. **スキル同梱ファイルの存在確認**：`templates/賃金台帳テンプレート.xlsx` と `review/verify_wagebook.py`
    ＋ `review/verify_transcript.py`（原本転記シートの受入検査。§5.5-2b）がスキルフォルダにあるか確認する。
-   - **どちらかが無ければ導入が不完全**（古い/部分展開の ZIP）。この状態で **xlsx をスクラッチ自作してはいけない**
+   - **どちらかが無ければ導入が不完全**（ファイルが欠けたインストール）。この状態で **xlsx をスクラッチ自作してはいけない**
      （ヘッダー手書きで規格を外し、ツールが読めない成果物を出す事故が起きた）。
-   - 対応：**停止して**復旧してから再実行する。スキルは引き継ぎパック（`hojokin-handoff.zip`）に同梱されているので、
-     (a) Claude Code に「引き継ぎを最新に更新して」と依頼する（`scripts/update_handoff.py` が
-     `.claude/skills/wagebook-convert/` を丸ごと最新に入れ替える）、または
-     (b) `hojokin-handoff.zip` を再ダウンロードし、補助金フォルダ直下に上書き展開する。
-     グローバル設置（`~/.claude/skills/`）の場合のみ `wagebook-convert.zip` での上書き展開。
+   - 対応：**停止して**、ユーザーに「補助金プラグインを入れ直すか、管理者に連絡してください」と伝える。
+     プラグインの入れ直しは claude.ai の「カスタマイズ」→「プラグイン」から行う（hojokin-guide スキルの「困ったとき」参照）。
    - どうしても今すぐ進める場合のみ、§1 の「🔴 ヘッダー注記禁止」を厳守し、§5.5 verify ゲートも必ず通す。
+
+### 0.0.1 実行環境ごとの注意
+
+この文書の手順は Claude Code の Read ツール（`Read(file_path=..., pages="1-10")` のようなページ指定）を前提に書いてある。Cowork でも同じように使える。claude.ai のチャットでは次のように読み替える。
+
+<!-- chat-env:begin -->
+**claude.ai のチャットで使うときの注意**
+- 添付したファイルは、コード実行環境のアップロード用フォルダ（通常 `/mnt/user-data/uploads/`）にある。見つからなければ `find / -name "<ファイル名>" 2>/dev/null` で探す。
+- 作った成果物は出力用フォルダ（通常 `/mnt/user-data/outputs/`）に保存すると、ユーザーがダウンロードできる。
+- PDF は100ページ以下なら画像も含めて読める。101ページ以上は文字しか読めないので、画像PDF・手書きPDFは100ページ以下に分けて添付してもらう。
+- 1チャットに添付できるのは20ファイル、1ファイル30MBまで。
+- PyMuPDF（fitz）を使う手順は、先に `pip install pymupdf` を実行する。
+<!-- chat-env:end -->
+
+- チャットには Read のページ指定が無い。添付した PDF（100ページ以下）はそのまま画像として読めるので、`Read(pages="N")` と書いてある箇所は「添付 PDF の N ページ目を見直す」と読み替える。
+- 細部の読み直し（§4.1 例外の拡大切り出し）は、PyMuPDF でページを画像にして保存し、その画像を表示して確認する。画像を表示できない場合は、添付 PDF の該当ページを見直し、それでも読めない値は推測せずに報告の「要確認」に回す。
+- テンプレートは `${CLAUDE_SKILL_DIR}/templates/賃金台帳テンプレート.xlsx` をコピーして使い、出来上がった xlsx は出力用フォルダに保存する。verify スクリプトもそのままチャットの実行環境で動く（openpyxl だけで動く）。
+
+<!-- customer-data-rules:begin -->
+**顧客データを扱うときのルール（チャット・Cowork・Claude Code 共通）**
+- 1案件＝1会話で作業する（チャットは1チャット、Cowork は1タスク、Claude Code は1セッション）。別の案件の資料を同じ会話に混ぜない。
+- claude.ai のチャットでは、シークレットチャットが使えるならそれを使う。
+- 成果物をダウンロードするか Drive に保存したら、チャット・Cowork の会話は削除する。
+- 会話の共有リンク、Project への添付、アーティファクトの公開はしない。
+- 作業メモ・ログ・修正依頼には、顧客名・従業員名・金額を書かない（「顧客企業A」「従業員B」などに置き換える）。
+<!-- customer-data-rules:end -->
 
 ### 0.1 最初に必ずユーザーから取得する情報（必須）
 
@@ -466,8 +491,8 @@ R216 は基準年度と効果報告（1〜3年目の実績）で**同じ方式�
 
    ```python
    from openpyxl import load_workbook
-   # {SKILL_DIR} は §0.0 で解決済みの絶対パス（スキルフォルダ）
-   wb = load_workbook("{SKILL_DIR}/templates/賃金台帳テンプレート.xlsx")
+   # ${CLAUDE_SKILL_DIR} は §0.0 で解決済みの絶対パス（スキルフォルダ）
+   wb = load_workbook("${CLAUDE_SKILL_DIR}/templates/賃金台帳テンプレート.xlsx")
    ws = wb["従業員別明細"]
 
    # データ書き込み（N 名分）
@@ -784,9 +809,9 @@ PDF 抽出をさらに別のサブエージェントに渡すと Read 経由の�
 ### 5.5-2 機械検算スクリプトを実行（必須・出力を §9 報告に貼る）
 保存した xlsx を同梱スクリプトに通す（**openpyxl のみ・hojokin非依存・API不使用＝他人PCでも動く**）：
 ```
-python "{SKILL_DIR}/review/verify_wagebook.py" "{会社名}_賃金台帳一覧.xlsx"
+python "${CLAUDE_SKILL_DIR}/review/verify_wagebook.py" "{会社名}_賃金台帳一覧.xlsx"
 ```
-（`{SKILL_DIR}` は §0.0 で解決済みの絶対パス＝cwd が案件フォルダでも迷わない。openpyxl 未導入でエラーなら機械検算をスキップし §5-A〜§5-M を全件人手で実施＝**ゲートは飛ばさない**）
+（`${CLAUDE_SKILL_DIR}` は §0.0 で解決済みの絶対パス＝cwd が案件フォルダでも迷わない。openpyxl 未導入でエラーなら機械検算をスキップし §5-A〜§5-M を全件人手で実施＝**ゲートは飛ばさない**）
 
 このスクリプトは **R216 を再計算しない**（ツール `wage_calculator.py` と式がドリフトして誤PASSを出すのを避けるため、不変量の観測と FLAG 列挙だけ）。出力をそのまま §9 に貼り、下記を解消するまで完了報告に進まない：
 - **FAIL（修正必須）**：役員ラベル未正規化（④）／パートでE列空（④）／全月在籍非役員0名 → xlsx を直して再実行。
@@ -795,7 +820,7 @@ python "{SKILL_DIR}/review/verify_wagebook.py" "{会社名}_賃金台帳一覧.x
 ### 5.5-2b 原本転記シートの受け入れ検査（転記シートを作ったら必須）
 転記シート群（§4.1.2）を作ったら、こちらも通す（同じく **openpyxl のみ・API不使用**）：
 ```
-python "{SKILL_DIR}/review/verify_transcript.py" "{会社名}_賃金台帳一覧.xlsx"
+python "${CLAUDE_SKILL_DIR}/review/verify_transcript.py" "{会社名}_賃金台帳一覧.xlsx"
 ```
 検証内容と、それが担保していること：
 
@@ -820,7 +845,7 @@ python "{SKILL_DIR}/review/verify_transcript.py" "{会社名}_賃金台帳一覧
 
 ### 5.5-4 ゲート判定
 FAIL は修正して 5.5-2 を再実行。要確認は PDF 確認の上で §9 に解決を明記。全て解消してから §6・§9 へ進む。
-（このリポジトリ/Streamlit 側では、追加で本物の `read_wage_ledger`＝「一人当たり給与支給総額」タスクに通し R216 を逆算する最終ゲートが使える。配布先＝自前 verify、本拠地＝R216逆算 の二段構え）
+（ツール（Streamlit）側では、追加で本物の `read_wage_ledger`＝「一人当たり給与支給総額」タスクに通し R216 を逆算する最終ゲートが使える。配布先＝自前 verify、本拠地＝R216逆算 の二段構え）
 
 ## 6. 変換後の検証
 

@@ -19,7 +19,7 @@
      REGISTRY_CONFIRMED_KEYWORD / REQUIRED_CATS_BY_TASK /
      REQUIRED_CATS_APPLICATION_KOJIN は hojokin/pipeline.py（FileDetector）と
      app.py からの独立コピー。scripts/check_docscheck_sync.py が AST 突合し、
-     不一致なら配布 ZIP のビルドを中止する（原本を変えたらここも直す）。
+     不一致ならプラグインのビルドを中止する（原本を変えたらここも直す）。
 
 使い方:
   python check_docs.py --local <案件フォルダ>

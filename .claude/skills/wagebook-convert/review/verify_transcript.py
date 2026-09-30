@@ -2,7 +2,7 @@
 """原本転記シート群（SKILL.md §4.1.2）の受け入れ検査。openpyxl のみで動く（API不使用）。
 
 使い方:
-    python .claude/skills/wagebook-convert/review/verify_transcript.py "{会社名}_賃金台帳一覧.xlsx"
+    python "<スキルのフォルダ>/review/verify_transcript.py" "{会社名}_賃金台帳一覧.xlsx"
 
 verify_wagebook.py が「従業員別明細」を検算するのに対し、こちらは「原本転記*」シート群が
 **原本の代わりに使える状態か**を検証する。転記シートの用途（確認者が Excel の関数で

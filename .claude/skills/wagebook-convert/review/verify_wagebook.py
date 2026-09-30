@@ -5,12 +5,12 @@
   → 配布先の他人PC（まっさら環境）・headless でも動く。課金ゼロ。
 - **R215/R216 を再計算しない**。ツール側 hojokin/wage_calculator.py の算定式をここで再実装すると
   式がドリフトして「誤った PASS」を出す（CLAUDE.md 同期負債）。本スクリプトは
-  **不変量の観測と FLAG 列挙だけ**を行う。R216 の正値判定は、リポジトリ/Streamlit 側の
+  **不変量の観測と FLAG 列挙だけ**を行う。R216 の正値判定は、ツール（Streamlit）側の
   本物の read_wage_ledger 往復（最終ゲート）に委ねる。
 - 自己防衛: シート名・列レイアウトがテンプレと違えば沈黙せず非ゼロ終了する。
 
 使い方:
-    python .claude/skills/wagebook-convert/review/verify_wagebook.py "{会社名}_賃金台帳一覧.xlsx"
+    python "<スキルのフォルダ>/review/verify_wagebook.py" "{会社名}_賃金台帳一覧.xlsx"
 
 出力（=§9 完了報告にそのまま貼る）:
     各行の Σ(G:R)+T、月別縦計、雇用形態内訳、各 FLAG、末尾に PASS/要対応 件数。
