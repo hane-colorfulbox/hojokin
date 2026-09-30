@@ -5,7 +5,8 @@
   - 期待値.json                 : 変換結果の答え合わせ用（従業員ごとの月額・通勤手当・年額）
 
 使い方: python -B tests/plugin/make_synthetic_pdfs.py <出力フォルダ>
-依存: PyMuPDF（fitz）。日本語は PyMuPDF 内蔵の CJK フォント（fontname="japan"）で描く。
+依存: PyMuPDF（fitz）。日本語は PyMuPDF 内蔵の CJK フォントを PDF に埋め込んで描く
+（埋め込まないと、日本語フォントを持たない表示環境＝チャットの PDF 画像化などで文字が消える）。
 """
 import json
 import sys
@@ -26,12 +27,14 @@ EMPLOYEES = [
     ('乙野太郎', 'パート', 88000, 0, 16, 80),
     ('丙野次郎', '正社員', 250000, 12000, 21, 168),
 ]
-FONT = 'japan'
+FONT = 'jpfont'                    # ページに埋め込むフォントの名前（中身は PyMuPDF 内蔵の CJK フォント）
+FONT_BUFFER = fitz.Font('cjk').buffer
 PAGE_W, PAGE_H = 842, 595          # A4 横
 LEFT, TOP, ROW_H = 30, 110, 26
 LABEL_W, CELL_W = 90, 55
 IMAGE_DPI = 110
 IMAGE_PAGES = 2
+JPEG_QUALITY = 80                  # 画像版を小さく保つ（添付の上限 30MB を気にしなくて済む大きさ）
 
 
 def _row_values(base, commute, days, hours):
@@ -41,6 +44,7 @@ def _row_values(base, commute, days, hours):
 
 def _draw_page(page, emp) -> None:
     name, kind, base, commute, days, hours = emp
+    page.insert_font(fontname=FONT, fontbuffer=FONT_BUFFER)
     page.insert_text((LEFT, 40), f'賃金台帳　{COMPANY}', fontname=FONT, fontsize=14)
     page.insert_text((LEFT, 62), f'対象期間：{PERIOD}', fontname=FONT, fontsize=10)
     page.insert_text((LEFT, 84), f'氏名：{name}　雇用形態：{kind}', fontname=FONT, fontsize=11)
@@ -66,13 +70,14 @@ def make(out_dir: Path) -> dict:
     doc = fitz.open()
     for emp in EMPLOYEES:
         _draw_page(doc.new_page(width=PAGE_W, height=PAGE_H), emp)
-    doc.save(text_pdf)
+    doc.subset_fonts()                      # 使っている文字だけを埋め込む（フォント全体だと数MBになる）
+    doc.save(text_pdf, garbage=3, deflate=True)
     image_pdf = out_dir / '合成賃金台帳_画像版.pdf'
     img_doc = fitz.open()
     for i in range(IMAGE_PAGES):
         pix = doc[i].get_pixmap(dpi=IMAGE_DPI)
         page = img_doc.new_page(width=PAGE_W, height=PAGE_H)
-        page.insert_image(page.rect, pixmap=pix)
+        page.insert_image(page.rect, stream=pix.tobytes('jpeg', jpg_quality=JPEG_QUALITY))
     img_doc.save(image_pdf)
     doc.close()
     img_doc.close()

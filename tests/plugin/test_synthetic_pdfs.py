@@ -18,6 +18,10 @@ def main() -> int:
             text = ''.join(p.get_text() for p in doc)
             c.check('テキスト版は3名×1ページ', doc.page_count == len(mk.EMPLOYEES))
         c.check('テキスト版から氏名と金額が読める', '甲野花子' in text and '210,000' in text, text[:200])
+        with fitz.open(paths['text_pdf']) as doc:
+            fonts = doc.get_page_fonts(0)
+        c.check('日本語フォントが PDF に埋め込まれている（表示環境にフォントが無くても文字が出る）',
+                bool(fonts) and all(f[1] != 'n/a' for f in fonts), str(fonts))
         with fitz.open(paths['image_pdf']) as doc:
             c.check('画像版は指定ページ数', doc.page_count == mk.IMAGE_PAGES)
             c.check('画像版には文字の層が無い', not ''.join(p.get_text() for p in doc).strip())
