@@ -84,6 +84,8 @@ def check_layout(files: dict[str, bytes], plugin_root: str) -> list[str]:
     if any(p.split('/', 1)[0] == 'bin' for p in rel):
         problems.append('プラグイン最上位に bin/ があります（claude.ai のアップロードで拒否される）')
     for p in sorted(rel):
+        if unicodedata.normalize('NFC', p) != p:
+            problems.append(f'{p}: パスが NFC 正規化されていません（Linux のチャット環境で名前が合わなくなる）')
         if not dm.path_chars_ok(p):
             bad = ''.join(sorted({ch for ch in p if not dm.path_chars_ok(ch)}))
             problems.append(f'{p}: claude.ai が受け付けない文字がパスにあります（{bad}）。'
@@ -112,7 +114,7 @@ def _md_links(text: str):
 def check_links(files: dict[str, bytes]) -> list[str]:
     """相対リンクが「同じスキルのフォルダ内」で解決するか。スキルをまたぐリンクも不合格。"""
     problems = []
-    names = {unicodedata.normalize('NFC', p) for p in files}
+    names = set(files)   # 正規化せずに比べる（Linux のチャット環境では NFC/NFD の違いでリンクが切れる）
     for path in sorted(p for p in files if p.endswith('.md') and skill_of(p)):
         skill_root = f'skills/{skill_of(path)}/'
         for no, target in _md_links(_text(files[path])):
@@ -122,7 +124,6 @@ def check_links(files: dict[str, bytes]) -> list[str]:
             if not target_path:
                 continue
             resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target_path))
-            resolved = unicodedata.normalize('NFC', resolved)
             if not resolved.startswith(skill_root):
                 problems.append(f'{path}:{no}: スキルの外を指すリンク → {target}')
             elif resolved not in names and not any(n.startswith(resolved + '/') for n in names):
@@ -195,7 +196,7 @@ def check_xlsx_metadata(files: dict[str, bytes]) -> list[str]:
                     continue
                 xml = zf.read(part).decode('utf-8', 'replace')
                 for tag in ('dc:creator', 'cp:lastModifiedBy'):
-                    for v in re.findall(rf'<{tag}>(.*?)</{tag}>', xml, re.S):
+                    for v in re.findall(rf'<{tag}(?:\s[^>]*)?>(.*?)</{tag}>', xml, re.S):
                         if v.strip() not in XLSX_ALLOWED_AUTHORS:
                             problems.append(f'{path}: {part} の {tag} に人名などが入っています')
                 for tag in ('Company', 'Manager'):

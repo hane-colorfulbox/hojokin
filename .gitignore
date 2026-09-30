@@ -59,6 +59,18 @@ _backups/
 !.claude/skills/**
 # ただし Skill 同梱スクリプトの実行キャッシュは除外（!.claude/skills/** の巻き添え防止）
 .claude/skills/**/__pycache__/
+# Skill フォルダで試した顧客資料が公開リポジトリと配布物に入らないように、資料の形式は再び除外する
+# （配布用のテンプレ xlsx は scripts/distribution_manifest.py で名前を挙げて配る）
+.claude/skills/**/*.pdf
+.claude/skills/**/*.docx
+.claude/skills/**/*.doc
+.claude/skills/**/*.csv
+.claude/skills/**/*.png
+.claude/skills/**/*.jpg
+.claude/skills/**/*.jpeg
+.claude/skills/**/*.zip
+.claude/skills/**/*_賃金台帳一覧.xlsx
+.claude/skills/**/*_加点措置*.xlsx
 
 # その他
 *.log

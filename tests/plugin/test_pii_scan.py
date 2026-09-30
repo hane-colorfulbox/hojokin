@@ -66,6 +66,35 @@ def main() -> int:
         hits = ps.scan_path(book, rules)
         c.check('xlsx の文字参照（&#...;）で書かれた名前も検出する', any(h.rule == 'roster' for h in hits))
 
+        linked = tmp / 'linked.xlsx'
+        with zipfile.ZipFile(linked, 'w') as zf:
+            zf.writestr('xl/worksheets/_rels/sheet1.xml.rels',
+                        '<Relationships><Relationship Id="rId1" Target="https://docs.'
+                        + 'google.com/spreadsheets/d/' + FAKE_ID + '/edit" TargetMode="External"/></Relationships>')
+            zf.writestr('xl/sharedStrings.xml', '<sst><si><r><t>テスト</t></r><r><t>商事</t></r></si></sst>')
+            zf.writestr('xl/drawings/drawing1.xml', '<a><xdr:colOff>1234567</xdr:colOff></a>')
+        rules_hit = {h.rule for h in ps.scan_path(linked, rules)}
+        c.check('xlsx のリンク先（_rels の属性値）も検査する', 'google-url' in rules_hit, str(rules_hit))
+        c.check('書式ごとに分かれた文字をつないで検査する', 'roster' in rules_hit, str(rules_hit))
+        c.check('図形の座標（EMU）は金額として拾わない', 'amount' not in rules_hit, str(rules_hit))
+
+        pdf = tmp / 'x.pdf'
+        pdf.write_bytes(b'%PDF-1.4')
+        c.check('中身を検査できない形式は止める', [h.rule for h in ps.scan_path(pdf, rules)] == ['unscannable'])
+        csv = tmp / 'x.csv'
+        csv.write_bytes('氏名,支給額\n'.encode('cp932') + SHOULD_HIT['roster'].encode('cp932'))
+        c.check('Shift_JIS の CSV も読んで検査する', any(h.rule == 'roster' for h in ps.scan_path(csv, rules)))
+        c.check('「アルバイト」を含む行でも金額を検査する',
+                any(h.rule == 'amount' for h in ps.scan_text('x', 'アルバイトの年額 4,321,' + '987円', rules)))
+        base64_line = 'aAhMdNGv4MbY' + 'zpFu6RK22QQU4V' + 'milxnN5M2VcI' + 'UnpqqOKmnft1Z4' + 'dnr1RbuQ=='
+        c.check('ハッシュ値（base64）と GUID は長い ID として拾わない',
+                not ps.scan_text('x', base64_line, rules)
+                and not ps.scan_text('x', '{CCE6A557-97BC-4b89-' + 'ADB6-D9C93CAAB3DF}', rules))
+        ascii_rules = ps.build_rules(sorted(set(ROSTER) | {'QRS'}, key=len, reverse=True), [])
+        c.check('英字の名前は単語として現れたときだけ拾う',
+                bool(ps.scan_text('x', '取引先 QRS 様', ascii_rules))
+                and not ps.scan_text('x', 'xyzqrsabc', ascii_rules))
+
         ps.ALLOWLIST_PATH = tmp / 'allow.json'
         found = ps.scan_text('x.md', SHOULD_HIT['amount'], rules)
         ps.approve(found, '合成テスト')

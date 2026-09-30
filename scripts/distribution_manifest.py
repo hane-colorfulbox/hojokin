@@ -70,6 +70,7 @@ GUIDE_DOCS = (
     'docs/セカンドオピニオン加点/配布物テンプレ/14_記入見本_予約フォーム入力_製造業例.md',
     'docs/セカンドオピニオン加点/配布物テンプレ/15_記入見本_経営者一問一答_製造業例.md',
     'docs/セカンドオピニオン加点/_sample/05_記入サンプル_ダミー工務店.md',
+    'docs/セカンドオピニオン加点/_sample/07_記入サンプル_情報少なめ_ダミー工務店.md',
     # 通常枠×個人の申請書原本（Drive 正本に機械的修正を当てた配布版）。他3テンプレは Drive で配る。
     'ツール/【原本_個人】企業名_通常枠_個人2026.xlsx',
 )
@@ -91,6 +92,12 @@ class SkillSpec:
     mirror_dirs: tuple[str, ...] = ()          # リポジトリ相対のまま再現するフォルダ
     mirror_files: tuple[str, ...] = ()         # リポジトリ相対のまま再現するファイル
     mirror_exclude: tuple[str, ...] = field(default_factory=tuple)
+    source_extra: tuple[str, ...] = ()         # source_dir の中で、拡張子の許可外でも配るファイル（名前で挙げる）
+
+
+# フォルダごと取り込む場所（source_dir・mirror_dirs）で配ってよい拡張子。これ以外のファイル
+# （開発中に置いた PDF・成果物の xlsx など）は、source_extra で名前を挙げない限りビルドを止める。
+FOLDER_SUFFIXES_OK = frozenset({'.md', '.py', '.json'})
 
 
 SKILLS = (
@@ -102,7 +109,8 @@ SKILLS = (
         mirror_exclude=(SHARED_BLOCK_CANON,),
     ),
     SkillSpec(name='wagebook-convert', skill_md='.claude/skills/wagebook-convert/SKILL.md',
-              source_dir='.claude/skills/wagebook-convert'),
+              source_dir='.claude/skills/wagebook-convert',
+              source_extra=('.claude/skills/wagebook-convert/templates/賃金台帳テンプレート.xlsx',)),
     SkillSpec(name='katen-judge', skill_md='.claude/skills/katen-judge/SKILL.md',
               source_dir='.claude/skills/katen-judge', mirror_files=KATEN_FILES),
     SkillSpec(name='case-docs-check', skill_md='.claude/skills/case-docs-check/SKILL.md',
@@ -121,7 +129,8 @@ SYNC_GATE_INPUTS = (
 # 念のための除外（許可フォルダにうっかり入った生成物・機密を弾く二重の安全網）
 EXCLUDE_PARTS = frozenset({'__pycache__', '_transcripts', '案件別', '.pytest_cache'})
 EXCLUDE_SUFFIXES = frozenset({'.pyc', '.pyo', '.log', '.b64'})
-EXCLUDE_NAME_KEYWORDS = ('賃金台帳_', '決算', '給与明細', 'ヒアリング結果', '社長意向', '議事_', '参考_')
+EXCLUDE_NAME_KEYWORDS = ('賃金台帳_', '賃金台帳一覧', '決算', '給与明細', 'ヒアリング結果', '社長意向', '議事_',
+                         '参考_', '_加点措置', '_AI版', '_給与支給総額')   # 顧客資料・成果物の典型的な名前
 
 # プラグインの制約（claude.ai へのアップロード・組織同期）
 ALLOWED_FRONTMATTER_KEYS = frozenset({'name', 'description', 'license', 'compatibility', 'metadata',

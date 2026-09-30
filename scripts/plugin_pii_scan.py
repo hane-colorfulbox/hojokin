@@ -39,7 +39,14 @@ ROSTER_DEFAULT = Path.home() / '.hojokin_pii' / 'roster.txt'
 ROSTER_MIN_ENTRIES = 50
 TEXT_SUFFIXES = {'.md', '.py', '.json', '.txt', '.toml', '.yml', '.yaml', '.csv', '.tsv', '.html'}
 XLSX_SUFFIXES = {'.xlsx', '.xlsm'}
-XLSX_TEXT_PARTS = re.compile(r'^(xl/(sharedStrings|worksheets/[^/]+|comments[^/]*|workbook)\.xml|docProps/[^/]+\.xml)$')
+# xlsx の中で文字を持ちうるパーツはすべて見る（リンク先は _rels、図形の文字は drawings、表の名前は tables）
+XLSX_XML_PART = re.compile(r'\.(xml|rels|vml)$', re.I)
+XML_TAG = re.compile(r'<[^>]+>')
+XML_ATTR_VALUE = re.compile(r'\s[\w:.\-]+="([^"]*)"')
+SHARED_STRING_ITEM = re.compile(r'<si>(.*?)</si>', re.S)
+# 図形の座標（EMU 単位の大きな数）やスタイルの識別子が並ぶパーツでは、金額と長い ID のルールを外す
+LAYOUT_PART = re.compile(r'^xl/(drawings/|styles\.xml|theme/)')
+LAYOUT_SKIP_RULES = frozenset({'amount', 'long-id'})
 MAX_FILE_BYTES = 20 * 1024 * 1024
 
 @dataclass
@@ -103,26 +110,50 @@ def load_extra_patterns(repo: Path) -> list[tuple[str, re.Pattern]]:
     return pats
 
 
-def scan_text(label: str, text: str, rules) -> list[Hit]:
+def scan_text(label: str, text: str, rules, skip_rules=frozenset()) -> list[Hit]:
     hits: list[Hit] = []
     for no, raw in enumerate(text.splitlines(), 1):
         line = _norm(raw)
         for rule, rx in rules:
+            if rule in skip_rules:
+                continue
             for m in rx.finditer(line):
                 if not exempt(rule, m, line):
                     hits.append(Hit(label, no, rule, m.group(0), raw))
     return hits
 
 
+def _xml_lines(part: str, xml: str):
+    """XML パーツから、検査する文字を1行ずつ取り出す（文字参照 &#...; は復号する）。"""
+    for s in XML_TAG.sub('\n', xml).splitlines():          # 要素の文字（1要素1行）
+        if s.strip():
+            yield html.unescape(s)
+    for tag in XML_TAG.findall(xml):                       # 属性値（リンク先 Target・表示名など）
+        for value in XML_ATTR_VALUE.findall(tag):
+            if value.strip():
+                yield html.unescape(value)
+    if part.endswith('sharedStrings.xml'):                 # 書式ごとに分かれた文字を1セル分につなぐ
+        for item in SHARED_STRING_ITEM.findall(xml):
+            yield html.unescape(XML_TAG.sub('', item))
+
+
+def _read_text(path: Path) -> str | None:
+    """UTF-8 で読めなければ Shift_JIS（給与ソフトの CSV に多い）で読み直す。どちらも無理なら None。"""
+    data = path.read_bytes()
+    for enc in ('utf-8', 'cp932'):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return None
+
+
 def _xlsx_texts(path: Path):
     with zipfile.ZipFile(path) as zf:
         for info in zf.infolist():
-            if XLSX_TEXT_PARTS.match(info.filename):
+            if XLSX_XML_PART.search(info.filename):
                 xml = zf.read(info).decode('utf-8', errors='replace')
-                # タグを落として値だけを1セル1行にする（XML 1行に全セルが並ぶため）。
-                # 文字参照（&#21021; 等）は復号してから検査する（符号化された名前の見落とし防止）。
-                body = re.sub(r'<[^>]+>', '\n', xml)
-                yield info.filename, '\n'.join(html.unescape(s) for s in body.splitlines() if s.strip())
+                yield info.filename, '\n'.join(_xml_lines(info.filename, xml))
 
 
 def scan_path(path: Path, rules, base: Path | None = None) -> list[Hit]:
@@ -133,11 +164,16 @@ def scan_path(path: Path, rules, base: Path | None = None) -> list[Hit]:
     if suffix in XLSX_SUFFIXES:
         hits: list[Hit] = []
         for part, text in _xlsx_texts(path):
-            hits.extend(scan_text(f'{label}!{part}', text, rules))
+            skip = LAYOUT_SKIP_RULES if LAYOUT_PART.match(part) else frozenset()
+            hits.extend(scan_text(f'{label}!{part}', text, rules, skip))
         return hits
-    if suffix in TEXT_SUFFIXES or not suffix:
-        return scan_text(label, path.read_text(encoding='utf-8', errors='replace'), rules)
-    return []
+    if suffix in TEXT_SUFFIXES or not suffix or path.name.startswith('.'):
+        text = _read_text(path)
+        if text is None:
+            return [Hit(label, 0, 'unscannable', path.name, '文字コードを判定できない（UTF-8 でも Shift_JIS でもない）')]
+        return scan_text(label, text, rules)
+    # 中身を検査できない形式（PDF・画像・Word など）は、通さずに止める（配る前に人が確かめる）
+    return [Hit(label, 0, 'unscannable', path.name, f'検査できない形式: {suffix}')]
 
 
 def scan_tree(targets: list[Path], rules) -> list[Hit]:

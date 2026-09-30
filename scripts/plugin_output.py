@@ -1,6 +1,7 @@
 """配布プラグインの出力（マニフェスト・プラグイン用リポジトリの直下ファイル・書き出し・ZIP）。"""
 import hashlib
 import json
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import distribution_manifest as dm
 ZIP_FIXED_TIME = (2026, 1, 1, 0, 0, 0)   # ZIP を同じ中身なら同じバイト列にするための固定時刻
 PRESERVED_TOP = {'.git'}                 # プラグイン用リポジトリで消さないもの
 HOOK_PATH = '.githooks/pre-commit'
+BUILD_INFO_NAME = 'BUILD_INFO.json'
 
 
 def _json(obj) -> bytes:
@@ -47,7 +49,8 @@ Claude Code に届きます。
   （次のビルドで上書きされます）。直したい内容は開発リポジトリ側で直してからビルドします。
 - 現在の版: `{version}`（元コミット `{sha}`）。ファイルごとの sha256 は `BUILD_INFO.json` にあります。
 - 既定ブランチに push すると、自動同期でメンバー全員に届きます。push の前に、差分に顧客名・従業員名・金額が
-  無いことを確かめてください（`.githooks/pre-commit` が PII スキャンを実行します）。
+  無いことを確かめてください。`.githooks/pre-commit` がコミットのたびに全ファイル（xlsx の中も）を PII スキャンします。
+  clone した直後に一度だけ `git config core.hooksPath .githooks` を実行してフックを有効にしてください。
 
 ## 更新の手順
 
@@ -66,14 +69,14 @@ Claude Code に届きます。
 """
 
 HOOK_SCRIPT = """#!/bin/sh
-# プラグイン用リポジトリの pre-commit: ステージした追加行を PII スキャンする。
+# プラグイン用リポジトリの pre-commit: 作業ツリーの全ファイル（xlsx の中も）を PII スキャンする。
 # 開発リポジトリの場所は HOJOKIN_DEV_REPO で変えられる。
 DEV="${HOJOKIN_DEV_REPO:-$HOME/projects/カラフルボックス/補助金}"
 if [ ! -f "$DEV/scripts/plugin_pii_scan.py" ]; then
   echo "❌ PII スキャナが見つかりません: $DEV/scripts/plugin_pii_scan.py（HOJOKIN_DEV_REPO を設定）" >&2
   exit 1
 fi
-python "$DEV/scripts/plugin_pii_scan.py" --staged || exit 1
+python "$DEV/scripts/plugin_pii_scan.py" "$(git rev-parse --show-toplevel)" || exit 1
 """
 
 
@@ -85,7 +88,7 @@ def repo_root_files(version: str, sha: str, plugin_files: dict[str, bytes]) -> d
         HOOK_PATH: HOOK_SCRIPT.encode('utf-8'),
     }
     everything = {**plugin_files, **root}
-    root['BUILD_INFO.json'] = _json({
+    root[BUILD_INFO_NAME] = _json({
         'plugin': dm.PLUGIN_NAME,
         'version': version,
         'source_repo': 'hane-colorfulbox/hojokin',
@@ -102,23 +105,44 @@ def write_tree(dest: Path, files: dict[str, bytes]) -> None:
         p.write_bytes(data)
 
 
-def _existing_files(dest: Path) -> set[str]:
-    out = set()
-    for p in dest.rglob('*'):
-        rel = p.relative_to(dest).as_posix()
-        if p.is_file() and rel.split('/', 1)[0] not in PRESERVED_TOP:
-            out.add(rel)
-    return out
+def _check_destination(dest: Path, dev_repo: Path) -> set[str]:
+    """出力先が「このビルドが作ったプラグイン用リポジトリ」かを確かめ、前回配った一覧を返す。
+
+    消してよいのは前回の BUILD_INFO.json に載っているファイルだけ（それ以外は触らない）。
+    指定を間違えて別の作業フォルダ（開発リポジトリなど）を渡しても、何も消さずに止まる。
+    """
+    dev = dev_repo.resolve()
+    if dest == dev or dev.is_relative_to(dest) or dest.is_relative_to(dev):
+        raise SystemExit(f'❌ 出力先が開発リポジトリと重なっています: {dest}')
+    if not dest.exists() or not any(dest.iterdir()):
+        return set()
+    entries = {p.name for p in dest.iterdir()}
+    if entries <= PRESERVED_TOP:   # git init しただけの空の作業コピー
+        return set()
+    info_path = dest / BUILD_INFO_NAME
+    if not info_path.is_file():
+        raise SystemExit(f'❌ 出力先にこのビルドの {BUILD_INFO_NAME} がありません（別のフォルダの可能性）: {dest}')
+    info = json.loads(info_path.read_text(encoding='utf-8'))
+    if info.get('plugin') != dm.PLUGIN_NAME:
+        raise SystemExit(f'❌ 出力先は別のプラグインのリポジトリです（{info.get("plugin")}）: {dest}')
+    return set(info.get('files', {})) | {BUILD_INFO_NAME}
 
 
-def sync_repo(dest: Path, files: dict[str, bytes]) -> None:
-    """dest を files と完全に一致させる（.git は触らない）。dest は空か git の作業コピーであること。"""
+def _check_remote(dest: Path) -> None:
+    if not (dest / '.git').exists():
+        return
+    cp = subprocess.run(['git', '-C', str(dest), 'remote', 'get-url', 'origin'], capture_output=True, text=True)
+    if cp.returncode == 0 and dm.PLUGIN_REPO not in cp.stdout:
+        raise SystemExit(f'❌ 出力先の送り先（origin）が {dm.PLUGIN_REPO} ではありません: {cp.stdout.strip()}')
+
+
+def sync_repo(dest: Path, files: dict[str, bytes], dev_repo: Path) -> None:
+    """dest をプラグイン用リポジトリの中身に揃える。前回配ったファイルのうち今回無いものだけを消す。"""
     dest = dest.resolve()
-    if dest.exists() and any(dest.iterdir()) and not (dest / '.git').exists():
-        raise SystemExit(f'❌ 出力先が git の作業コピーではありません（空でもない）: {dest}')
+    previous = _check_destination(dest, dev_repo)
+    _check_remote(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    existing = _existing_files(dest)
-    removed = sorted(existing - set(files))
+    removed = sorted(rel for rel in previous - set(files) if (dest / rel).is_file())
     for rel in removed:
         (dest / rel).unlink()
     changed = [rel for rel, data in files.items()

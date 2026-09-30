@@ -19,6 +19,7 @@ import hashlib
 import json
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 for _stream in (sys.stdout, sys.stderr):
@@ -36,11 +37,23 @@ ROOT = Path(__file__).resolve().parent.parent
 PLUGIN_ROOT = f'plugins/{dm.PLUGIN_NAME}/'
 
 
-def _excluded(path: str) -> bool:
+def _generated(path: str) -> bool:
+    """実行時にできる生成物（__pycache__ など）。黙って飛ばしてよい。"""
     parts = path.split('/')
-    name = parts[-1]
-    return bool(dm.EXCLUDE_PARTS & set(parts)) or Path(name).suffix in dm.EXCLUDE_SUFFIXES \
-        or any(kw in name for kw in dm.EXCLUDE_NAME_KEYWORDS)
+    return bool(dm.EXCLUDE_PARTS & set(parts)) or Path(parts[-1]).suffix in dm.EXCLUDE_SUFFIXES
+
+
+def _check_folder_file(path: str, spec) -> None:
+    """フォルダごと取り込む場所のファイルが、配ってよいものか。だめならビルドを止める。
+
+    顧客資料らしい名前や許可外の形式は、黙って飛ばさずに止める。飛ばしても公開リポジトリには
+    入ったままなので、気づいて外してもらう必要がある。
+    """
+    name = unicodedata.normalize('NFC', path).rsplit('/', 1)[-1]   # 濁点が分かれた（NFD）名前も同じく判定
+    if any(kw in name for kw in dm.EXCLUDE_NAME_KEYWORDS):
+        raise SourceError(f'顧客資料・成果物らしい名前のファイルがあります（配らない。リポジトリからも外す）: {path}')
+    if Path(name).suffix.lower() not in dm.FOLDER_SUFFIXES_OK and path not in spec.source_extra:
+        raise SourceError(f'配布の許可が無い形式のファイルがあります（必要なら source_extra に名前で挙げる）: {path}')
 
 
 def assemble_skills(src) -> dict[str, bytes]:
@@ -68,11 +81,13 @@ def assemble_skills(src) -> dict[str, bytes]:
         if spec.source_dir:
             for p in src.list_dir(spec.source_dir):
                 rel = p[len(spec.source_dir) + 1:]
-                if rel != 'SKILL.md' and not _excluded(p):
+                if rel != 'SKILL.md' and not _generated(p):
+                    _check_folder_file(p, spec)
                     put(base + rel, p)
         for d in spec.mirror_dirs:
             for p in src.list_dir(d):
-                if p not in spec.mirror_exclude and not _excluded(p):
+                if p not in spec.mirror_exclude and not _generated(p):
+                    _check_folder_file(p, spec)
                     put(base + p, p)
         for p in spec.mirror_files:
             put(base + p, p)
@@ -140,7 +155,7 @@ def main(argv=None) -> int:
             print('✅ 全ゲート合格（--check-only のため出力なし）')
             return 0
         if args.out:
-            plugin_output.sync_repo(args.out, repo_files)
+            plugin_output.sync_repo(args.out, repo_files, ROOT)
             print(f'✅ プラグイン用リポジトリを更新: {args.out}（コミット・push は別に行う）')
         if args.zip:
             plugin_output.write_plugin_zip(args.zip, repo_files, PLUGIN_ROOT, dm.PLUGIN_NAME)

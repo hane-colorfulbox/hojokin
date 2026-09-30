@@ -1,10 +1,21 @@
 """ゲート（scripts/plugin_gates.py）が、壊れた配布物を確実に止めることを合成の入力で確かめる。"""
 import io
+import unicodedata
 import zipfile
 
 from _common import Checker
 
+import build_plugin as bp
 import plugin_gates as g
+from plugin_source import SourceError
+
+
+def raises(fn) -> bool:
+    try:
+        fn()
+    except SourceError:
+        return True
+    return False
 
 GOOD_MD = '---\nname: sample-skill\ndescription: 見本のスキル。\nallowed-tools: \'Read Glob\'\n---\n\n# 見本\n'
 BLOCK = '<!-- chat-env:begin -->\n注意\n<!-- chat-env:end -->'
@@ -87,6 +98,19 @@ def main() -> int:
             bool(g.check_layout({'skills/a/補助金加点/加点措置' + '①' + '用.xlsx': b'x'}, '')))
     c.check('置き換え後のパスは通る',
             not g.check_layout({g.dm.dist_path('skills/a/ツール/【原本_個人】企業名・様式①②.xlsx'): b'x'}, ''))
+    c.check('NFC 正規化されていないパスは止める',
+            bool(g.check_layout({unicodedata.normalize('NFD', 'skills/a/ヒアリング.md'): b'x'}, '')))
+
+    spec = g.dm.SKILLS[1]   # wagebook-convert（source_extra にテンプレ xlsx を名前で挙げている）
+    base = spec.source_dir
+    c.check('フォルダ内の md・py・json と、名前を挙げたテンプレは取り込める',
+            not raises(lambda: bp._check_folder_file(f'{base}/reference/x.md', spec))
+            and not raises(lambda: bp._check_folder_file(spec.source_extra[0], spec)))
+    c.check('顧客資料・成果物らしい名前のファイルがあればビルドを止める（NFD でも）',
+            raises(lambda: bp._check_folder_file(f'{base}/テスト社_賃金台帳一覧.xlsx', spec))
+            and raises(lambda: bp._check_folder_file(unicodedata.normalize('NFD', f'{base}/ヒアリング結果_A.md'), spec)))
+    c.check('許可の無い形式（PDF など）があればビルドを止める',
+            raises(lambda: bp._check_folder_file(f'{base}/examples/原本.pdf', spec)))
     return c.finish()
 
 

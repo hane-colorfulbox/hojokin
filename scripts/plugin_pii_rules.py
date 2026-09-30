@@ -14,7 +14,7 @@ SURNAMES = (   # よくある姓（区切りは / ）
     '村田/大塚/新井/小山/平野/藤本/河野/上野/野口/武田/松井/千葉/岩崎/菅原/木下/久保/佐野/野村/松尾/'
     '菊地/杉本/市川/古川/大西/島田/水野/桜井/高野/渡部/吉川/山内/西田/飯田/菊池/西川/小松/北村/安田/'
     '五十嵐/川口/平田/中田/久保田/服部/岩田/土屋/川崎/福島/本田/樋口/秋山/田口/永井/山中/中西/吉村/'
-    '川上/石原/大橋/松岡/馬場/浅野/荒木/大久保/野田/小池/松下/浅井/岩本/片山/熊谷/坂平/嘉口/羽根/新田/林田'
+    '川上/石原/大橋/松岡/馬場/浅野/荒木/大久保/野田/小池/松下/浅井/岩本/片山'
 ).split('/')
 DUMMY_GIVEN = {'太郎', '花子', '一郎', '次郎', '三郎', '四郎', '五郎', '良子', '和子', '一子'}
 HONORIFIC_EXEMPT = {
@@ -37,13 +37,15 @@ def _roster_alt(name: str) -> str:
     esc = re.escape(name)
     if KANA_ONLY.match(name) and len(name) <= KANA_BOUNDARY_MAX_LEN:
         return rf'(?<![ァ-ヶー]){esc}(?![ァ-ヶー])'
+    if name.isascii():   # 英字の名前は単語として現れたときだけ（ハッシュ値や英単語の一部は拾わない）
+        return rf'(?<![A-Za-z0-9]){esc}(?![A-Za-z0-9])'
     return esc
 
 
 def build_rules(roster: list[str], extra: list[tuple[str, re.Pattern]]) -> list[tuple[str, re.Pattern]]:
     surname = '|'.join(sorted(SURNAMES, key=len, reverse=True))
     rules = [
-        ('roster', re.compile('|'.join(_roster_alt(n) for n in roster))),
+        ('roster', re.compile('|'.join(_roster_alt(n) for n in roster), re.IGNORECASE)),
         ('email-internal', re.compile(r'[A-Za-z0-9._%+-]+@colorfulbox\.(?:co\.)?jp', re.I)),
         ('email', re.compile(r'[A-Za-z0-9._%+-]+@(?!example\.(?:com|org|jp)\b|anthropic\.com\b)'
                              r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+')),
@@ -53,8 +55,8 @@ def build_rules(roster: list[str], extra: list[tuple[str, re.Pattern]]) -> list[
         ('name-spaced', re.compile(rf'(?:{surname})[ 　]{KANJI}{{1,3}}(?!{KANJI})')),
         ('name-honorific', re.compile(rf'({KANJI}{{1,4}})(?:さん|様(?![式々相子態変])|氏(?!名)|くん|ちゃん)')),
         ('name-gender', re.compile(rf'{KANJI}{{2,5}}[\s ]*[(（][男女][)）]')),
-        ('amount', re.compile(r'(?<![A-Za-z0-9_\-,.#])[1-9]\d{0,2}(?:,\d{3}){2,}(?![A-Za-z0-9_,])'
-                              r'|(?<![A-Za-z0-9_\-,.#])[1-9]\d{6,}(?![A-Za-z0-9_])')),
+        ('amount', re.compile(r'(?<![A-Za-z0-9_\-,.#{])[1-9]\d{0,2}(?:,\d{3}){2,}(?![A-Za-z0-9_,])'
+                              r'|(?<![A-Za-z0-9_\-,.#{])[1-9]\d{6,}(?![A-Za-z0-9_])')),
     ]
     rules.extend(extra)
     return rules
@@ -68,14 +70,18 @@ def _honorific_exempt(m: re.Match, line: str) -> bool:
     word, full = m.group(1), m.group(0)
     if any(word.endswith(e) or full.endswith(e) for e in HONORIFIC_EXEMPT):
         return True
+    if any(word.endswith(g) for g in DUMMY_GIVEN):   # 「花子さん」のような見本の名前
+        return True
     before = line[max(0, m.start() - DUMMY_CONTEXT_WIDTH):m.start()]
     return any(d in before for d in DUMMY_CONTEXT)
 
 
 AMOUNT_ROUND_UNIT = 10_000              # 万円単位の丸い数は例示・上限値として扱う
-AMOUNT_SKIP_LINE = re.compile(r'content_length|バイト|bytes', re.I)
+AMOUNT_SKIP_LINE = re.compile(r'content_length|バイト数|\bbytes\b', re.I)   # 「アルバイト」は対象外にしない
 SEQUENTIAL_DIGITS = '1234567890' * 2     # 12,345,678 のような見本値
 URL_PLACEHOLDER = re.compile(r'<|\.\.\.|…|XXX|\{')
+BASE64_VALUE = re.compile(r'^[A-Za-z0-9+/]{40,}={0,2}$')   # シート保護のハッシュ値など（人の情報ではない）
+GUID = re.compile(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}')   # 図形・検証ルールの識別子
 
 
 def exempt(rule: str, m: re.Match, line: str) -> bool:
@@ -90,4 +96,6 @@ def exempt(rule: str, m: re.Match, line: str) -> bool:
                 or digits in SEQUENTIAL_DIGITS or bool(AMOUNT_SKIP_LINE.search(line)))
     if rule == 'google-url':
         return bool(URL_PLACEHOLDER.search(text))
+    if rule == 'long-id':
+        return bool(BASE64_VALUE.match(line.strip()) or GUID.fullmatch(text))
     return False
