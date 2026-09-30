@@ -1511,7 +1511,7 @@ def _render_file_check_result(result, total_count):
                 if cat == 'wage_ledger':
                     st.markdown(
                         '&ensp;💡 PDFしか無い場合は Excel に変換してアップロードしてください。'
-                        '変換は **手元の PC の Claude Code（CC）+ `wagebook-convert` Skill** で行います。'
+                        '変換は **Claude（チャット・Cowork・手元の Claude Code）+ `wagebook-convert` Skill** で行います。'
                         'ページ上部の「📘 賃金台帳の作成手順（CC向け Skill）」expander にセットアップ手順と依頼方法を載せています。'
                     )
             else:
@@ -1865,55 +1865,37 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# 賃金台帳の作成 Skill（wagebook-convert）。本体は .claude/skills/wagebook-convert/ で管理（git）。
-# v2 で引き継ぎコンテキスト（hojokin-handoff.zip）に同梱＝別DL不要・project-scopedで自動有効に一本化。
-# 単体ZIP配布は UI から廃止（同梱に統一）。build_skill_zip.py はテンプレ同期チェックの実装元として残置。
-
-# 引き継ぎコンテキストパック（CC向け）— 別メンバーの Claude Code に補助金業務の知識を渡す配布物。
-# 中身は脱PIIの知識パック(引き継ぎ/)＋索引CLAUDE.md＋参照docs＋スキル(.claude/skills/wagebook-convert)
-# ＋更新スクリプト(scripts/update_handoff.py)。v2 でスキルを同梱し 1 本化。
-# scripts/build_handoff_zip.py で生成し、Drive「補助金ツール」の hojokin-handoff.zip を版差し替え。
-_HANDOFF_CONTEXT_VERSION = '2026-08-17'
-# Drive 共有リンク（hojokin-handoff.zip = コンテキスト一式）。配布先: マイドライブ/補助金ツール/
-_HANDOFF_CONTEXT_ZIP_URL = 'https://drive.google.com/file/d/1FWubpOrg0crtoz6cF2Jdp3otRi5_GslJ/view?usp=sharing'
+# 補助金業務の資料とスキル（hojokin-guide / wagebook-convert / katen-judge / case-docs-check）は、
+# 組織のプラグイン「hojokin」で配る（2026-09-30〜。旧 ZIP 配布の hojokin-handoff.zip は廃止）。
+# 中身は scripts/build_plugin.py が HEAD から組み立て、private の colorful-box/hojokin-plugins に置く。
+_PLUGIN_MIN_CLAUDE_CODE = '2.1.273'
 with st.expander(
-    '📦 補助金業務の引き継ぎコンテキスト（CC向け）— 別の人の Claude Code に業務知識を渡す',
+    '📦 補助金業務のスキルと資料（Claude 向け）— 組織プラグイン「hojokin」',
     expanded=False,
 ):
     st.info(
-        '補助金業務の全体像・制度ルール（R215/R216・加点）・賃金台帳の実務・運用ルールを、'
-        '別メンバーの Claude Code が読める形（脱PII の markdown 一式）にまとめた配布物です。\n\n'
-        '**スキル3本と判定エンジンも同梱済み**です（別DL不要）：'
+        '補助金業務の手引き（全体像・制度ルール・賃金台帳の実務・運用ルール）と、スキル4本を、'
+        '組織のプラグイン **hojokin** として配っています。claude.ai のチャット・Cowork・Claude Code の'
+        'どれでも使え、管理者が直すと自動で最新になります（ZIP のダウンロードや展開は不要）。\n\n'
+        '`hojokin-guide`＝業務ガイド／'
         '`wagebook-convert`＝賃金台帳PDF変換（出力に原本転記シート群＝PDF全ページ・全項目の転記付き）／'
-        '`case-docs-check`＝案件フォルダの必要書類チェック／'
-        '`katen-judge`＝加点判定のローカル完結（PDF台帳→判定→公式様式①②）。'
-        '補助金フォルダで Claude Code を開けばそのまま使えます。'
+        '`katen-judge`＝加点判定（PDF台帳→専用台帳→判定→公式様式①②）／'
+        '`case-docs-check`＝案件フォルダの必要書類チェック'
     )
-    st.markdown('#### 初回インストール（1回だけ）')
+    st.markdown('#### 使い始め（1回だけ）')
     st.markdown(
-        f'1. [`hojokin-handoff.zip` をダウンロード]({_HANDOFF_CONTEXT_ZIP_URL})\n'
-        '2. ZIP を展開し、中身（`CLAUDE.md` / `引き継ぎ/` / `docs/` / `.claude/` / `hojokin/` / '
-        '`ツール/` / `補助金加点/` / `scripts/`）を **補助金フォルダの直下** に置く\n'
-        '3. その補助金フォルダの直下で Claude Code を開いて（再起動して）質問・作業する\n'
-        '   - 直下の `CLAUDE.md` が自動で読み込まれ、`引き継ぎ/00_はじめに.md` から案内されます\n'
-        '   - 同梱スキルにより `/wagebook-convert`・`/case-docs-check`・`/katen-judge` が使えます\n'
-        '   - すでに自分の `CLAUDE.md` を直下に持っている場合は上書きに注意'
-        '（案内ブロックを自分の `CLAUDE.md` に追記してください）'
-    )
-    st.markdown('#### 2回目以降は「更新して」の一言（丸ごと再DL不要）')
-    st.markdown(
-        'あなたの Claude Code が **Google ドライブのコネクタに接続**（会社アカウント）していれば、'
-        'Claude Code に **「引き継ぎを最新に更新して」** と言うだけで最新版を取得して**差分適用**します。'
-        'あなたが直下に置いた自分の `CLAUDE.md` は保護されます。\n\n'
-        '- 仕組み：CC が Drive コネクタで最新 ZIP を取得 → 同梱の `scripts/update_handoff.py` が差分適用。\n'
-        '- Drive に繋いでいない場合：上のリンクから ZIP を手動DLし、'
-        '`python scripts/update_handoff.py <zipのパス>` を実行。\n\n'
-        f'**最新版: {_HANDOFF_CONTEXT_VERSION}**'
+        '1. claude.ai を開き、**カスタマイズ → プラグイン** で `hojokin` を探してインストールする\n'
+        '2. チャット・Cowork ではそのまま使える（補助金の質問や作業をすると自動でスキルが使われる）\n'
+        f'3. Claude Code（v{_PLUGIN_MIN_CLAUDE_CODE} 以上）は claude.ai のアカウントでログインしていれば、'
+        '次の起動時に自動で入る（画面の案内に従って `/reload-plugins` を実行）\n'
+        '4. 以前の ZIP 版パック（hojokin-handoff.zip）を使っていた人は、そのフォルダの '
+        '`.claude/skills/` と `CLAUDE.md` を削除する（手順は hojokin-guide スキルの §0）'
     )
     st.markdown(
-        '- 修正したい点があれば、**ファイル名・箇所・修正案**をチャットで管理者に送ってください'
-        '（マスタを直して再配布します）。\n'
-        '- 顧客の実データ（賃金台帳・決算書・給与明細・ヒアリング）は、このフォルダや共有に入れないでください。'
+        '- 顧客データをチャットで扱うときは、**1案件1チャット・成果物を保存したら会話を削除・'
+        '共有リンクや Project に入れない** を守ってください（詳しくは hojokin-guide スキル）。\n'
+        '- 修正したい点があれば、**スキル名・ファイル名・箇所・修正案**をチャットで管理者に送ってください'
+        '（直すと全員に自動で届きます）。'
     )
 
 with st.expander(
@@ -1921,10 +1903,11 @@ with st.expander(
     expanded=False,
 ):
     st.markdown(
-        'スキルを使う前に、**このPCで1回だけ**実施してください。'
+        '手元の Claude Code（CC）でスキルを使う場合だけ、**このPCで1回だけ**実施してください'
+        '（claude.ai のチャット・Cowork では不要）。'
         '手元の Claude Code（CC）に下のプロンプトを貼り付けて実行するだけです。'
         'Python 3.8 以上が無ければ CC が導入を試みます。\n\n'
-        '※ 引き継ぎパック（スキル同梱）を更新しても、このセットアップの再実行は不要です。'
+        '※ プラグインが更新されても、このセットアップの再実行は不要です。'
     )
     st.code(
         '【補助金・賃金台帳スキル：CC環境の初回セットアップ（このPCで1回だけ）】\n'
@@ -1942,7 +1925,7 @@ with st.expander(
         '4. 動作確認：`python -c "import openpyxl; print(\'OK\', openpyxl.__version__)"`（使う Python に合わせる）。\n'
         '5. 報告：使った Python のパスとバージョン、openpyxl のバージョン、最終結果（OK/NG）。\n'
         '\n'
-        '※ これは1回だけ。引き継ぎパック（スキル同梱）を更新しても、このセットアップの再実行は不要です。',
+        '※ これは1回だけ。プラグインが更新されても、このセットアップの再実行は不要です。',
         language='markdown',
     )
 
@@ -1951,9 +1934,9 @@ with st.expander(
     expanded=False,
 ):
     st.info(
-        '**この作業は手元の PC の Claude Code（CC）に行わせます。**\n\n'
-        'スキル `wagebook-convert` は **上の「📦 引き継ぎコンテキスト」に同梱済み**です。'
-        '補助金フォルダで CC を開いていれば、**追加DLなしで**そのまま賃金台帳の変換を依頼できます。\n'
+        '**この作業は Claude（claude.ai のチャット・Cowork・手元の Claude Code）に行わせます。**\n\n'
+        'スキル `wagebook-convert` は **上の「📦 組織プラグイン hojokin」に入っています**。'
+        'プラグインをインストールしていれば、**追加DLなしで**そのまま賃金台帳の変換を依頼できます。\n'
         '具体的な変換手順・テンプレート・検証チェックリスト・サンプルは Skill 内に同梱されています。'
     )
     st.warning(
@@ -1963,20 +1946,22 @@ with st.expander(
         '顧客には可能な限り Excel/CSV 形式での提出を依頼するのが理想です。'
     )
 
-    st.markdown('### 🔧 セットアップ（スキルは同梱済み・別DL不要）')
+    st.markdown('### 🔧 セットアップ（プラグインを入れるだけ・別DL不要）')
     st.markdown(
-        'スキルは引き継ぎコンテキストに**同梱**されています。'
-        '**補助金フォルダで Claude Code を開けば、そのまま `/wagebook-convert` が使えます**（反映には CC 再起動）。'
+        'スキルは組織プラグイン **hojokin** に入っています。'
+        'プラグインをインストールすれば、**チャット・Cowork・Claude Code のどれでも使えます**。'
         '別途ダウンロード・インストールは不要です。\n'
-        '※ 先に上の「🔧 はじめての方へ：CC環境セットアップ（Python）」を1回だけ済ませてください。\n\n'
-        '⚠ もし**以前に単体スキルを `~/.claude/skills/wagebook-convert/`（グローバル）へ入れている**場合は、'
-        'その**古いグローバル版を削除**してください。同名スキルが二重にあると古い方が優先され、版ズレの原因になります'
-        '（同梱版が常に最新です）。'
+        '※ 手元の Claude Code で使う場合は、先に上の「🔧 はじめての方へ：CC環境セットアップ（Python）」を'
+        '1回だけ済ませてください。\n\n'
+        '⚠ もし**以前に単体スキルを `~/.claude/skills/wagebook-convert/`（グローバル）へ入れている**場合や、'
+        '**ZIP 版パックの `.claude/skills/`** が残っている場合は、その古い版を削除してください'
+        '（プラグイン版が常に最新です）。'
     )
 
     st.markdown('### 👤 CC への依頼方法（毎回）')
     st.markdown(
-        'スキルは同梱済みなので、手元の Claude Code に **下のプロンプトを貼り付け、`［　］` を埋めて送るだけ** です。'
+        'プラグインを入れていれば、Claude に **下のプロンプトを貼り付け、`［　］` を埋めて送るだけ** です'
+        '（チャットでは賃金台帳 PDF を添付する）。'
     )
     st.code(
         '賃金台帳を補助金ツール用の Excel に変換してください。\n'
@@ -2001,14 +1986,14 @@ with st.expander(
         '- **履歴事項全部証明書** は無くても変換できますが、**法人では役員の自動判定に使うため強く推奨**'
         '（無いと従業員数・給与支給総額が過大に出ることがあります）。\n'
         '- 通常はこのプロンプトを送るだけで Skill が自動的に起動します。'
-        'もし起動しない場合は、先頭に `/wagebook-convert` と入力してください。'
+        'もし起動しない場合は、Claude Code では先頭に `/hojokin:wagebook-convert` と入力してください。'
     )
 
     st.warning(
         '**変換結果がおかしい／Skill が起動しないとき**\n\n'
-        '1. **まず手元のパックを最新化してください。** Claude Code に「引き継ぎを最新に更新して」と言えば'
-        '（Google ドライブ接続時）最新版に差分適用されます。反映のため CC を再起動。'
-        '不具合のときは「手元が古い」可能性が高いので、まずこれを試します。\n'
+        '1. **まずプラグインが最新か確認してください。** Claude に「補助金プラグインの selfcheck を実行して」'
+        'と頼むと、版と中身が配布時のままかを確かめられます。古い・壊れている場合はプラグインを入れ直します'
+        '（Claude Code は再起動で最新になります）。\n'
         '2. **最新でもまだおかしいときは、羽根に共有してください。** '
         '会社名・症状（例：給与支給総額が想定と合わない／人数が多すぎる 等）・CC が出力した Excel を添えてください。'
     )
@@ -2826,4 +2811,4 @@ if 'last_results' in st.session_state:
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.97 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.98 | カラフルボックス株式会社')
