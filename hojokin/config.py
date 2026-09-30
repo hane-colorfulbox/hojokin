@@ -842,7 +842,7 @@ SHINSEI_ANCHOR_LABELS: dict[str, str | tuple[str, ...]] = {
     'employee_count_fte': '従業員数（全期間在籍していない従業員は除外',
     'wage_total_base': '事業計画期間における給与支給総額',
     'wage_raise_declaration': '上記の賃上げ計画を従業員へ表明しましたか？',
-    # 通常枠個人（坂平さん版レイアウト）のみ「賃上げ幅」、他テンプレは「賃上げ幅を選択」
+    # 通常枠個人（原本管理担当者版レイアウト）のみ「賃上げ幅」、他テンプレは「賃上げ幅を選択」
     'wage_raise_amount': ('賃上げ幅を選択', '賃上げ幅'),
 }
 ANCHOR_PREFIX_LEN = 12
