@@ -30,7 +30,7 @@ allowed-tools: 'Read Glob Grep Bash(python "${CLAUDE_SKILL_DIR}/review/run_katen
 
 1. `${CLAUDE_SKILL_DIR}/hojokin/wage_reader.py`（判定エンジン。ほか config.py / xlsx_surgical.py / wage_calculator.py / models.py / bonus_wage_ledger_writer.py / __init__.py）
 2. `${CLAUDE_SKILL_DIR}/ツール/加点判定用賃金台帳テンプレート.xlsx`（工程Aの変換先）
-3. `${CLAUDE_SKILL_DIR}/補助金加点/` の公式様式3枚（`補助率引き上げ・加点措置①用.xlsx` / `加点措置①用.xlsx` / `加点措置②用.xlsx`）
+3. `${CLAUDE_SKILL_DIR}/補助金加点/` の公式様式3枚（補助率引き上げ・加点措置①用 / 加点措置①用 / 加点措置②用）。配布版では claude.ai が記号入りのファイル名を受け付けないため、ファイル名の ①②・ を 1・2・_ に置き換えてある（例: `補助率引き上げ_加点措置1用.xlsx`）。ドライバはどちらの名前でも見つけ、出力ファイル名は公式の様式名のままにする
 4. `${CLAUDE_SKILL_DIR}/review/run_katen_judge.py`（工程Bのドライバ）
 5. Python3 + openpyxl（`python -c "import openpyxl"`。pandas は**不要**）
 
@@ -50,7 +50,7 @@ allowed-tools: 'Read Glob Grep Bash(python "${CLAUDE_SKILL_DIR}/review/run_katen
 <!-- chat-env:end -->
 
 - チャットでは `--fill` の出力先を出力用フォルダにする（`--outdir /mnt/user-data/outputs`）。
-- 生成した様式が原本どおりかは、`python "${CLAUDE_SKILL_DIR}/review/check_lossless.py" "${CLAUDE_SKILL_DIR}/補助金加点/<原本名>.xlsx" <出力.xlsx>` で確かめられる（値を入れたシート以外が原本と同じなら合格）。チャットでも動くので、様式①②を渡す前に必ず実行して結果を報告に含める。Excel で開いて保存した後のファイルは対象外。
+- 生成した様式が原本どおりかは、`python "${CLAUDE_SKILL_DIR}/review/check_lossless.py" <原本> <出力.xlsx>` で確かめられる（原本のパスはドライバが「原本: …」として表示する）（値を入れたシート以外が原本と同じなら合格）。チャットでも動くので、様式①②を渡す前に必ず実行して結果を報告に含める。Excel で開いて保存した後のファイルは対象外。
 
 <!-- customer-data-rules:begin -->
 **顧客データを扱うときのルール（チャット・Cowork・Claude Code 共通）**
@@ -136,7 +136,7 @@ python "${CLAUDE_SKILL_DIR}/review/run_katen_judge.py" "台帳.xlsx" --fill イ�
 
 - 判定エンジンはツールと同一（`hojokin.wage_reader.judge_bonus_points`）。役員除外・整数整合（時間換算給与は円で丸めて比較）・>0下限も公式シートの判定式と一致。
 - `--fill` の出力は**原本ZIP丸ごとコピー＋対象セルの値だけ差し替え**（外科的パッチ）。公式様式の図形・記入例画像・判定式・秘密度ラベルを壊さない（openpyxl 再保存は使わない）。
-- 生成したら様式ごとに `python "${CLAUDE_SKILL_DIR}/review/check_lossless.py" <原本> <出力>` で原本無改変を確かめ、結果を完了報告に含める（原本は `${CLAUDE_SKILL_DIR}/補助金加点/` の同名ファイル）。
+- 生成したら様式ごとに `python "${CLAUDE_SKILL_DIR}/review/check_lossless.py" <原本> <出力>` で原本無改変を確かめ、結果を完了報告に含める（原本のパスは、ドライバの出力の「様式①生成: …（原本: …）」に出る）。
 - ②は交付申請月が無いと生成されない（レポートにその旨が出る）。
 - レポートの `⚠` 行（notes）は**全件読み、放置しない**。特に「法定最低賃金を下回る従業員」警告は時間欠落・抽出誤りのシグナルで、未解消のまま提出物を出さない。
 

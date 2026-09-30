@@ -41,14 +41,29 @@ from hojokin.wage_reader import (  # noqa: E402
     ym_label,
 )
 
-# 公式様式（申請枠で①のテンプレが変わる。②は全枠共通）
+# 公式様式（申請枠で①のテンプレが変わる。②は全枠共通）。値は公式のファイル名。
 KATEN_DIR = ROOT / '補助金加点'
-TEMPLATE_S1 = {
-    '通常': KATEN_DIR / '補助率引き上げ・加点措置①用.xlsx',
-    'インボイス': KATEN_DIR / '加点措置①用.xlsx',
-    'セキュリティ': KATEN_DIR / '加点措置①用.xlsx',
+FORM_S1 = {
+    '通常': '補助率引き上げ・加点措置①用.xlsx',
+    'インボイス': '加点措置①用.xlsx',
+    'セキュリティ': '加点措置①用.xlsx',
 }
-TEMPLATE_S2 = KATEN_DIR / '加点措置②用.xlsx'
+FORM_S2 = '加点措置②用.xlsx'
+# 配布版（組織プラグイン）では claude.ai が記号入りのファイル名を受け付けないため、
+# ①②・【】 を置き換えた名前で置いてある（scripts/distribution_manifest.py の置き換えと同じ）
+DIST_NAME_REPLACEMENTS = (('【', ''), ('】', '_'), ('①', '1'), ('②', '2'), ('・', '_'))
+
+
+def _dist_name(name: str) -> str:
+    for old, new in DIST_NAME_REPLACEMENTS:
+        name = name.replace(old, new)
+    return name
+
+
+def form_path(name: str) -> Path:
+    """公式様式の実際の置き場所。開発リポジトリでは公式の名前、配布版では置き換えた名前。"""
+    official = KATEN_DIR / name
+    return official if official.exists() else KATEN_DIR / _dist_name(name)
 
 
 def _parse_app_month(text: str) -> tuple[int, int]:
@@ -107,7 +122,7 @@ def main(argv=None) -> int:
     ap.add_argument('ledger', type=Path, help='記入済みの加点判定用賃金台帳 .xlsx')
     ap.add_argument('--app-month', type=_parse_app_month, default=None,
                     help='交付申請月（台帳C3が未入力の場合のフォールバック。例: 2026/08）')
-    ap.add_argument('--fill', choices=sorted(TEMPLATE_S1), default=None,
+    ap.add_argument('--fill', choices=sorted(FORM_S1), default=None,
                     help='公式様式①②を生成する（申請枠を指定。①のテンプレが枠で変わる）')
     ap.add_argument('--outdir', type=Path, default=None, help='様式の出力先（既定: 台帳と同じ場所）')
     ap.add_argument('--company', default=None, help='出力ファイル名の会社名（既定: 台帳ファイル名）')
@@ -126,19 +141,20 @@ def main(argv=None) -> int:
         outdir = args.outdir or args.ledger.parent
         outdir.mkdir(parents=True, exist_ok=True)
         company = args.company or args.ledger.stem
-        t1 = TEMPLATE_S1[args.fill]
-        missing = [p for p in (t1, TEMPLATE_S2) if not p.exists()]
+        t1, t2 = form_path(FORM_S1[args.fill]), form_path(FORM_S2)
+        missing = [p for p in (t1, t2) if not p.exists()]
         if missing:
             print(f'❌ 公式様式テンプレが見つかりません: {[str(p) for p in missing]}。'
                   '補助金プラグインを入れ直すか、管理者に連絡してください。', file=sys.stderr)
             return 2
-        out1 = outdir / f'{company}_{t1.stem}.xlsx'
+        # 出力ファイル名は公式の様式名のまま（配布版で置き換えた名前にはしない）
+        out1 = outdir / f'{company}_{Path(FORM_S1[args.fill]).stem}.xlsx'
         fill_bonus_sheet_1(t1, out1, res)
-        print(f'様式①生成: {out1}')
+        print(f'様式①生成: {out1}（原本: {t1}）')
         if res.application_ym:
-            out2 = outdir / f'{company}_{TEMPLATE_S2.stem}.xlsx'
-            fill_bonus_sheet_2(TEMPLATE_S2, out2, res)
-            print(f'様式②生成: {out2}')
+            out2 = outdir / f'{company}_{Path(FORM_S2).stem}.xlsx'
+            fill_bonus_sheet_2(t2, out2, res)
+            print(f'様式②生成: {out2}（原本: {t2}）')
         else:
             print('⚠ 交付申請月が無いため様式②は生成しません（--app-month で指定可）')
         print('（様式は原本無改変の外科的パッチ。判定式は Excel で開いた時に再計算されます）')

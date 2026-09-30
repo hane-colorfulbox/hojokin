@@ -5,6 +5,7 @@
 openpyxl で再保存した様式は check_lossless.py が不合格にすることも確かめる。
 """
 import datetime
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -12,6 +13,8 @@ from pathlib import Path
 import openpyxl
 
 from _common import Checker, run_py, skills_dir
+
+import distribution_manifest as dm
 
 SKILL = skills_dir() / 'katen-judge'
 DRIVER = SKILL / 'review' / 'run_katen_judge.py'
@@ -61,18 +64,28 @@ def main() -> int:
         c.check('加点②が対象（+70円）と判定される', '差: +70円' in cp.stdout and '判定: ◎ 対象' in cp.stdout,
                 cp.stdout[-800:])
         outs = {p.name: p for p in (work / 'out').glob('*.xlsx')}
-        c.check('様式①②の2つが出力される', len(outs) == 2, str(list(outs)))
-        for name, out in outs.items():
-            original = FORMS / name.removeprefix('テスト社_')
+        c.check('様式①②の2つが公式の様式名で出力される',
+                sorted(outs) == ['テスト社_加点措置②用.xlsx', 'テスト社_補助率引き上げ・加点措置①用.xlsx'], str(list(outs)))
+        originals = dict(re.findall(r'様式[①②]生成: (.+?)（原本: (.+?)）', cp.stdout))
+        c.check('ドライバが原本のパスを表示する', len(originals) == 2, cp.stdout[-600:])
+        for out, original in originals.items():
             r = run_py(LOSSLESS, original, out, cwd=work)
-            c.check(f'{name} は原本どおり（check_lossless 合格）', r.returncode == 0, r.stdout + r.stderr)
+            c.check(f'{Path(out).name} は原本どおり（check_lossless 合格）', r.returncode == 0, r.stdout + r.stderr)
 
+        cp = run_py(DRIVER, ledger, '--fill', 'インボイス', '--company', 'テスト社', '--outdir', work / 'inv',
+                    cwd=work)
+        c.check('インボイス枠の様式①も見つかって生成される',
+                cp.returncode == 0 and (work / 'inv' / 'テスト社_加点措置①用.xlsx').exists(), cp.stdout[-400:] + cp.stderr)
+        c.check('配布版の様式ファイル名に記号が無い', all(dm.path_chars_ok(p.name) for p in FORMS.glob('*.xlsx')),
+                str([p.name for p in FORMS.glob('*.xlsx')]))
+
+        form2 = FORMS / dm.dist_path('加点措置②用.xlsx')
         resaved = work / 'resaved.xlsx'
-        wb = openpyxl.load_workbook(FORMS / '加点措置②用.xlsx')
+        wb = openpyxl.load_workbook(form2)
         wb.save(resaved)
-        r = run_py(LOSSLESS, FORMS / '加点措置②用.xlsx', resaved, cwd=work)
+        r = run_py(LOSSLESS, form2, resaved, cwd=work)
         c.check('openpyxl で再保存した様式は不合格（終了コード1）', r.returncode == 1, r.stdout)
-        r = run_py(LOSSLESS, FORMS / '加点措置②用.xlsx', cwd=work)
+        r = run_py(LOSSLESS, form2, cwd=work)
         c.check('引数が足りないと終了コード2', r.returncode == 2)
 
         broken = work / 'broken' / 'katen-judge'

@@ -82,6 +82,11 @@ def main() -> int:
     c.check('xlsx のコメント・作成者パーツは止める',
             bool(g.check_xlsx_metadata({'a.xlsx': xlsx(ok_core, ('xl/comments1.xml',))})))
     c.check('プラグイン最上位の bin/ は止める', bool(g.check_layout({'bin/tool': b'x'}, '')))
+    c.check('漢字・かなのパスは通る', not g.check_layout({'skills/a/引き継ぎ/00_はじめに.md': b'x'}, ''))
+    c.check('claude.ai が拒否する記号入りのパスは止める',
+            bool(g.check_layout({'skills/a/補助金加点/加点措置' + '①' + '用.xlsx': b'x'}, '')))
+    c.check('置き換え後のパスは通る',
+            not g.check_layout({g.dm.dist_path('skills/a/ツール/【原本_個人】企業名・様式①②.xlsx'): b'x'}, ''))
     return c.finish()
 
 

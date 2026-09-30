@@ -12,6 +12,8 @@ build_plugin.py がこれを読み、git の HEAD にコミット済みの内容
 チャット（claude.ai）ではスキルのフォルダしか実行環境にコピーされないので、依存するファイルは
 必ず同じスキルの中に置く（スキルをまたぐリンクは張らず、文章で「○○スキルの…」と書く）。
 """
+import string
+import unicodedata
 from dataclasses import dataclass, field
 
 PLUGIN_NAME = 'hojokin'
@@ -129,6 +131,27 @@ SKILL_NAME_MAX = 64
 DESCRIPTION_MAX = 1024
 MAX_FILES = 5000
 MAX_TOTAL_BYTES = 200 * 1024 * 1024
+
+# 配布するファイルのパスに使える文字。claude.ai は記号入りのパスを含む ZIP を
+# 「Zip file contains path with invalid characters」で拒否する（2026-09-30 実測: 漢字・かなは可、
+# 【】①②・ は不可）。確認できた範囲だけを許可し、それ以外の文字は置き換えるかゲートで止める。
+PATH_ASCII_OK = frozenset(string.ascii_letters + string.digits + '._-/')
+PATH_UNICODE_CATEGORIES_OK = frozenset({'Lo', 'Lm', 'Lu', 'Ll'})
+# 置き換え（katen-judge の run_katen_judge.py の DIST_NAME_REPLACEMENTS と同じ内容にする）
+PATH_CHAR_REPLACEMENTS = (('【', ''), ('】', '_'), ('①', '1'), ('②', '2'), ('・', '_'))
+
+
+def dist_path(path: str) -> str:
+    """リポジトリ内のパスを、配布物の中のパスにする（claude.ai が受け付けない記号を置き換える）。"""
+    for old, new in PATH_CHAR_REPLACEMENTS:
+        path = path.replace(old, new)
+    return path
+
+
+def path_chars_ok(path: str) -> bool:
+    return all(ch in PATH_ASCII_OK or (not ch.isascii() and unicodedata.category(ch) in PATH_UNICODE_CATEGORIES_OK)
+               for ch in path)
+
 
 # 配布物に残っていてはいけない古い語（ZIP 配布時代の手順）。例外は build_plugin 側で扱う。
 STALE_TERMS = ('hojokin-handoff.zip', 'update_handoff', '引き継ぎを最新に更新', '.claude/skills/',

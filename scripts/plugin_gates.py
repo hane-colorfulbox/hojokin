@@ -83,6 +83,11 @@ def check_layout(files: dict[str, bytes], plugin_root: str) -> list[str]:
     rel = [p[len(plugin_root):] for p in files if p.startswith(plugin_root)]
     if any(p.split('/', 1)[0] == 'bin' for p in rel):
         problems.append('プラグイン最上位に bin/ があります（claude.ai のアップロードで拒否される）')
+    for p in sorted(rel):
+        if not dm.path_chars_ok(p):
+            bad = ''.join(sorted({ch for ch in p if not dm.path_chars_ok(ch)}))
+            problems.append(f'{p}: claude.ai が受け付けない文字がパスにあります（{bad}）。'
+                            'distribution_manifest.PATH_CHAR_REPLACEMENTS に置き換えを足す')
     if len(rel) > dm.MAX_FILES:
         problems.append(f'ファイル数 {len(rel)} が上限 {dm.MAX_FILES} を超えています')
     total = sum(len(files[plugin_root + p]) for p in rel)

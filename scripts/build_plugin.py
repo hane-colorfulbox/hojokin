@@ -53,21 +53,30 @@ def assemble_skills(src) -> dict[str, bytes]:
             wanted.extend(src.list_dir(d))
         wanted.extend(spec.mirror_files)
     src.prefetch(wanted)   # git から1回でまとめて読む
+    origin: dict[str, str] = {}
+
+    def put(dest: str, source: str) -> None:
+        dest = dm.dist_path(dest)   # claude.ai が受け付けない記号をパスから置き換える
+        if dest in origin and origin[dest] != source:
+            raise SourceError(f'配布先のパスが重なります: {dest}（{origin[dest]} と {source}）')
+        origin[dest] = source
+        files[dest] = src.read(source)
+
     for spec in dm.SKILLS:
         base = f'skills/{spec.name}/'
-        files[base + 'SKILL.md'] = src.read(spec.skill_md)
+        put(base + 'SKILL.md', spec.skill_md)
         if spec.source_dir:
             for p in src.list_dir(spec.source_dir):
                 rel = p[len(spec.source_dir) + 1:]
                 if rel != 'SKILL.md' and not _excluded(p):
-                    files[base + rel] = src.read(p)
+                    put(base + rel, p)
         for d in spec.mirror_dirs:
             for p in src.list_dir(d):
                 if p not in spec.mirror_exclude and not _excluded(p):
-                    files[base + p] = src.read(p)
+                    put(base + p, p)
         for p in spec.mirror_files:
-            files[base + p] = src.read(p)
-        files[base + dm.SELFCHECK_NAME] = src.read(dm.SELFCHECK_SOURCE)
+            put(base + p, p)
+        put(base + dm.SELFCHECK_NAME, dm.SELFCHECK_SOURCE)
     return files
 
 
