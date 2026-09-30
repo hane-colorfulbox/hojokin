@@ -50,9 +50,9 @@ def _check_template_sync() -> bool:
         print(f'❌ スキル同梱テンプレが見つかりません: {SKILL_TEMPLATE}', file=sys.stderr)
         return False
     if not TOOL_TEMPLATE.exists():
-        print(f'⚠ ツール原本テンプレが見つかりません（同期チェックをスキップ）: {TOOL_TEMPLATE}',
+        print(f'❌ ツール原本テンプレが見つかりません（同期を確かめられないので中止）: {TOOL_TEMPLATE}',
               file=sys.stderr)
-        return True
+        return False
     skill_hash = _sha256(SKILL_TEMPLATE)
     tool_hash = _sha256(TOOL_TEMPLATE)
     if skill_hash != tool_hash:

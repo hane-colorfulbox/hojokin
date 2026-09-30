@@ -23,6 +23,7 @@ allowed-tools: 'Read Glob Grep Bash(python "${CLAUDE_SKILL_DIR}/selfcheck.py") B
 **旧パックの確認（Claude Code で動いているときだけ・1会話に1回）**：作業フォルダかその親に `handoff_version.json` がある、または `.claude/skills/` と `引き継ぎ/00_はじめに.md` の両方がある場合は、ZIP 配布時代の旧パックが残っている（`app.py` と `.git` もあるフォルダは開発リポジトリなので対象外）。旧パックのスキルはもう更新されないので、ユーザーに「旧パックは廃止されました。このフォルダの `.claude/skills/` と `CLAUDE.md` を削除するか別名にしてください（手順は hojokin-guide スキルの §0）」と一度だけ伝えてから作業を続ける。削除は自分でしない。
 <!-- legacy-pack-check:end -->
 
+<!-- legacy-migration:begin -->
 旧パックを片付ける手順（ユーザー本人が行う。Claude は案内だけで、削除はしない）:
 
 1. 旧パックを展開したフォルダ（以前 Claude Code を開いていた補助金フォルダ）で、`.claude/skills/` の中の `wagebook-convert`・`case-docs-check`・`katen-judge` を削除する（残しておきたければ `.claude/skills_旧` などに名前を変える）。
@@ -32,6 +33,7 @@ allowed-tools: 'Read Glob Grep Bash(python "${CLAUDE_SKILL_DIR}/selfcheck.py") B
 5. Claude Code を再起動する。
 
 旧パックのまま「引き継ぎを最新に更新して」を実行した場合は、旧スキルが自動で止まり、このプラグインへの移行案内に置き換わる。
+<!-- legacy-migration:end -->
 
 ### 0.2 版の確認（困ったとき・入れ直した直後）
 
