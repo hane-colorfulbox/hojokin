@@ -35,7 +35,7 @@ class _Src:
         return datetime(2026, 9, 30)
 
 
-def make_old_pack(root: Path, claude_md: str) -> None:
+def make_old_pack(root: Path, claude_md: str, with_history: bool = True) -> None:
     for rel, text in {**OLD_MANAGED_FILES, **OLD_LISTED_FILES}.items():
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -44,9 +44,11 @@ def make_old_pack(root: Path, claude_md: str) -> None:
     (root / 'scripts').mkdir()
     shutil.copy(REPO / 'scripts' / 'update_handoff.py', root / 'scripts' / 'update_handoff.py')
     (root / '案件メモ_自分用.md').write_text('利用者が自分で置いたファイル\n', encoding='utf-8')
-    listed = sorted([*OLD_MANAGED_FILES, *OLD_LISTED_FILES, 'CLAUDE.md', 'scripts/update_handoff.py'])
-    (root / '.handoff_version').write_text(json.dumps({'built_on': '2026-08-17', 'files': listed}),
-                                           encoding='utf-8')
+    (root / '引き継ぎ' / '自分のメモ.md').write_text('利用者が引き継ぎ/ に置いたファイル\n', encoding='utf-8')
+    if with_history:
+        listed = sorted([*OLD_MANAGED_FILES, *OLD_LISTED_FILES, 'CLAUDE.md', 'scripts/update_handoff.py'])
+        (root / '.handoff_version').write_text(json.dumps({'built_on': '2026-08-17', 'files': listed}),
+                                               encoding='utf-8')
 
 
 def main() -> int:
@@ -65,9 +67,9 @@ def main() -> int:
             c.check(f'旧スキル {name} は廃止案内だけになり、自動では使われない',
                     'disable-model-invocation: true' in skill_md and '廃止' in skill_md)
         c.check('旧スキルの付属ファイルは消える', not (old / '.claude/skills/wagebook-convert/review').exists())
-        c.check('引き継ぎ/ は移行案内1枚だけになる',
-                sorted(p.name for p in (old / '引き継ぎ').iterdir()) == ['00_はじめに.md'])
-        c.check('古い資料・エンジン・更新スクリプトは消える',
+        c.check('引き継ぎ/ には触らない（利用者が置いたファイルも残る）',
+                (old / '引き継ぎ' / '自分のメモ.md').exists() and (old / '引き継ぎ' / '02_制度知識ベース.md').exists())
+        c.check('更新の記録がある利用者は、前回配った古い資料・エンジン・更新スクリプトが消える',
                 not any((old / rel).exists() for rel in [*OLD_LISTED_FILES, 'scripts/update_handoff.py']))
         claude_md = (old / 'CLAUDE.md').read_text(encoding='utf-8')
         c.check('配布版 CLAUDE.md は移行案内に置き換わる', '旧パックは廃止されました' in claude_md and MARKER in claude_md)
@@ -80,6 +82,17 @@ def main() -> int:
                 r.returncode == 0 and (mine / 'CLAUDE.md').read_text(encoding='utf-8') == '# 自分で書いた CLAUDE.md\n')
         c.check('その場合は移行案内が CLAUDE.handoff.md に置かれる',
                 '旧パックは廃止されました' in (mine / 'CLAUDE.handoff.md').read_text(encoding='utf-8'))
+
+        manual = tmp / 'manual_unzip'
+        make_old_pack(manual, f'{MARKER}\n# 旧・配布版の索引\n', with_history=False)
+        r = run_py(manual / 'scripts' / 'update_handoff.py', retire_zip, cwd=manual)
+        skill_md = (manual / '.claude/skills/katen-judge/SKILL.md').read_text(encoding='utf-8')
+        c.check('手で展開しただけの利用者でも、旧スキルは廃止案内に置き換わる',
+                r.returncode == 0 and 'disable-model-invocation: true' in skill_md)
+        c.check('手で展開しただけの利用者の古い資料は消さない（片付けは本人）',
+                all((manual / rel).exists() for rel in OLD_LISTED_FILES))
+        c.check('片付け手順に「このファイル」のような置き場所で意味が変わる書き方がない',
+                'このファイル' not in retire_pack.CLEANUP_STEPS)
     return c.finish()
 
 

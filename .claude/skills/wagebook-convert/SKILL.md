@@ -22,7 +22,12 @@ PDF（または既存JSON）の賃金台帳を、補助金書類作成ツール�
 テンプレート・verify スクリプトのパスは必ず `${CLAUDE_SKILL_DIR}` 起点の **絶対パス** で使う（cwd が案件サブフォルダだと相対パスは解決しない）。
 
 <!-- legacy-pack-check:begin -->
-**旧パックの確認（Claude Code で動いているときだけ・1会話に1回）**：作業フォルダかその親に `handoff_version.json` がある、または `.claude/skills/` と `引き継ぎ/00_はじめに.md` の両方がある場合は、ZIP 配布時代の旧パックが残っている（`app.py` と `.git` もあるフォルダは開発リポジトリなので対象外）。旧パックのスキルはもう更新されないので、ユーザーに「旧パックは廃止されました。このフォルダの `.claude/skills/` と `CLAUDE.md` を削除するか別名にしてください（手順は hojokin-guide スキルの §0）」と一度だけ伝えてから作業を続ける。削除は自分でしない。
+**旧パックの確認（Claude Code で動いているときだけ・1会話に1回）**：次のどれかがあれば、ZIP 配布時代の旧パックが残っている（`app.py` と `.git` もあるフォルダは開発リポジトリなので対象外）。
+- 作業フォルダかその親の `.claude/skills/` の中にある `wagebook-convert`・`case-docs-check`・`katen-judge` のフォルダ
+- パソコン全体用の `~/.claude/skills/` の中にある同じ3つのフォルダ（同じ名前だとこちらが優先されるので、特に注意）
+- 作業フォルダかその親の `handoff_version.json`・`.handoff_version`・`CLAUDE.handoff.md`、先頭行が `<!-- handoff-distributed-claude-md -->` の `CLAUDE.md`、`引き継ぎ/00_はじめに.md` を読むよう案内している `CLAUDE.md`
+
+旧パックのスキルはもう更新されず、同じ役割のスキルが二重になって古いほうが使われることがある。見つけたものだけを挙げて「旧パックの残りです。hojokin-guide スキルの §0 の手順で片付けてください」と一度だけ伝えてから作業を続ける。削除は自分でしない。
 <!-- legacy-pack-check:end -->
 
 1. **Python3 + openpyxl が必須**（xlsx の生成・検算に使用。フォールバック無し）。開始時に

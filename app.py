@@ -1888,8 +1888,8 @@ with st.expander(
         '2. チャット・Cowork ではそのまま使える（補助金の質問や作業をすると自動でスキルが使われる）\n'
         f'3. Claude Code（v{_PLUGIN_MIN_CLAUDE_CODE} 以上）は claude.ai のアカウントでログインしていれば、'
         '次の起動時に自動で入る（画面の案内に従って `/reload-plugins` を実行）\n'
-        '4. 以前の ZIP 版パック（hojokin-handoff.zip）を使っていた人は、そのフォルダの '
-        '`.claude/skills/` と `CLAUDE.md` を削除する（手順は hojokin-guide スキルの §0）'
+        '4. 以前の ZIP 版パック（hojokin-handoff.zip）を使っていた人は、hojokin-guide スキルの §0 の手順で'
+        '旧パックを片付ける（旧スキル3本・配布版の `CLAUDE.md` など。自分で作ったスキルや自分の `CLAUDE.md` は残す）'
     )
     st.markdown(
         '- 顧客データをチャットで扱うときは、**1案件1チャット・成果物を保存したら会話を削除・'
@@ -1906,7 +1906,7 @@ with st.expander(
         '手元の Claude Code（CC）でスキルを使う場合だけ、**このPCで1回だけ**実施してください'
         '（claude.ai のチャット・Cowork では不要）。'
         '手元の Claude Code（CC）に下のプロンプトを貼り付けて実行するだけです。'
-        'Python 3.8 以上が無ければ CC が導入を試みます。\n\n'
+        'Python 3.10 以上が無ければ CC が導入を試みます。\n\n'
         '※ プラグインが更新されても、このセットアップの再実行は不要です。'
     )
     st.code(
@@ -1915,11 +1915,11 @@ with st.expander(
         '順に実行し、最後に結果だけ報告してください。\n'
         '\n'
         '1. Python を探す：`python --version` / `python3 --version`、WSLがあれば `wsl python3 --version` も試す。\n'
-        '   Python 3.8 以上 が見つかればそれを使う（新しいほど良い）。\n'
-        '2. 3.8以上が見つからない場合は導入する：\n'
+        '   Python 3.10 以上 が見つかればそれを使う（新しいほど良い）。\n'
+        '2. 3.10以上が見つからない場合は導入する：\n'
         '   - Windowsネイティブ：`winget install -e --id Python.Python.3.12` を実行し、入れ直して再確認。\n'
         '   - winget が無い/失敗する場合：python.org から Python 3.12 を入れて再実行する旨をユーザーに伝えて停止。\n'
-        '   - WSLのみの環境：WSL側の python3 が 3.8 以上ならそれを使う。\n'
+        '   - WSLのみの環境：WSL側の python3 が 3.10 以上ならそれを使う。\n'
         '3. openpyxl を導入：見つかった Python で `python -m pip install openpyxl`\n'
         '   （WSLの python3 を使う場合は `pip3 install openpyxl --break-system-packages`）。\n'
         '4. 動作確認：`python -c "import openpyxl; print(\'OK\', openpyxl.__version__)"`（使う Python に合わせる）。\n'

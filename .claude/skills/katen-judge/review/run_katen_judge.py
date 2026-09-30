@@ -19,7 +19,8 @@ import re
 import sys
 from pathlib import Path
 
-sys.stdout.reconfigure(encoding='utf-8')
+for _stream in (sys.stdout, sys.stderr):   # Windows でもエラーの日本語が化けないように
+    _stream.reconfigure(encoding='utf-8')
 
 # スキルのフォルダ（配布版）か開発リポジトリを親方向に探索して hojokin を import 可能にする
 _HERE = Path(__file__).resolve()

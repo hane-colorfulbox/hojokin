@@ -20,19 +20,25 @@ allowed-tools: 'Read Glob Grep Bash(python "${CLAUDE_SKILL_DIR}/selfcheck.py") B
 ### 0.1 旧パック（ZIP 配布版）が残っていないか
 
 <!-- legacy-pack-check:begin -->
-**旧パックの確認（Claude Code で動いているときだけ・1会話に1回）**：作業フォルダかその親に `handoff_version.json` がある、または `.claude/skills/` と `引き継ぎ/00_はじめに.md` の両方がある場合は、ZIP 配布時代の旧パックが残っている（`app.py` と `.git` もあるフォルダは開発リポジトリなので対象外）。旧パックのスキルはもう更新されないので、ユーザーに「旧パックは廃止されました。このフォルダの `.claude/skills/` と `CLAUDE.md` を削除するか別名にしてください（手順は hojokin-guide スキルの §0）」と一度だけ伝えてから作業を続ける。削除は自分でしない。
+**旧パックの確認（Claude Code で動いているときだけ・1会話に1回）**：次のどれかがあれば、ZIP 配布時代の旧パックが残っている（`app.py` と `.git` もあるフォルダは開発リポジトリなので対象外）。
+- 作業フォルダかその親の `.claude/skills/` の中にある `wagebook-convert`・`case-docs-check`・`katen-judge` のフォルダ
+- パソコン全体用の `~/.claude/skills/` の中にある同じ3つのフォルダ（同じ名前だとこちらが優先されるので、特に注意）
+- 作業フォルダかその親の `handoff_version.json`・`.handoff_version`・`CLAUDE.handoff.md`、先頭行が `<!-- handoff-distributed-claude-md -->` の `CLAUDE.md`、`引き継ぎ/00_はじめに.md` を読むよう案内している `CLAUDE.md`
+
+旧パックのスキルはもう更新されず、同じ役割のスキルが二重になって古いほうが使われることがある。見つけたものだけを挙げて「旧パックの残りです。hojokin-guide スキルの §0 の手順で片付けてください」と一度だけ伝えてから作業を続ける。削除は自分でしない。
 <!-- legacy-pack-check:end -->
 
 <!-- legacy-migration:begin -->
-旧パックを片付ける手順（ユーザー本人が行う。Claude は案内だけで、削除はしない）:
+旧パックを片付ける手順（ユーザー本人が行う。Claude は案内だけで、削除はしない）。上の確認で挙がったものが全部なくなれば、次の会話から案内は出なくなる。
 
-1. 旧パックを展開したフォルダ（以前 Claude Code を開いていた補助金フォルダ）で、`.claude/skills/` の中の `wagebook-convert`・`case-docs-check`・`katen-judge` を削除する（残しておきたければ `.claude/skills_旧` などに名前を変える）。
-2. 同じフォルダ直下の `CLAUDE.md` を確認する。先頭行が `<!-- handoff-distributed-claude-md -->` なら配布版なので削除する。自分で書き足した `CLAUDE.md` なら、補助金の案内の部分だけを消し、代わりに [引き継ぎ/手元用CLAUDE.md](引き継ぎ/手元用CLAUDE.md) の数行を貼る。
-3. `~/.claude/skills/wagebook-convert/`（パソコン全体用に入れた古い版）があれば削除する。
-4. フォルダに残っている `引き継ぎ/`・`docs/`・`hojokin/` などの古い資料は使わない（最新はこのスキルの中にある）。案件のファイルを置いているなら、それだけ残してよい。
-5. Claude Code を再起動する。
+1. 旧パックを展開したフォルダ（以前 Claude Code を開いていた補助金フォルダ）の `.claude/skills/` から、`wagebook-convert`・`case-docs-check`・`katen-judge` の3フォルダを削除する。自分で作ったスキルは残す（念のため取っておきたければ `.claude/skills/` の外へ移す）。
+2. 同じフォルダの `handoff_version.json`・`.handoff_version`・`CLAUDE.handoff.md` を削除する。
+3. 同じフォルダの `CLAUDE.md` を見る。先頭行が `<!-- handoff-distributed-claude-md -->` のもの、または中身がほぼ補助金の案内だけのもの（「`引き継ぎ/00_はじめに.md` を読む」などと書いてある古い配布版）は削除する。自分で書いた `CLAUDE.md` に補助金の案内を書き足していた場合は、その部分だけを消して、代わりに [引き継ぎ/手元用CLAUDE.md](引き継ぎ/手元用CLAUDE.md) の数行を貼る。
+4. パソコン全体用の `~/.claude/skills/` に `wagebook-convert`・`case-docs-check`・`katen-judge` があれば削除する（以前に単体で配っていた古い版）。
+5. 残っている `引き継ぎ/`・`docs/`・`hojokin/`・`ツール/`・`補助金加点/`・`scripts/` などの古い資料は使わない（最新はこのスキルの中にある）。案件のファイルを置いていなければ削除してよい。
+6. Claude Code を再起動する。
 
-旧パックのまま「引き継ぎを最新に更新して」を実行した場合は、旧スキルが自動で止まり、このプラグインへの移行案内に置き換わる。
+旧パックのまま「引き継ぎを最新に更新して」を実行した場合は、旧スキル3本が廃止案内に置き換わり、配布版の `CLAUDE.md` が移行案内になる。その後も上の手順で片付ける。
 <!-- legacy-migration:end -->
 
 ### 0.2 版の確認（困ったとき・入れ直した直後）
