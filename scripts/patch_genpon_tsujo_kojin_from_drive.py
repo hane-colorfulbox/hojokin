@@ -153,11 +153,20 @@ def snapshot(path: Path):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('--input', type=Path, default=DEFAULT_INPUT)
+    ap.add_argument('--output', type=Path, default=None,
+                    help='再取込候補の別出力先。指定時は既存ファイルへの上書きを拒否する')
     ap.add_argument('--allow-new-input', action='store_true',
                     help='SHA-256 が期待値と違う入力を許可（Drive 更新後の再取込時。差分確認とFROM定数の更新を忘れないこと）')
     args = ap.parse_args()
 
     src = args.input
+    output = args.output if args.output is not None else OUTPUT
+    if output.resolve() == src.resolve():
+        print('NG: 入力原本と出力先は分けてください。原本には上書きしません。')
+        return 1
+    if args.output is not None and output.exists():
+        print('NG: 指定した候補出力が既に存在します。別の未使用パスを指定してください。')
+        return 1
     if not src.exists():
         print(f'NG: 入力が見つかりません: {src}')
         return 1
@@ -195,13 +204,14 @@ def main() -> int:
         print(f'\nNG {ng} 件のため保存しません')
         return 1
 
-    wb.save(OUTPUT)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output)
     wb.close()
-    print(f'\n保存: {OUTPUT}')
+    print(f'\n保存: {output}')
 
     # ── 自己検証: 入力とのフルセル diff（パッチ7点以外は不変であること） ──
     src_cells, src_meta, src_names, src_order = snapshot(src)
-    out_cells, out_meta, out_names, out_order = snapshot(OUTPUT)
+    out_cells, out_meta, out_names, out_order = snapshot(output)
 
     problems = []
     if src_order != out_order:
@@ -239,7 +249,7 @@ def main() -> int:
         return 1
 
     print(f'自己検証 OK: パッチ {len(PATCHES)} 点以外の全セル・DV・条件付き書式・結合・定義名は入力と同一')
-    print(f'出力 SHA-256: {sha256(OUTPUT)}')
+    print(f'出力 SHA-256: {sha256(output)}')
     return 0
 
 

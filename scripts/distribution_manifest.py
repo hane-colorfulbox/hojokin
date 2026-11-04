@@ -37,6 +37,9 @@ BUILD_INFO_NAME = '_build.json'
 
 ENGINE_FILES = (
     'hojokin/__init__.py',
+    'hojokin/application_context.py',
+    'hojokin/subsidy_rules.py',
+    'hojokin/template_versions.py',
     'hojokin/config.py',
     'hojokin/models.py',
     'hojokin/wage_calculator.py',
@@ -45,7 +48,14 @@ ENGINE_FILES = (
     'hojokin/bonus_wage_ledger_writer.py',
 )
 
-GUIDE_DOCS = (
+ROUND7_GUIDES = (
+    'docs/第7次申請_変更点と使い方.md',
+    'docs/第7次申請_確認待ち事項.md',
+    'docs/第7次原本_改訂内容と再取込手順.md',
+    'docs/第7次申請_ツール入力手順.md',
+)
+
+GUIDE_DOCS = ROUND7_GUIDES + (
     'docs/運用マニュアル.md',
     'docs/マニュアル_書類作成.md',
     'docs/設計_API自動化.md',
@@ -73,9 +83,14 @@ GUIDE_DOCS = (
     'docs/セカンドオピニオン加点/_sample/07_記入サンプル_情報少なめ_ダミー工務店.md',
     # 通常枠×個人の申請書原本（Drive 正本に機械的修正を当てた配布版）。他3テンプレは Drive で配る。
     'ツール/【原本_個人】企業名_通常枠_個人2026.xlsx',
+    'ツール/第7次以降/【原本_個人】企業名_通常枠_個人2026.xlsx',
 )
 
 KATEN_FILES = ENGINE_FILES + (
+    'ツール/第7次以降/加点判定用賃金台帳テンプレート.xlsx',
+    '補助金加点/第7次以降/加点措置①用.xlsx',
+    '補助金加点/第7次以降/加点措置②用.xlsx',
+    '補助金加点/第7次以降/補助率引き上げ・加点措置①用.xlsx',
     'ツール/加点判定用賃金台帳テンプレート.xlsx',
     '補助金加点/加点措置①用.xlsx',
     '補助金加点/加点措置②用.xlsx',
@@ -110,11 +125,12 @@ SKILLS = (
     ),
     SkillSpec(name='wagebook-convert', skill_md='.claude/skills/wagebook-convert/SKILL.md',
               source_dir='.claude/skills/wagebook-convert',
+              mirror_files=ROUND7_GUIDES,
               source_extra=('.claude/skills/wagebook-convert/templates/賃金台帳テンプレート.xlsx',)),
     SkillSpec(name='katen-judge', skill_md='.claude/skills/katen-judge/SKILL.md',
-              source_dir='.claude/skills/katen-judge', mirror_files=KATEN_FILES),
+              source_dir='.claude/skills/katen-judge', mirror_files=KATEN_FILES + ROUND7_GUIDES),
     SkillSpec(name='case-docs-check', skill_md='.claude/skills/case-docs-check/SKILL.md',
-              source_dir='.claude/skills/case-docs-check'),
+              source_dir='.claude/skills/case-docs-check', mirror_files=ROUND7_GUIDES),
 )
 
 # 同期ゲートが読むファイル（作業ツリーに未コミットの差分があるとビルドを止める）

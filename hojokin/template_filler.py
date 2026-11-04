@@ -6,6 +6,7 @@ import logging
 import re
 import shutil
 import unicodedata
+from datetime import timedelta
 from pathlib import Path
 import openpyxl
 
@@ -15,6 +16,11 @@ from . import config as _config
 from .models import ExtractionResult
 from .config import TemplateMapping, get_min_wage
 from .warnings_catalog import tag as warn_tag
+from .application_context import (
+    ApplicationContext, ApplicationValidationError, build_application_wage_plan,
+    validate_application_context, validate_productivity_inputs, wage_requirements,
+)
+from .template_versions import validate_application_template_version
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +58,8 @@ def normalize_label(value) -> str:
     return _WS_RE.sub('', unicodedata.normalize('NFKC', str(value if value is not None else '')))
 
 
-def check_shinsei_anchor_labels(ws, mapping: TemplateMapping) -> list[tuple[int, str, str]]:
+def check_shinsei_anchor_labels(ws, mapping: TemplateMapping,
+                                call_round: int | None = None) -> list[tuple[int, str, str]]:
     """申請内容シートのアンカー行 B列ラベルを照合し、不一致 [(行, 期待, 実際), ...] を返す。
 
     比較は先頭 ANCHOR_PREFIX_LEN 文字の相互切詰め等値（startswith だと
@@ -61,6 +68,8 @@ def check_shinsei_anchor_labels(ws, mapping: TemplateMapping) -> list[tuple[int,
     n = _config.ANCHOR_PREFIX_LEN
     mismatches = []
     for field, expected in _config.SHINSEI_ANCHOR_LABELS.items():
+        if call_round is not None and call_round >= 7 and field == 'employee_count_fte':
+            expected = '0年度目の対象従業員数（確認済みの正社員換算人数）'
         row = mapping.shinsei.get(field)
         if row is None:
             continue
@@ -74,7 +83,8 @@ def check_shinsei_anchor_labels(ws, mapping: TemplateMapping) -> list[tuple[int,
     return mismatches
 
 
-def verify_template_labels(template_path: Path, mapping: TemplateMapping, template_type: str) -> None:
+def verify_template_labels(template_path: Path, mapping: TemplateMapping, template_type: str,
+                           call_round: int | None = None) -> None:
     """テンプレ原本の転記先ラベルを書き込み前に照合する（不一致なら例外で停止）。
 
     pipeline.run_application_transfer が API 呼び出し前に呼ぶ。例外メッセージは
@@ -91,7 +101,7 @@ def verify_template_labels(template_path: Path, mapping: TemplateMapping, templa
                 f'「申請内容」シートがありません（{template_type} の原本ではない可能性）。'
                 f'安全のため処理を中止しました。ファイルは出力されていません。'
             )
-        mismatches = check_shinsei_anchor_labels(wb['申請内容'], mapping)
+        mismatches = check_shinsei_anchor_labels(wb['申請内容'], mapping, call_round=call_round)
     finally:
         wb.close()
     if not mismatches:
@@ -261,6 +271,7 @@ def fill_shinsei_sheet(
     mapping: TemplateMapping,
     data: ExtractionResult,
     wage_raise_choice: str | None = None,
+    application_context: ApplicationContext | None = None,
 ) -> list[str]:
     """申請内容シートにデータを転記。転記した項目のログリストを返す。
 
@@ -272,6 +283,11 @@ def fill_shinsei_sheet(
     co = data.company
     fi = data.financial
     ai = data.ai_judgment
+
+    # 原本の初期値・旧参照式も申告事実として残さない。
+    for field in ('past_subsidies', 'wage_raise_declaration', 'wage_raise_method'):
+        if field in m:
+            _safe_write_cell(ws, m[field], 3, None)
 
     def write(field: str, value, label: str = ''):
         if field not in m:
@@ -318,7 +334,12 @@ def fill_shinsei_sheet(
             write(f'officer_{idx}_kana', officer.get('kana'), f'役員({idx})フリガナ')
 
     # ── 認定・補助金系 ──
-    write('past_subsidies', 'なし', '過年度交付決定')
+    # 不明を「なし」にしない。確認済みの申告だけを出力する。
+    if application_context is not None and application_context.past_grants is not None:
+        prior_decided = any(r.decided is True and r.year < 2026
+                            for r in application_context.past_grants)
+        # 原本の入力規則は「あり,なし」。年度・枠の詳細は申請前提シートへ残す。
+        write('past_subsidies', 'あり' if prior_decided else 'なし', '過年度交付決定（確認済み）')
     write('eruboshi', '認定なし', 'えるぼし')
     write('kurumin', '認定なし', 'くるみん')
 
@@ -345,13 +366,24 @@ def fill_shinsei_sheet(
 
     # ── 最低賃金 ──
     min_wage = get_min_wage(co.address)
-    if min_wage:
+    if application_context is not None and application_context.is_round7:
+        if application_context.workplace_confirmed:
+            pref_label = application_context.workplace_prefecture
+            if pref_label.endswith(('都', '府', '県')):
+                pref_label = pref_label[:-1]
+            write('min_wage',
+                  f'{pref_label}/{application_context.regional_min_wage_yen}円',
+                  '主たる事業場の地域別最低賃金（確認済み）')
+    elif min_wage:
         write('min_wage', f'{min_wage[0]}/{min_wage[1]}円', '地域別最低賃金')
     elif ai.min_wage_text:
         write('min_wage', ai.min_wage_text, '地域別最低賃金')
 
     # ── 賃上げ関連 ──
-    write('wage_raise_declaration', '■はい\n□いいえ', '賃上げ表明')
+    if application_context is not None and application_context.declaration_confirmed is not None:
+        write('wage_raise_declaration',
+              '■はい\n□いいえ' if application_context.declaration_confirmed else '□はい\n■いいえ',
+              '賃上げ表明（確認済み）')
     # 賃上げ幅はヒアリング回答からのみ書く。以前の「＋50円」固定の既定値は、
     # 顧客回答（＋30円以上）を上書きする実害が出たため廃止。
     # 回答が取れない場合は空欄のままにして空セル警告で人に選ばせる。
@@ -362,9 +394,8 @@ def fill_shinsei_sheet(
             f'⚠ 行{m["wage_raise_amount"]:3d} [賃上げ幅]: ヒアリングの賃金引上げ幅'
             f'回答が見つからないため空欄（プルダウンから手動選択してください）'
         )
-    write('wage_raise_method',
-          '□社内掲示板などへの掲載によって\n■朝礼時、会議、面談時など口頭によって\n□書面、電子メールによって\n□その他',
-          '表明方法')
+    if application_context is not None and application_context.declaration_confirmed is True:
+        write('wage_raise_method', application_context.declaration_method, '表明方法（確認済み）')
 
     # ── ツール名 ──
     if data.estimate.tool_name:
@@ -602,15 +633,38 @@ def fill_template(
     extraction: ExtractionResult,
     tenki_texts: dict[int, str] | None = None,
     wage_plan: dict[str, float] | None = None,
+    application_context: ApplicationContext | None = None,
+    productivity_total_annual_hours: float | None = None,
 ) -> list[str]:
     """
     テンプレートをコピーし、全データを転記して保存。
     空セルのリストを返す。
 
-    wage_plan: 1人当たり給与支給総額の計画値
-        {'year_0': 基準年, 'year_1': 1年目, 'year_2': 2年目, 'year_3': 3年目}
+    wage_plan: 旧制度の台帳実績基準計画。第7次はapplication_contextの確認済み
+        0〜3年度目見込入力で置き換える。生産性の前期時間は別引数で受け取る。
     """
     from .hearing_reader import transfer_hearing_to_tenki
+
+    # 直接この関数を呼ぶ場合も、確認不足や原本版の取り違えを迂回させない。
+    mapping_frame = ('通常' if mapping.kyuyo_sheet_name == '生産性指標給与支給総額計算' else 'インボイス')
+    template_hint = f'{mapping_frame}枠_' + ('個人_' if mapping.is_kojin else '') + '2026'
+    validate_application_context(application_context, template_hint)
+    validate_application_template_version(template_path, application_context.call_round)
+    productivity_validation = None
+    if application_context.is_round7:
+        wage_plan = build_application_wage_plan(application_context)
+        if mapping.kyuyo_sheet_name == '生産性指標給与支給総額計算':
+            productivity_validation = validate_productivity_inputs(
+                application_context, extraction.financial, productivity_total_annual_hours)
+    wage_raise_choice = wage_raise_choice_from_hearing(hearing_data or {}, mapping)
+    req = wage_requirements(application_context)
+    if req.selected and application_context.planned_min_wage_increase is not None:
+        confirmed_choice = (WAGE_RAISE_50 if application_context.planned_min_wage_increase >= 50
+                            else WAGE_RAISE_30 if application_context.planned_min_wage_increase >= 30
+                            else WAGE_RAISE_NONE)
+        if wage_raise_choice and wage_raise_choice != confirmed_choice:
+            raise ApplicationValidationError(['ヒアリングの賃上げ幅と確認済みの案件設定が一致しません'])
+        wage_raise_choice = confirmed_choice
 
     # テンプレートコピー
     shutil.copy2(template_path, output_path)
@@ -621,7 +675,7 @@ def fill_template(
     # STEP 0: 版ズレゲートの防御的再検証（正規経路は pipeline が書き込み前に検証済み。
     # 将来 fill_template を直接呼ぶ経路ができても素通りさせない）
     if _config.TEMPLATE_LABEL_GATE and '申請内容' in wb.sheetnames:
-        _mis = check_shinsei_anchor_labels(wb['申請内容'], mapping)
+        _mis = check_shinsei_anchor_labels(wb['申請内容'], mapping, call_round=application_context.call_round)
         if _mis:
             wb.close()
             Path(output_path).unlink(missing_ok=True)
@@ -634,6 +688,13 @@ def fill_template(
     # STEP 1: サンプルデータクリア
     cleared = clear_manual_cells(wb, mapping)
     logger.info(f'STEP 1: {cleared}セル クリア')
+    if application_context.is_round7 and '申請内容' in wb.sheetnames:
+        # 旧原本の参照式を残して当期の見込値と誤認させない。
+        for field in ('employee_count_fte', 'wage_total_base', 'wage_total_y1',
+                      'wage_total_y2', 'wage_total_y3'):
+            row = mapping.shinsei.get(field)
+            if row:
+                _safe_write_cell(wb['申請内容'], row, 3, None)
 
     # STEP 2: ヒアリング → 転記
     count = 0
@@ -649,10 +710,10 @@ def fill_template(
 
     # STEP 3: PDF → 申請内容 + 給与計算
     if '申請内容' in wb.sheetnames:
-        wage_raise_choice = wage_raise_choice_from_hearing(hearing_data or {}, mapping)
         shinsei_writes = fill_shinsei_sheet(
             wb['申請内容'], mapping, extraction,
             wage_raise_choice=wage_raise_choice,
+            application_context=application_context,
         )
         for w in shinsei_writes:
             logger.info(f'STEP 3: {w}')
@@ -669,7 +730,8 @@ def fill_template(
         # 従業員数（FTE換算）
         if 'employee_count_fte' in m and 'employee_count_fte' in wage_plan:
             fte = wage_plan['employee_count_fte']
-            _safe_write_cell(ws_shinsei, m['employee_count_fte'], 3, round(fte, 1))
+            _safe_write_cell(ws_shinsei, m['employee_count_fte'], 3,
+                             fte if application_context.is_round7 else round(fte, 1))
             logger.info(f'STEP 3.5: 行{m["employee_count_fte"]:3d} [従業員数FTE]: {fte:.1f}人')
         # 給与支給総額（基準年 + 3年計画）
         plan_fields = [
@@ -688,15 +750,33 @@ def fill_template(
     # 通常枠の「事業者あたりの総労働時間」は B38*B39（人数×平均時間）の式だが、
     # 賃金台帳の実績がある場合は基準年だけ直接値で上書きする。C40-E40(計画年次)は
     # 既存の `=C38*C39` 等の式を保持する。
-    if (
-        wage_plan
-        and 'total_annual_hours' in wage_plan
-        and '生産性指標給与支給総額計算' in wb.sheetnames
-    ):
+    # 第7次は給与0年度目見込みと生産性の前期実績を絶対に混ぜない。
+    if not application_context.is_round7 and productivity_total_annual_hours is None and wage_plan:
+        productivity_total_annual_hours = wage_plan.get('total_annual_hours')
+    if productivity_total_annual_hours is not None and '生産性指標給与支給総額計算' in wb.sheetnames:
         ws_prod = wb['生産性指標給与支給総額計算']
-        hours = wage_plan['total_annual_hours']
+        hours = productivity_total_annual_hours
         _safe_write_cell(ws_prod, 40, 2, hours)
         logger.info(f'STEP 3.6: 生産性指標 B40 [総労働時間]: {hours:,.1f}時間')
+
+    if productivity_validation is not None:
+        ws_prod = wb['生産性指標給与支給総額計算']
+        for col, year in enumerate(application_context.productivity_forecast_years, start=3):
+            for row, value in ((34, year.operating_profit), (35, year.personnel_cost),
+                               (36, year.depreciation), (40, year.total_annual_hours)):
+                _safe_write_cell(ws_prod, row, col, value)
+            # 計画人数や一人当たり時間は今回の確認済み入力に含まれない。
+            # 旧原本の自動予測値を確定した計画として残さない。
+            _safe_write_cell(ws_prod, 38, col, None)
+            _safe_write_cell(ws_prod, 39, col, None)
+        _safe_write_cell(ws_prod, 42, 1, '初年度向上率／2・3年年平均')
+        _safe_write_cell(ws_prod, 42, 2,
+                         f'確認済み入力を検算済み（要件{productivity_validation["required_rate"] * 100:g}%）')
+        for col, key in ((3, 'first_year_growth'), (4, 'second_year_average'), (5, 'third_year_average')):
+            _safe_write_cell(ws_prod, 42, col, productivity_validation[key])
+
+    _write_application_context_sheet(wb, application_context, wage_plan,
+                                     productivity_total_annual_hours, productivity_validation)
 
     # STEP 4: 空セル確認
     empty = check_empty_cells(wb)
@@ -743,6 +823,123 @@ def fill_template(
     logger.info(f'保存完了: {output_path}')
 
     return empty
+
+
+def _write_application_context_sheet(wb, context: ApplicationContext, wage_plan: dict | None,
+                                     productivity_total_annual_hours: float | None,
+                                     productivity_validation: dict | None = None) -> None:
+    """年度別FTEと確認根拠を申請者が追える形で出力する。実績表とは別シート。"""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    title = '申請前提・給与見込'
+    if title in wb.sheetnames:
+        del wb[title]
+    ws = wb.create_sheet(title)
+    ws.append(['申請の前提と給与計画（担当者確認済みの入力）'])
+    ws.append(['第7次：0年度目は見込み値。効果報告での比較基準は未確定で、ここでは判定しません。'
+               if context.is_round7 else '第1〜6次の申請前提。給与計画と原本は旧制度の版を使用します。'])
+    prod = context.productivity_period
+    period_text = lambda start, end: f'{start.isoformat()}〜{end.isoformat()}'
+    req = wage_requirements(context)
+    entries = [
+        ('公募回', context.call_round),
+        ('実際の交付申請日', context.application_date.isoformat()),
+        ('申請枠', context.frame),
+        ('補助金申請額（円）', context.subsidy_amount),
+        ('任意の賃上げ計画加点', '希望する' if context.optional_wage_bonus else '希望しない'),
+        ('賃上げ要件の適用除外', context.wage_exemption_reason if context.wage_exempt else '適用除外ではない'),
+        ('給与0年度目', period_text(context.fiscal_year_start, context.fiscal_year_end)
+         if context.is_round7 else period_text(*prod)),
+        ('生産性基準年度（前事業年度）', period_text(*prod)),
+        ('前事業年度の総労働時間', productivity_total_annual_hours),
+        ('過去交付決定', context.past_grant_text()),
+        ('主たる事業場の地域最賃', f'{context.workplace_prefecture}/{context.regional_min_wage_yen}円'
+         if context.workplace_confirmed else '旧制度原本の記載・ヒアリングを確認'),
+        ('給与計画の必要年率', f'{req.required_rate * 100}%' if req.selected else '申請必須・任意加点の選択なし'),
+        ('生産性の必要年率', f'{req.productivity_rate * 100}%（給与の過去交付条件とは別）'),
+        ('表明確認', '確認済み' if context.declaration_confirmed is True else
+         '未実施' if context.declaration_confirmed is False else '当該賃上げ要件を選択していない'),
+        ('表明方法・日付', f'{context.declaration_method} / {context.declaration_date}'
+         if context.declaration_confirmed else ''),
+        ('最賃に対する計画上乗せ額', context.planned_min_wage_increase),
+    ]
+    for label, value in entries:
+        ws.append([label, value])
+        ws.merge_cells(start_row=ws.max_row, start_column=2, end_row=ws.max_row, end_column=6)
+        ws.row_dimensions[ws.max_row].height = 30
+    ws.append([])
+    ws.append(['年度', '対象事業年度', '給与総額（円）', '対象従業員（FTE）', '1人当たり（円）', '根拠・担当確認'])
+    header_row = ws.max_row
+    for cell in ws[header_row]:
+        cell.fill = PatternFill('solid', fgColor='17365D')
+        cell.font = Font(bold=True, color='FFFFFF')
+    ws.row_dimensions[header_row].height = 34
+    if context.forecast_years:
+        for idx, year in enumerate(context.forecast_years):
+            start = context.fiscal_year_start.replace(year=context.fiscal_year_start.year + idx)
+            next_start = start.replace(year=start.year + 1)
+            end = next_start - timedelta(days=1)
+            ws.append([idx, period_text(start, end), int(year.total_salary),
+                       float(year.employee_count_fte), float(year.per_capita), year.source])
+            ws.row_dimensions[ws.max_row].height = max(36, 18 * (len(year.source) // 26 + 1))
+    elif wage_plan:
+        keys = ['wage_total_base', 'wage_total_y1', 'wage_total_y2', 'wage_total_y3']
+        fte = wage_plan.get('employee_count_fte')
+        for idx, key in enumerate(keys):
+            amount = wage_plan.get(key)
+            ws.append([idx, '旧制度：前期実績基準' if idx == 0 else f'{idx}年目計画', amount,
+                       fte, amount / fte if fte and amount is not None else None,
+                       '賃金台帳の前事業年度実績' if idx == 0 else f'確認済み必要率{req.required_rate * 100}%で切り上げ'])
+            ws.row_dimensions[ws.max_row].height = 36
+    else:
+        ws.append(['当該給与計画の申請必須・任意加点の選択なし。未確認の見込値は補いません。'])
+    ws.append([])
+    ws.append(['申請画面の従業員数は各年度のFTEを使用してください。申請内容の従業員数1欄は0年度目だけです。'])
+    ws.append(['小規模事業者の常時使用する従業員数（頭数）や加点①の母数とは別の指標です。'])
+    if productivity_validation is not None:
+        ws.append([])
+        ws.append(['生産性の確認済み計画（給与0年度目の見込みとは別指標）'])
+        ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=6)
+        ws.row_dimensions[ws.max_row].height = 30
+        for label, value in (
+            ('生産性の基準実績（円/時間）', productivity_validation['baseline_productivity']),
+            ('生産性1年後向上率', f'{productivity_validation["first_year_growth"] * 100:.4f}%'),
+            ('生産性3年平均向上率', f'{productivity_validation["third_year_average"] * 100:.4f}%'),
+        ):
+            ws.append([label, value])
+            ws.merge_cells(start_row=ws.max_row, start_column=2, end_row=ws.max_row, end_column=6)
+            ws.row_dimensions[ws.max_row].height = 28
+        ws.append(['年度・対象期間', '営業利益（円）', '人件費（円）', '減価償却（円）', '年間総時間', '根拠・担当確認'])
+        for cell in ws[ws.max_row]:
+            cell.fill = PatternFill('solid', fgColor='17365D')
+            cell.font = Font(bold=True, color='FFFFFF')
+        ws.row_dimensions[ws.max_row].height = 34
+        for idx, year in enumerate(context.productivity_forecast_years, start=1):
+            # 生産性の0年度目は前事業年度。給与0年度目（申請当年度）と1年ずれる。
+            start = context.fiscal_year_start.replace(year=context.fiscal_year_start.year + idx - 1)
+            end = start.replace(year=start.year + 1) - timedelta(days=1)
+            ws.append([f'{idx}年度目\n{period_text(start, end)}', year.operating_profit,
+                       year.personnel_cost, year.depreciation, year.total_annual_hours, year.source])
+            ws.row_dimensions[ws.max_row].height = max(42, 18 * (len(year.source) // 26 + 1))
+            for col in range(2, 6):
+                ws.cell(ws.max_row, col).number_format = '#,##0.##'
+    for row in ws.iter_rows():
+        for cell in row:
+            if isinstance(cell.value, str) and cell.value.startswith('='):
+                cell.value = ' ' + cell.value
+            cell.alignment = Alignment(vertical='top', wrap_text=True)
+    ws['A1'].font = Font(bold=True, size=14, color='17365D')
+    ws['A2'].font = Font(color='9C3D10')
+    ws.merge_cells('A1:F1')
+    ws.merge_cells('A2:F2')
+    ws.row_dimensions[1].height = 26
+    ws.row_dimensions[2].height = 40
+    for row_idx in range(header_row + 1, min(header_row + 5, ws.max_row) + 1):
+        ws.cell(row_idx, 3).number_format = '#,##0'
+        ws.cell(row_idx, 4).number_format = '0.0###'
+        ws.cell(row_idx, 5).number_format = '#,##0.00'
+    for col, width in {'A': 28, 'B': 31, 'C': 20, 'D': 22, 'E': 22, 'F': 55}.items():
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = f'C{header_row + 1}'
 
 
 def _restore_squashed_text_rows(
@@ -1147,7 +1344,18 @@ def add_data_source_sheet(
 
         # ── 賃金台帳 ──
         _section('⑥ 賃金台帳（決定論パーサー直読 — AI不使用）')
-        if wage_ledger_paths and wage_plan:
+        if wage_plan and wage_plan.get('forecast_sources'):
+            _section('⑥-2 給与0年度目〜3年度目（担当者確認済みの見込み入力）')
+            counts = wage_plan['employee_count_fte_by_year']
+            sources = wage_plan['forecast_sources']
+            for idx, key in enumerate(('wage_total_base', 'wage_total_y1', 'wage_total_y2', 'wage_total_y3')):
+                _row('確認済み見込', f'{idx}年度目 給与見込総額', wage_plan[key],
+                     sources[idx], '担当者が入力した見込み値', '明示入力・対象範囲確認済み', '高')
+                _row('確認済み見込', f'{idx}年度目 対象FTE', counts[idx],
+                     sources[idx], '当該年度の全月支給対象者', '明示入力・対象範囲確認済み', '高')
+            _row('確認済み見込', '効果報告の比較基準', '未確定・今回は判定しない',
+                 '窓口経由の事務局回答では未確定', '-', '保留', '-')
+        elif wage_ledger_paths and wage_plan:
             ledger_summary = (
                 wage_ledger_paths[0].name if len(wage_ledger_paths) == 1
                 else f'{wage_ledger_paths[0].name} 他 {len(wage_ledger_paths) - 1} 件'
@@ -1160,12 +1368,13 @@ def add_data_source_sheet(
                  ledger_summary, '（Excel全体）', wage_extraction_method, '高')
             _row('賃金台帳', '給与支給総額(基準年)', int(round(wage_plan.get('wage_total_base', 0))),
                  ledger_summary, '（Excel全体）', wage_extraction_method, '高')
+            _growth_factor = 1 + wage_plan.get('growth_rate', 0.03)
             _row('賃金台帳', '給与支給総額(1年目計画)', int(round(wage_plan.get('wage_total_y1', 0))),
-                 '（基準年×1.03 切り上げ）', '-', '機械計算', '高')
+                 f'（基準年×{_growth_factor:g} 切り上げ）', '-', '機械計算', '高')
             _row('賃金台帳', '給与支給総額(2年目計画)', int(round(wage_plan.get('wage_total_y2', 0))),
-                 '（1年目計画×1.03 切り上げ）', '-', '機械計算', '高')
+                 f'（1年目計画×{_growth_factor:g} 切り上げ）', '-', '機械計算', '高')
             _row('賃金台帳', '給与支給総額(3年目計画)', int(round(wage_plan.get('wage_total_y3', 0))),
-                 '（2年目計画×1.03 切り上げ）', '-', '機械計算', '高')
+                 f'（2年目計画×{_growth_factor:g} 切り上げ）', '-', '機械計算', '高')
             _row('賃金台帳', '従業員数（FTE換算）',
                  round(wage_plan.get('employee_count_fte', 0), 1),
                  ledger_summary, '（Excel全体）', wage_extraction_method, '高')

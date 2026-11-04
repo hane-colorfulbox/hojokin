@@ -12,7 +12,7 @@
   python run_katen_judge.py 台帳.xlsx --fill 通常 --company 株式会社サンプル
   python run_katen_judge.py 台帳.xlsx --fill インボイス --outdir 出力先
 
-終了コード: 0=正常 / 2=ファイル・環境エラー
+終了コード: 0=確定 / 2=入力・版・環境エラー / 3=未確定（該当様式は生成しない）
 """
 import argparse
 import re
@@ -31,6 +31,8 @@ if ROOT is None:
           file=sys.stderr)
     sys.exit(2)
 sys.path.insert(0, str(ROOT))
+
+from hojokin.subsidy_rules import rules_for_round
 
 from hojokin.wage_reader import (  # noqa: E402
     BONUS2_BASE_YM,
@@ -61,10 +63,11 @@ def _dist_name(name: str) -> str:
     return name
 
 
-def form_path(name: str) -> Path:
+def form_path(name: str, call_round: int = 6) -> Path:
     """公式様式の実際の置き場所。開発リポジトリでは公式の名前、配布版では置き換えた名前。"""
-    official = KATEN_DIR / name
-    return official if official.exists() else KATEN_DIR / _dist_name(name)
+    directory = ROOT / rules_for_round(call_round).forms_dir
+    official = directory / name
+    return official if official.exists() else directory / _dist_name(name)
 
 
 def _parse_app_month(text: str) -> tuple[int, int]:
@@ -78,21 +81,23 @@ def _parse_app_month(text: str) -> tuple[int, int]:
 
 
 def _print_report(res) -> None:
+    rules = rules_for_round(res.call_round)
+    print(f'公募回: {res.call_round} / 制度版: {rules.rule_id}')
     print('=' * 60)
     print('加点判定レポート（判定エンジン: hojokin.wage_reader＝ツールと同一）')
     print('=' * 60)
     print(f'都道府県        : {res.prefecture or "（未入力）"}'
-          f'（地域別最賃 改定前 {res.min_wage_r6}円 / R7改定後 {res.min_wage_r7}円）')
+          f'（地域別最賃 改定前 {res.min_wage_r6}円 / 改定後 {res.min_wage_r7}円）')
     if res.application_ym:
         print(f'交付申請月      : {ym_label(res.application_ym)}'
               f' → 直近月: {ym_label(res.latest_ym)}')
     else:
         print('交付申請月      : （未入力。加点②は判定不能）')
     print()
-    print('── 加点措置①（加点項目14・補助率1/2→2/3トリガー） ──')
-    print('  月別の「時間換算給与 < R7改定後最賃」該当者（該当/母数）:')
+    print('── 加点措置①（通常枠のみ補助率引上げを兼ねる） ──')
+    print('  月別の「時間換算給与 < 適用版の改定後最賃」該当者（該当/母数）:')
     for d in res.bonus1_details:
-        if not d['has_data']:
+        if not d['has_data'] or not d.get('complete', False):
             mark, body = '－', 'データなし'
         else:
             mark = '○' if d['meets_30pct'] else '×'
@@ -100,16 +105,19 @@ def _print_report(res) -> None:
         print(f"    {d['label']:<10}: {body} {mark}")
     n_met = len(res.bonus1_months_met)
     print(f'  30%以上の月: {n_met} か月（3か月以上で対象・連続不要）')
-    print(f'  判定: {"◎ 対象（補助率2/3）" if res.bonus1_eligible else "対象外"}')
+    print(f'  判定: {res.bonus1_status}')
     print()
-    print('── 加点措置②（加点項目15） ──')
-    print(f'  基準月 {ym_label(BONUS2_BASE_YM)} の事業場内最低賃金: '
-          f'{res.bonus2_min_wage_july:,.0f}円')
-    if res.latest_ym:
-        print(f'  直近月 {ym_label(res.latest_ym)} の事業場内最低賃金: '
-              f'{res.bonus2_min_wage_latest:,.0f}円')
-        print(f'  差: {res.bonus2_diff:+,.0f}円（{BONUS_THRESHOLD_YEN}円以上で対象）')
-    print(f'  判定: {"◎ 対象" if res.bonus2_eligible else "対象外"}')
+    print('── 加点措置② ──')
+    if res.bonus2_status == '未確定':
+        print('  基準月・直近月の最低賃金と差額: 算定未確定（母集団・時間・賃金等の確認待ち）')
+    else:
+        print(f'  基準月 {ym_label(rules.bonus2_base_ym)} の事業場内最低賃金: '
+              f'{res.bonus2_min_wage_july:,.0f}円')
+        if res.latest_ym:
+            print(f'  直近月 {ym_label(res.latest_ym)} の事業場内最低賃金: '
+                  f'{res.bonus2_min_wage_latest:,.0f}円')
+            print(f'  差: {res.bonus2_diff:+,.0f}円（{rules.bonus2_threshold_yen}円以上で対象）')
+    print(f'  判定: {res.bonus2_status}')
     if res.notes:
         print()
         print('── 注意（必ず全件確認する） ──')
@@ -121,6 +129,7 @@ def _print_report(res) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description='加点措置①②のローカル判定と公式様式生成')
     ap.add_argument('ledger', type=Path, help='記入済みの加点判定用賃金台帳 .xlsx')
+    ap.add_argument('--call-round', type=int, default=None, help='公募回（提出用様式生成には必須。7以降は新版）')
     ap.add_argument('--app-month', type=_parse_app_month, default=None,
                     help='交付申請月（台帳C3が未入力の場合のフォールバック。例: 2026/08）')
     ap.add_argument('--fill', choices=sorted(FORM_S1), default=None,
@@ -133,7 +142,15 @@ def main(argv=None) -> int:
         print(f'❌ 台帳が見つかりません: {args.ledger}', file=sys.stderr)
         return 2
 
-    ledger = read_bonus_wage_ledger(args.ledger, application_ym_fallback=args.app_month)
+    if args.fill and args.call_round is None:
+        print('❌ 提出用様式の生成には --call-round で公募回を指定してください。', file=sys.stderr)
+        return 2
+    call_round = args.call_round if args.call_round is not None else 6
+    try:
+        ledger = read_bonus_wage_ledger(args.ledger, application_ym_fallback=args.app_month, call_round=call_round)
+    except (ValueError, TypeError) as exc:
+        print(f'❌ 台帳を確認してください: {exc}', file=sys.stderr)
+        return 2
     res = judge_bonus_points(ledger)
     print(f'台帳: {args.ledger.name}（従業員 {len(ledger.employees)}名・役員は台帳に含めない運用）')
     _print_report(res)
@@ -142,7 +159,7 @@ def main(argv=None) -> int:
         outdir = args.outdir or args.ledger.parent
         outdir.mkdir(parents=True, exist_ok=True)
         company = args.company or args.ledger.stem
-        t1, t2 = form_path(FORM_S1[args.fill]), form_path(FORM_S2)
+        t1, t2 = form_path(FORM_S1[args.fill], call_round), form_path(FORM_S2, call_round)
         missing = [p for p in (t1, t2) if not p.exists()]
         if missing:
             print(f'❌ 公式様式テンプレが見つかりません: {[str(p) for p in missing]}。'
@@ -150,18 +167,26 @@ def main(argv=None) -> int:
             return 2
         # 出力ファイル名は公式の様式名のまま（配布版で置き換えた名前にはしない）
         out1 = outdir / f'{company}_{Path(FORM_S1[args.fill]).stem}.xlsx'
-        fill_bonus_sheet_1(t1, out1, res)
-        print(f'様式①生成: {out1}（原本: {t1}）')
-        if res.application_ym:
+        if res.bonus1_status != '未確定' and res.application_ym:
+            fill_bonus_sheet_1(t1, out1, res)
+            print(f'様式①生成: {out1}（原本: {t1}）')
+        else:
+            print('⚠ 様式①は未確定のため生成しません。既存出力を今回の確定版として使わないでください。')
+        if res.application_ym and res.bonus2_status != '未確定':
             out2 = outdir / f'{company}_{Path(FORM_S2).stem}.xlsx'
             fill_bonus_sheet_2(t2, out2, res)
             print(f'様式②生成: {out2}（原本: {t2}）')
         else:
-            print('⚠ 交付申請月が無いため様式②は生成しません（--app-month で指定可）')
+            print('⚠ 様式②は未確定のため生成しません。申請月・基準月・直近月の要確認事項を解消してください。')
         print('（様式は原本無改変の外科的パッチ。判定式は Excel で開いた時に再計算されます）')
 
-    return 0
+    return 3 if '未確定' in (res.bonus1_status, res.bonus2_status) else 0
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        exit_code = main()
+    except (ValueError, TypeError) as exc:
+        print(f'❌ 入力又は様式を確認してください: {exc}', file=sys.stderr)
+        exit_code = 2
+    sys.exit(exit_code)

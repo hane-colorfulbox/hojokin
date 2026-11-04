@@ -1,7 +1,7 @@
 {
   "_readme": "公式ダウンロードページの資料スナップショット。scripts/check_seido_freshness.py が突合に使う。depends には、その資料が変わったら読み直すべき自社ドキュメントを書く。depends が空の資料は「更新は知らせるが対応不要」の扱い（参考表示）。",
   "download_page": "https://it-shien.smrj.go.jp/download/",
-  "last_verified": "2026-07-28",
+  "last_verified": "2026-11-04",
   "documents": [
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_addition_list.pdf",
@@ -28,7 +28,8 @@
         "docs/補助金_実務知識ベース.md"
       ],
       "last_modified": "Fri, 24 Jul 2026 01:58:30 GMT",
-      "content_length": "262751"
+      "content_length": "262751",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_chingin_houkoku1_katen.xlsx",
@@ -41,7 +42,8 @@
         "docs/補助金_実務知識ベース.md"
       ],
       "last_modified": "Fri, 24 Jul 2026 01:58:30 GMT",
-      "content_length": "262577"
+      "content_length": "262577",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_chingin_houkoku2_katen.xlsx",
@@ -56,7 +58,8 @@
         "docs/補助金_実務知識ベース.md"
       ],
       "last_modified": "Fri, 24 Jul 2026 01:58:30 GMT",
-      "content_length": "146801"
+      "content_length": "146801",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_fukusu_flyer.pdf",
@@ -150,7 +153,8 @@
       "official_updated": "2026-03-30",
       "depends": [],
       "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
-      "content_length": "500658"
+      "content_length": "500658",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_kitei_fukusu.pdf",
@@ -159,7 +163,8 @@
       "official_updated": "2026-01-23",
       "depends": [],
       "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
-      "content_length": "460257"
+      "content_length": "460257",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_kitei_invoice.pdf",
@@ -168,7 +173,8 @@
       "official_updated": "2026-03-30",
       "depends": [],
       "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
-      "content_length": "432089"
+      "content_length": "432089",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_kitei_security.pdf",
@@ -177,7 +183,8 @@
       "official_updated": "2026-03-30",
       "depends": [],
       "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
-      "content_length": "425215"
+      "content_length": "425215",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_kitei_tsujyo.pdf",
@@ -188,7 +195,8 @@
         "docs/補助金_制度リファレンス.md §12 事業承継・廃業・解約"
       ],
       "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
-      "content_length": "464850"
+      "content_length": "464850",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_denshi.pdf",
@@ -199,7 +207,8 @@
         "docs/補助金_制度リファレンス.md §2 補助率・補助額"
       ],
       "last_modified": "Fri, 24 Jul 2026 01:58:31 GMT",
-      "content_length": "955474"
+      "content_length": "955474",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_fukusu.pdf",
@@ -208,7 +217,8 @@
       "official_updated": "2026-05-15",
       "depends": [],
       "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
-      "content_length": "1031639"
+      "content_length": "1031639",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_invoice.pdf",
@@ -221,7 +231,8 @@
         "引き継ぎ/02_制度知識ベース.md"
       ],
       "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
-      "content_length": "975848"
+      "content_length": "975848",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_security.pdf",
@@ -233,7 +244,8 @@
         "docs/補助金_制度リファレンス.md §10 サイバーセキュリティお助け隊"
       ],
       "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
-      "content_length": "856786"
+      "content_length": "856786",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_koubo_tsujyo.pdf",
@@ -252,7 +264,8 @@
         "引き継ぎ/02_制度知識ベース.md"
       ],
       "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
-      "content_length": "1153682"
+      "content_length": "1153682",
+      "applicable_rounds": "1-6"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_2ndopinion_shinsei.pdf",
@@ -311,14 +324,15 @@
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_kofu.pdf",
       "title": "交付申請マニュアル_通常枠、セキュリティ対策推進枠、インボイス枠（インボイス対応類型、電子取引類型）",
       "label": "交付申請マニュアル（通常枠・セキュリティ枠・インボイス枠）",
-      "official_updated": "2026-06-12",
+      "official_updated": "2026-11-02",
       "depends": [
         "docs/補助金_実務知識ベース.md",
         "引き継ぎ/02_制度知識ベース.md",
         "docs/案件メモ/申請MTG_リファレンス/申請手順_実務リファレンス.md"
       ],
-      "last_modified": "Fri, 24 Jul 2026 01:58:32 GMT",
-      "content_length": "14835722"
+      "content_length": "13838654",
+      "verified": "2026-11-04",
+      "verification_scope": "給与0〜3年度目、基準年度、表明・関連加点"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_kofu_fukusu.pdf",
@@ -461,6 +475,191 @@
       "depends": [],
       "last_modified": "Sat, 20 Jun 2026 03:10:52 GMT",
       "content_length": "2117688"
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_koubo_tsujyo.pdf",
+      "title": "第7回公募以降 通常枠 公募要領",
+      "label": "第7回公募〜 通常枠 公募要領",
+      "official_updated": "2026-10-09",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "verification_scope": "第7次制度差分。全文比較は11/2調査を参照",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_kitei_tsujyo.pdf",
+      "title": "第7回公募以降 通常枠 交付規程",
+      "label": "第7回公募〜 通常枠 交付規程",
+      "official_updated": "2026-10-09",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "verification_scope": "第7次制度差分。全文比較は11/2調査を参照",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_koubo_invoice.pdf",
+      "title": "第7回公募以降 インボイス対応類型 公募要領",
+      "label": "第7回公募〜 インボイス対応類型 公募要領",
+      "official_updated": "2026-10-09",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "verification_scope": "第7次制度差分。全文比較は11/2調査を参照",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_kitei_invoice.pdf",
+      "title": "第7回公募以降 インボイス対応類型 交付規程",
+      "label": "第7回公募〜 インボイス対応類型 交付規程",
+      "official_updated": "2026-10-09",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "verification_scope": "第7次制度差分。全文比較は11/2調査を参照",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_koubo_denshi.pdf",
+      "title": "第7回公募以降 電子取引類型 公募要領",
+      "label": "第7回公募〜 電子取引類型 公募要領",
+      "official_updated": "2026-10-09",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "verification_scope": "第7次制度差分。全文比較は11/2調査を参照",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_kitei_denshi.pdf",
+      "title": "第7回公募以降 電子取引類型 交付規程",
+      "label": "第7回公募〜 電子取引類型 交付規程",
+      "official_updated": "2026-10-09",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "verification_scope": "第7次制度差分。全文比較は11/2調査を参照",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_koubo_security.pdf",
+      "title": "第7回公募以降 セキュリティ対策推進枠 公募要領",
+      "label": "第7回公募〜 セキュリティ対策推進枠 公募要領",
+      "official_updated": "2026-10-09",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "verification_scope": "第7次制度差分。全文比較は11/2調査を参照",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_kitei_security.pdf",
+      "title": "第7回公募以降 セキュリティ対策推進枠 交付規程",
+      "label": "第7回公募〜 セキュリティ対策推進枠 交付規程",
+      "official_updated": "2026-10-09",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "verification_scope": "第7次制度差分。全文比較は11/2調査を参照",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_chingin_houkoku1_hojyoritsu_katen.xlsx",
+      "title": "第7回公募以降 賃金状況報告シート（補助率引上げ・加点措置①用）",
+      "label": "第7回公募〜 賃金状況報告シート（補助率引上げ・加点措置①用）",
+      "official_updated": "2026-11-02",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "content_length": "263936",
+      "sha256": "d8cbf155ee2f152ad85aa12633fb630b1a7997a646ab45fdfdaf81e96278fd5e",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_chingin_houkoku1_katen.xlsx",
+      "title": "第7回公募以降 賃金状況報告シート（加点措置①用）",
+      "label": "第7回公募〜 賃金状況報告シート（加点措置①用）",
+      "official_updated": "2026-11-02",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "content_length": "262818",
+      "sha256": "9ee638cc843f4a78c3921a00930420ffc06949b42754540c425560c1b8483adf",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_chingin_houkoku2_katen.xlsx",
+      "title": "第7回公募以降 賃金状況報告シート（加点措置②用）",
+      "label": "第7回公募〜 賃金状況報告シート（加点措置②用）",
+      "official_updated": "2026-11-02",
+      "applicable_rounds": "7+",
+      "verified": "2026-11-04",
+      "content_length": "146718",
+      "sha256": "707ef3970615d2150a3bd66c80ab4ba95b00515e5aa931dc4d8c219acaa01244",
+      "depends": [
+        "docs/第7次申請_変更点と使い方.md",
+        "docs/第7次申請_確認待ち事項.md",
+        "hojokin/subsidy_rules.py",
+        "hojokin/application_context.py",
+        "引き継ぎ/02_制度知識ベース.md"
+      ]
     }
-  ]
+  ],
+  "last_verified_scope": "第7次変更に関係する新規項目と申請マニュアル。旧資料の全件再確認を意味しない。",
+  "round7_confirmation": {
+    "salary_year0": "見込み値。窓口担当が事務局へ照会した回答を利用者提示の連絡で確認。",
+    "effect_report_baseline": "未確定。実績への読み替えや後年比較は実装しない。",
+    "collection_items": "顧客への回収項目の最終形は窓口担当との確認待ち。"
+  }
 }

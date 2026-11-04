@@ -5,11 +5,11 @@
 2026年度要件:
 - 指標: 1人当たり給与支給総額（非常勤を含む全従業員）
 - 計算: 給与支給総額（役員報酬除く）÷ 従業員数（パートは正社員換算）
-- 年平均成長率: 3%以上
+- 申請時の必要率は案件条件で3%／3.5%。本モジュールの台帳実績集計と参考計算だけでは申請要件を確定しない。
 
 対象給与: 給料、賃金、賞与、各種手当（残業手当、休日出勤手当、
          職務手当、地域手当、家族手当、住宅手当）等
-除外: 役員報酬、福利厚生費、法定福利費、退職金
+通常の除外: 役員報酬、福利厚生費、法定福利費、退職金（役員のみ法人等は個別確認）
 
 対象従業員: 全月分の給与を受けた従業員のみ（中途・退職者はその年度除外）
 パート換算: 正社員の所定労働時間で換算
@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 import openpyxl
@@ -71,12 +72,12 @@ class PerCapitaWageResult:
     # 賞与が R216 から落ちることを黙らせないために分離保持。
     excluded_bonus_only_names: list[str] = dc_field(default_factory=list)
 
-    GROWTH_RATE = 0.03  # 3%
+    GROWTH_RATE = 0.03  # 旧計算APIの既定。申請要件はapplication_contextで別に判定する。
 
-    def plan_values(self) -> dict[str, float]:
-        """3年分の計画数値（3%成長）"""
+    def plan_values(self, growth_rate: float | None = None) -> dict[str, float]:
+        """参考計算。実際の申請用0年度目は確認済み見込入力から別に作る。"""
         b = self.per_person_salary
-        r = self.GROWTH_RATE
+        r = self.GROWTH_RATE if growth_rate is None else growth_rate
         return {
             'year_0': b,
             'year_1': b * (1 + r),
@@ -474,6 +475,7 @@ def create_wage_calculation(
     yakuin_hoshu_3m: int,
     employees_detail: list[dict] | None = None,
     source_files: dict[str, str] | None = None,
+    growth_rate: float | None = None,
 ) -> Path:
     """
     給与支給総額計算Excelを作成。
@@ -486,6 +488,12 @@ def create_wage_calculation(
                   値: ファイル名（パス除外）。AI抽出値の出所追跡用に各セクション
                   ヘッダー下に表示する。None または欠落キーは「未取得」表示。
     """
+    simulation_rate = Decimal('0.03') if growth_rate is None else Decimal(str(growth_rate))
+    if simulation_rate not in (Decimal('0.03'), Decimal('0.035')):
+        raise ValueError('参考シミュレーションの率は3%または3.5%を指定してください')
+    factor = 1 + simulation_rate
+    factor_text = str(factor)
+    factor_decimal_places = max(0, -factor.as_tuple().exponent)
     sources = source_files or {}
     pl_source = sources.get('pl', '') or '（不明）'
     ledger_source = sources.get('wage_ledger', '') or '（不明）'
@@ -1521,7 +1529,8 @@ def create_wage_calculation(
     # ===== Sheet 3: 賃上げ計画 =====
     # 機械計算セルは全部 Excel 関数化（ユーザーが C5 を編集すると D5-F5 が自動再計算）
     ws3 = wb.create_sheet('賃上げ計画')
-    _cell(ws3, 2, 2, '賃上げ計画シミュレーション', TITLE_FONT, border=None)
+    _cell(ws3, 2, 2, f'前期実績からの参考シミュレーション（年率{simulation_rate * 100}%・申請要件未判定）', TITLE_FONT, border=None)
+    _cell(ws3, 3, 2, '第7次の給与0年度目は当期見込みです。この前期実績の計算を申請値へ自動流用しないでください。', SMALL_FONT, border=None)
 
     r = 4
     for i, h in enumerate(['', '直近決算期\n(実績値)', '1年目計画', '2年目計画', '3年目計画']):
@@ -1535,13 +1544,14 @@ def create_wage_calculation(
     # 公募要領 p.10／応募申請の手引き p.24「役員報酬・役員人数は含めません」を根拠に、
     # 賃上げ計画の母数は (A-B) = total_excl_row を参照する（旧実装は a_row だった）。
     _cell(ws3, r, 3, f"='給与支給総額計算'!C{total_excl_row}", fmt=NUMBER_FMT)
-    # D5, E5, F5: 前年 × 1.03（年率3%）。常に切り上げで円単位（2026-07-21 決定。
+    # D5, E5, F5: 指定した参考年率（既定3%、指定時3.5%）。常に切り上げで円単位。
     # 申請書側 pipeline の逐次切り上げと同じ値になる。内側の ROUND(…,2) は
-    # 浮動小数の誤差掃除で、切り上げ不要な値への +1 円を防ぐ）
+    # 浮動小数の誤差掃除。3.5%は小数3桁を保持し、真の端数を丸め落とさない。
     prev_col = 'C'
     for i in range(1, 4):
         col_letter = get_column_letter(3 + i)  # D, E, F
-        _cell(ws3, r, 3 + i, f'=ROUNDUP(ROUND({prev_col}{r}*1.03, 2), 0)', fmt=NUMBER_FMT)
+        _cell(ws3, r, 3 + i,
+              f'=ROUNDUP(ROUND({prev_col}{r}*{factor_text}, {factor_decimal_places}), 0)', fmt=NUMBER_FMT)
         prev_col = col_letter
 
     r += 1

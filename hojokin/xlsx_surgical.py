@@ -78,6 +78,8 @@ def _merge_anchor(sheet_xml: str, ref: str) -> str:
 
 def _serialize_value(value) -> tuple[str, str]:
     """値を (t属性文字列, セル内側XML) に変換する。"""
+    if value is None:
+        return ('', '')
     if isinstance(value, bool):
         return (' t="b"', f'<v>{1 if value else 0}</v>')
     if isinstance(value, (datetime.datetime, datetime.date)):
@@ -109,6 +111,8 @@ def _patch_row(row_xml: str, row_cells: dict[str, object]) -> str:
         cell_re = re.compile(rf'<c r="{ref}"[^>]*?(?:/>|>.*?</c>)', re.S)
         m = cell_re.search(row_xml)
         if m:
+            if value is None and re.search(r'<f(?:\s|>)', m.group(0)):
+                raise ValueError(f'数式セル {ref} は入力欄の清掃対象にできません。')
             s_m = re.search(r'\ss="(\d+)"', m.group(0))
             new_cell = _build_cell_xml(ref, s_m.group(1) if s_m else None, value)
             row_xml = row_xml[:m.start()] + new_cell + row_xml[m.end():]
@@ -137,8 +141,6 @@ def _patch_sheet_xml(sheet_xml: str, cell_values: dict[str, object]) -> str:
     """シート XML の対象セルの値を差し替える（他は一切変更しない）。"""
     by_row: dict[int, dict[str, object]] = {}
     for ref, value in cell_values.items():
-        if value is None:
-            continue
         anchored = _merge_anchor(sheet_xml, ref.upper())
         _, row = _split_ref(anchored)
         by_row.setdefault(row, {})[anchored] = value
@@ -194,8 +196,10 @@ def patch_xlsx(
     """原本 xlsx をコピーし、対象シートの指定セルの値だけを差し替えて保存する。
 
     cell_values: {'D5': datetime(...), 'C17': '氏名', 'F17': 180000, ...}
-    値が None の項目はスキップ（セルは原本のまま）。
+    値が None の項目は真の空欄へ戻す。数式セルの空欄化は禁止。
     """
+    if Path(template_path).resolve() == Path(output_path).resolve():
+        raise ValueError('公式原本を上書きしないよう、別の出力先を指定してください。')
     with zipfile.ZipFile(str(template_path), 'r') as zin:
         sheet_part = _resolve_sheet_part(zin, sheet_index)
         patched_sheet = _patch_sheet_xml(

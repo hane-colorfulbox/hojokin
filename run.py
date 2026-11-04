@@ -23,6 +23,7 @@ from __future__ import annotations
 import sys
 import argparse
 import logging
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -44,8 +45,11 @@ def setup_logging(verbose: bool = False):
     )
 
 
-def find_template(base_dir: Path, template_type: str) -> Path | None:
+def find_template(base_dir: Path, template_type: str, call_round: int = 6) -> Path | None:
     """テンプレートファイルを検索（v2を優先。app.py の同名関数と同期を保つこと）"""
+    if call_round >= 7:
+        from hojokin.template_versions import select_application_template
+        return select_application_template(base_dir, template_type, call_round)
     keywords = {
         '通常枠_2026': ['原本', '通常枠', '法人', '2026'],
         '通常枠_個人_2026': ['原本', '通常枠', '個人', '2026'],
@@ -95,6 +99,20 @@ def cmd_local(args):
     base_dir = folder.parent
     company = args.company
 
+    application_context = None
+    if args.task in ('all', 'application'):
+        from hojokin.application_context import ApplicationContext, validate_application_context
+        if not args.application_context:
+            print('エラー: 申請書の確定には --application-context で確認済み案件設定JSONを指定してください。')
+            return 2
+        try:
+            values = json.loads(Path(args.application_context).read_text(encoding='utf-8-sig'))
+            application_context = ApplicationContext.from_dict(values)
+            validate_application_context(application_context, args.template)
+        except (OSError, ValueError, TypeError) as exc:
+            print(f'申請前提の確認が必要です: {exc}')
+            return 2
+
     # Extractor選択
     api_key = '' if args.dry_run else CLAUDE_API_KEY
     extractor = create_extractor(api_key)
@@ -104,7 +122,10 @@ def cmd_local(args):
         if args.template_path:
             template_path = Path(args.template_path)
         else:
-            template_path = find_template(base_dir, args.template)
+            template_path = find_template(base_dir, args.template, application_context.call_round)
+            if template_path is None:
+                template_path = find_template(Path(__file__).parent, args.template,
+                                              application_context.call_round)
 
         if template_path is None or not template_path.exists():
             print(f'エラー: テンプレートが見つかりません。--template-path で直接指定してください。')
@@ -119,11 +140,14 @@ def cmd_local(args):
             template_type=args.template,
             output_path=output,
             extractor=extractor,
+            application_context=application_context,
         )
 
         print(f'\n=== 申請書作成: {status.status} ===')
         if status.message:
             print(f'  {status.message}')
+        if status.status != '完了':
+            return 2
         if status.empty_cells:
             print(f'  空欄 {len(status.empty_cells)}件:')
             for e in status.empty_cells[:10]:
@@ -163,95 +187,13 @@ def cmd_local(args):
 
 def cmd_drive(args):
     """Google Drive連携実行"""
-    from hojokin.google_drive import DriveClient
-    from hojokin.google_sheets import SheetsClient
-    from hojokin.pipeline import run_full_pipeline
-    from hojokin.config import GOOGLE_CREDENTIALS_PATH, MANAGEMENT_SHEET_ID
-    import tempfile
+    # 管理表の既存列だけでは案件別の制度版・申告事実を確認できない。
+    # 確認前に処理中フラグや出力フォルダを外部へ書き込まない。
+    print('Drive一括実行は案件別の確認済み申請前提に未対応のため停止しています。'
+          'ローカル実行で案件ごとの --application-context を指定してください。')
+    return 2
 
-    creds = args.credentials or GOOGLE_CREDENTIALS_PATH
-    sheet_id = args.sheet_id or MANAGEMENT_SHEET_ID
 
-    if not sheet_id:
-        print('エラー: --sheet-id または MANAGEMENT_SHEET_ID 環境変数を設定してください')
-        sys.exit(1)
-
-    drive = DriveClient(creds)
-    sheets = SheetsClient(creds, sheet_id)
-
-    # 管理シートから未処理の会社を取得
-    companies = sheets.get_pending_companies()
-    if not companies:
-        print('処理対象の会社がありません。')
-        return
-
-    for company in companies:
-        name = company['company_name']
-        folder_id = company['folder_id']
-        template_type = company['template_type']
-        row = company['row_number']
-
-        print(f'\n--- {name} ({template_type}) ---')
-        sheets.set_processing(row)
-
-        try:
-            # 一時ディレクトリにダウンロード
-            with tempfile.TemporaryDirectory() as tmpdir:
-                tmp = Path(tmpdir)
-
-                # 入力フォルダの検出
-                files = drive.list_files(folder_id)
-                input_folder_id = None
-                output_folder_id = None
-                for f in files:
-                    if f['name'] == '入力' and f['mimeType'] == 'application/vnd.google-apps.folder':
-                        input_folder_id = f['id']
-                    elif f['name'] == '出力' and f['mimeType'] == 'application/vnd.google-apps.folder':
-                        output_folder_id = f['id']
-
-                if input_folder_id is None:
-                    input_folder_id = folder_id  # 入力フォルダがなければルートを使用
-
-                if output_folder_id is None:
-                    output_folder_id = drive.find_or_create_subfolder(folder_id, '出力')
-
-                # ファイルダウンロード
-                local_input = tmp / '入力'
-                drive.download_folder(input_folder_id, local_input)
-
-                # テンプレートダウンロード（別途テンプレートフォルダから）
-                # TODO: テンプレートフォルダIDの設定
-                template_local = tmp / 'template.xlsx'
-                # 暫定: ローカルのテンプレートを使用
-                base = Path('.')
-                template_path = find_template(base, template_type)
-                if template_path is None:
-                    raise FileNotFoundError(f'テンプレートが見つかりません: {template_type}')
-
-                # 実行
-                results = run_full_pipeline(
-                    resource_folder=local_input,
-                    template_path=template_path,
-                    template_type=template_type,
-                    company_name=name,
-                )
-
-                # 出力をDriveにアップロード
-                output_names = []
-                for result in results:
-                    for fname in result.output_files:
-                        fpath = local_input / fname
-                        if fpath.exists():
-                            drive.upload_file(fpath, output_folder_id)
-                            output_names.append(fname)
-
-                total_empty = sum(len(r.empty_cells) for r in results)
-                sheets.set_completed(row, output_names, total_empty)
-                print(f'  完了: {", ".join(output_names)}')
-
-        except Exception as e:
-            sheets.set_error(row, str(e))
-            print(f'  エラー: {e}')
 
 
 def main():
@@ -273,6 +215,7 @@ def main():
                                 'インボイス枠_2026', 'インボイス枠_個人_2026'],
                        help='テンプレートタイプ')
     local.add_argument('--template-path', help='テンプレートExcelの直接パス')
+    local.add_argument('--application-context', help='確認済み案件設定のJSON（申請書作成では必須）')
     local.add_argument('--task', default='all',
                        choices=['all', 'application', 'wage', 'per_employee_wage'],
                        help='実行タスク（per_employee_wage は賃金台帳のみで一人当たり給与支給総額を算定）')
@@ -287,12 +230,12 @@ def main():
     setup_logging(args.verbose)
 
     if args.mode == 'local':
-        cmd_local(args)
+        return cmd_local(args) or 0
     elif args.mode == 'drive':
-        cmd_drive(args)
+        return cmd_drive(args) or 0
     else:
         parser.print_help()
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

@@ -140,6 +140,45 @@ BWL_HEADERS = [  # B6〜R6（暦月固定: 令和6年10月〜令和7年9月＋�
     '令和7年7月\n基本給', '令和7年8月\n基本給', '令和7年9月\n基本給',
     '交付申請直近月\n基本給',
 ]
+
+
+def bonus_headers(call_round: int = 6) -> list[str]:
+    """公募回ごとの専用台帳見出し。旧列を新年度として読み替えない。"""
+    if call_round < 1:
+        raise ValueError('公募回は1以上で指定してください')
+    start_year = 2025 if call_round >= 7 else 2024
+    months = [(start_year, m) for m in range(10, 13)]
+    months += [(start_year + 1, m) for m in range(1, 10)]
+    return BWL_HEADERS[:4] + [f'令和{y - 2018}年{m}月\n基本給' for y, m in months] + BWL_HEADERS[-1:]
+
+
+def parse_application_month(value):
+    """日付セルまたは年付き文字列を読む。月だけ・不正な月は推定しない。"""
+    if hasattr(value, 'year') and hasattr(value, 'month'):
+        return (int(value.year), int(value.month))
+    match = re.fullmatch(r'\s*(\d{4})\s*[/年.\-]\s*(\d{1,2})(?:月|[/\-]\d{1,2})?\s*', str(value or ''))
+    if not match:
+        return None
+    year, month = map(int, match.groups())
+    return (year, month) if 1 <= month <= 12 else None
+
+
+def required_wage_months(call_round: int, application_ym=None) -> list[tuple[int, int]]:
+    """加点①窓＋②基準月＋実申請月前月。事業年度や冊数には固定しない。"""
+    if call_round < 1:
+        raise ValueError('公募回は1以上で指定してください')
+    start_year = 2025 if call_round >= 7 else 2024
+    months = {(start_year, m) for m in range(10, 13)}
+    months.update((start_year + 1, m) for m in range(1, 10))
+    months.add((2026, 6) if call_round >= 7 else (2025, 7))
+    if application_ym:
+        year, month = application_ym
+        months.add((year - 1, 12) if month == 1 else (year, month - 1))
+    return sorted(months)
+
+
+def _month_label(ym):
+    return f'{ym[0]}/{ym[1]:02}'
 BWL_PREF_CELL = 'C2'    # 事業場所在地（都道府県）
 BWL_APPYM_CELL = 'C3'   # 交付申請月（yyyy/mm）— 空欄だと加点②判定不能
 
@@ -461,7 +500,8 @@ def _header_diffs(ws, header_row, expected, start_col=2):
     return diffs
 
 
-def check_excel_structures(rep: Report, detected, task: str, frame: str, entity: str):
+def check_excel_structures(rep: Report, detected, task: str, frame: str, entity: str,
+                           call_round: int | None = 6, application_ym=None):
     """層2-3: Excel 構造チェック（ローカル取得済みの xlsx のみ。openpyxl 必要）"""
     xlsx_wage = [e for e in detected.get('wage_ledger', [])
                  if e['ext'] in ('.xlsx', '.xlsm')]
@@ -493,12 +533,41 @@ def check_excel_structures(rep: Report, detected, task: str, frame: str, entity:
         if BWL_SHEET in sheet_names:
             bonus_ledgers.append(e)
             ws = wb[wb.sheetnames[sheet_names.index(BWL_SHEET)]]
-            diffs = _header_diffs(ws, BWL_HEADER_ROW, BWL_HEADERS)
+            if call_round is None:
+                candidates = [bonus_headers(6), bonus_headers(7)]
+                diffs = min((_header_diffs(ws, BWL_HEADER_ROW, h) for h in candidates), key=len)
+            else:
+                diffs = _header_diffs(ws, BWL_HEADER_ROW, bonus_headers(call_round))
             if diffs:
                 rep.fail('TPL-BONUS-HEADER',
                          f'{e["name"]}: 加点判定用台帳のヘッダーが暦月固定テンプレ'
-                         f'（令和6年10月〜令和7年9月＋交付申請直近月）から改変されています: '
+                          f'（公募回に対応する旧版／第7次以降版）と不一致です: '
                          + ' / '.join(diffs[:5]), [e['name']])
+            if call_round is not None:
+                expected_rule = '2026_rounds_7_plus' if call_round >= 7 else '2026_rounds_1_6'
+                stored_rule = norm(ws['AG2'].value)
+                stored_round = ws['AG3'].value
+                if stored_rule != expected_rule and (stored_rule or call_round >= 7):
+                    rep.fail('TPL-BONUS-RULE',
+                             f'{e["name"]}: AG2の制度版が公募回と一致しません', [e['name']])
+                if call_round >= 7 or stored_round is not None:
+                    valid_round = (not isinstance(stored_round, bool)
+                                   and str(stored_round).strip() == str(call_round))
+                    if not valid_round:
+                        rep.fail('BONUS-ROUND-MISMATCH',
+                                 f'{e["name"]}: AG3の公募回と指定回が一致しません。'
+                                 '第7次原本を8次で使う場合も実回を確認してください', [e['name']])
+            # 月別時間列は旧台帳では全体が任意。存在するなら旧新混在を検出する。
+            if any(ws.cell(BWL_HEADER_ROW, col).value is not None for col in range(19, 31)):
+                year_headers = bonus_headers(call_round or 6)[4:-1]
+                if call_round is None:
+                    first = norm(ws.cell(BWL_HEADER_ROW, 6).value)
+                    year_headers = bonus_headers(7 if first.startswith('令和7年10月') else 6)[4:-1]
+                expected_hours = [h.replace('基本給', '労働時間') for h in year_headers]
+                actual_hours = [norm(ws.cell(BWL_HEADER_ROW, col).value) for col in range(19, 31)]
+                if any(norm(x) != y for x, y in zip(expected_hours, actual_hours)):
+                    rep.fail('TPL-BONUS-HOURS-HEADER',
+                             f'{e["name"]}: 月別労働時間の年月見出しが基本給列と一致しません', [e['name']])
             if not norm(ws[BWL_PREF_CELL].value):
                 rep.warn('BONUS-PREF-EMPTY',
                          f'{e["name"]}: 事業場所在地（都道府県、{BWL_PREF_CELL}）が未記入です'
@@ -507,6 +576,15 @@ def check_excel_structures(rep: Report, detected, task: str, frame: str, entity:
                 rep.warn('BONUS-APPYM-EMPTY',
                          f'{e["name"]}: 交付申請月（{BWL_APPYM_CELL}、yyyy/mm）が未記入です'
                          '（空欄だと加点②＝直近月判定ができません）', [e['name']])
+            else:
+                actual_ym = parse_application_month(ws[BWL_APPYM_CELL].value)
+                if actual_ym is None:
+                    rep.fail('BONUS-APPYM-INVALID',
+                             f'{e["name"]}: 交付申請月を年付きの年月として確認できません', [e['name']])
+                elif application_ym is not None and actual_ym != application_ym:
+                    rep.fail('BONUS-APPYM-MISMATCH',
+                             f'{e["name"]}: 台帳の申請月{_month_label(actual_ym)}と指定月'
+                             f'{_month_label(application_ym)}が不一致です。直近月を取り直してください', [e['name']])
         elif WAGE_SHEET in sheet_names:
             std_ledgers.append(e)
             ws = wb[wb.sheetnames[sheet_names.index(WAGE_SHEET)]]
@@ -525,8 +603,8 @@ def check_excel_structures(rep: Report, detected, task: str, frame: str, entity:
         rep.warn('BONUS-LEDGER-MISSING',
                  '加点判定用賃金台帳（シート「加点判定用明細」を持つExcel）が見つかりません。'
                  '加点を狙う案件は「加点判定用賃金台帳の作成」タスクで先に生成してください'
-                 '（対象期間: 令和6年10月〜令和7年9月＋交付申請直近月。決算月によっては'
-                 '前期・今期の賃金台帳2冊が必要）')
+                  '（公募回別の固定窓＋実際の申請月の前月。必要年月を全て覆う資料を回収し、'
+                  '冊数は固定しません。3事業年度にまたがる場合もあります）')
 
     hearing_form = _check_hearing(rep, hearings, frame, entity)
     return {'bonus_ledgers': [e['name'] for e in bonus_ledgers],
@@ -636,8 +714,8 @@ def build_content_targets(detected):
         'pl': '期末日（自〜至）と決算月の整合／直近期か／2期分あるか／BS・PL・販管費明細ページの有無',
         'estimate': 'ツール名がヒアリングの申請ツール名と一致するか／金額（税抜）／宛名',
         'identity': '種別／有効期限（免許証）または発行日3ヶ月以内（住民票）／裏面の要否',
-        'wage_ledger': '対象12ヶ月が直近事業年度と一致するか／全員12ヶ月分あるか／賞与の分離'
-                       '／S列（通勤手当）が月列に含まれる分だけか',
+        'wage_ledger': '用途別の対象年月（給与0年度目見込み／生産性前事業年度実績／加点固定窓・申請前月）'
+                       'を区別／対象者とFTEの確認／賞与・通勤手当の算入根拠／未回収と0円を区別',
         'hearing': '確認事項シートの「確認済」欄／未記入項目の妥当性',
         'wage_report': '様式（加点①/②）と記入状況',
     }
@@ -659,8 +737,16 @@ def main() -> int:
     ap.add_argument('--task', default='both', choices=['both', 'application', 'katen'])
     ap.add_argument('--entity', default='不明', choices=['法人', '個人', '不明'])
     ap.add_argument('--frame', default='不明', choices=['通常枠', 'インボイス枠', '不明'])
+    ap.add_argument('--call-round', type=int, default=None, help='実際に申請する公募回（7以降は第7次版）')
+    ap.add_argument('--app-month', default=None, help='実際の申請予定月（YYYY/MM）。締切月とは別')
     ap.add_argument('--json', help='機械可読の結果 JSON を書き出すパス')
     args = ap.parse_args()
+
+    if args.call_round is not None and args.call_round < 1:
+        ap.error('--call-round は1以上で指定してください')
+    application_ym = parse_application_month(args.app_month) if args.app_month else None
+    if args.app_month and application_ym is None:
+        ap.error('--app-month は YYYY/MM で指定してください')
 
     if bool(args.local) == bool(args.manifest):
         print('ERROR: --local か --manifest のどちらか一方を指定してください', file=sys.stderr)
@@ -685,9 +771,20 @@ def main() -> int:
     detected, skipped, excluded_outputs, unmatched = classify(entries)
 
     rep = Report()
+    if args.call_round is None:
+        rep.warn('CALL-ROUND-UNCONFIRMED',
+                 '公募回が未指定です。旧版／第7次以降版の適用確認は未完了として報告します')
+    elif args.task in ('both', 'katen'):
+        rep.info('BONUS-REQUIRED-MONTHS',
+                 '加点用の必要年月（冊数固定なし）: '
+                 + '、'.join(_month_label(ym) for ym in required_wage_months(args.call_round, application_ym)))
+        if application_ym is None:
+            rep.warn('APPLICATION-MONTH-UNCONFIRMED',
+                     '実際の申請月が未指定です。加点②の直近月は台帳C3と照合し、申請延期時は再確認します')
     check_presence(rep, detected, skipped, args.task, args.entity)
     check_submissions(rep, entries)
-    extra = check_excel_structures(rep, detected, args.task, args.frame, args.entity)
+    extra = check_excel_structures(rep, detected, args.task, args.frame, args.entity,
+                                   args.call_round, application_ym)
 
     for name in shortcuts:
         rep.warn('SHORTCUT', 'Driveショートカットのため実体を解決できません。'
@@ -737,7 +834,11 @@ def main() -> int:
         result = {
             'context': {'task': args.task, 'entity': args.entity, 'frame': args.frame,
                         'hearing_form': extra.get('hearing_form'),
-                        'bonus_ledgers': extra.get('bonus_ledgers')},
+                         'bonus_ledgers': extra.get('bonus_ledgers'),
+                         'call_round': args.call_round,
+                         'application_ym': application_ym,
+                         'bonus_required_months': required_wage_months(args.call_round, application_ym)
+                         if args.call_round is not None else None},
             'detected': {c: [e['name'] for e in v] for c, v in detected.items() if v},
             'skipped': [list(s) for s in skipped],
             'excluded_outputs': excluded_outputs,

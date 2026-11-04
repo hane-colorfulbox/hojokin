@@ -24,9 +24,9 @@ FORMS = SKILL / '補助金加点'
 SHEET = '加点判定用明細'
 FIRST_ROW = 7
 COL_NO, COL_NAME, COL_TYPE, COL_HOURS, COL_FIRST_MONTH, COL_LATEST = 2, 3, 4, 5, 6, 18
-# ②が対象になる構成: 基準月の最低 1150円（115,000÷100h）→ 直近月 1220円（差 +70円）
+# 旧版の適法な合成例: 基準月1200円→直近月1270円（差+70円）。
 EMPLOYEES = [
-    ('甲野花子', 'パート', 100, [115000] * 12, 122000),
+    ('甲野花子', 'パート', 100, [120000] * 12, 127000),
     ('乙野太郎', '正社員', 173.33, [320000] * 12, 330000),
 ]
 
@@ -58,10 +58,10 @@ def main() -> int:
         ledger = work / '加点テスト台帳.xlsx'
         make_ledger(ledger)
 
-        cp = run_py(DRIVER, ledger, '--fill', '通常', '--company', 'テスト社', '--outdir', work / 'out',
+        cp = run_py(DRIVER, ledger, '--call-round', 6, '--fill', '通常', '--company', 'テスト社', '--outdir', work / 'out',
                     cwd=work)
         c.check('判定と様式生成が終了コード0で終わる', cp.returncode == 0, cp.stderr)
-        c.check('加点②が対象（+70円）と判定される', '差: +70円' in cp.stdout and '判定: ◎ 対象' in cp.stdout,
+        c.check('加点②が対象（+70円）と判定される', '差: +70円' in cp.stdout and '判定: 対象' in cp.stdout,
                 cp.stdout[-800:])
         outs = {p.name: p for p in (work / 'out').glob('*.xlsx')}
         c.check('様式①②の2つが公式の様式名で出力される',
@@ -72,7 +72,7 @@ def main() -> int:
             r = run_py(LOSSLESS, original, out, cwd=work)
             c.check(f'{Path(out).name} は原本どおり（check_lossless 合格）', r.returncode == 0, r.stdout + r.stderr)
 
-        cp = run_py(DRIVER, ledger, '--fill', 'インボイス', '--company', 'テスト社', '--outdir', work / 'inv',
+        cp = run_py(DRIVER, ledger, '--call-round', 6, '--fill', 'インボイス', '--company', 'テスト社', '--outdir', work / 'inv',
                     cwd=work)
         c.check('インボイス枠の様式①も見つかって生成される',
                 cp.returncode == 0 and (work / 'inv' / 'テスト社_加点措置①用.xlsx').exists(), cp.stdout[-400:] + cp.stderr)
@@ -94,6 +94,42 @@ def main() -> int:
         r = run_py(broken / 'review' / 'run_katen_judge.py', ledger, cwd=work)
         c.check('判定エンジンが欠けたスキルでは終了コード2で止まる', r.returncode == 2 and 'hojokin/' in r.stderr,
                 f'rc={r.returncode} {r.stderr}')
+
+        # 新版も配布されたスキルのフォルダだけで動作し、旧新取り違えを止める。
+        new_template = SKILL / 'ツール' / '第7次以降' / '加点判定用賃金台帳テンプレート.xlsx'
+        c.check('第7次の台帳と版別ルールが同梱されている',
+                new_template.exists() and (SKILL / 'hojokin' / 'subsidy_rules.py').exists())
+        if new_template.exists():
+            new_ledger = work / 'new.xlsx'
+            shutil.copy(new_template, new_ledger)
+            wb = openpyxl.load_workbook(new_ledger)
+            ws = wb[SHEET]
+            ws['C2'] = '東京都'
+            ws['C3'] = datetime.datetime(2026, 12, 1)
+            ws['C7'], ws['D7'], ws['E7'] = '合成従業員', '正社員', 100
+            for col in range(6, 18):
+                ws.cell(7, col, 122600)
+            ws['R7'] = 128100  # +55円ちょうど
+            wb.save(new_ledger)
+            wb.close()
+            cp = run_py(DRIVER, new_ledger, '--call-round', 7, '--fill', '通常', '--company', '新版テスト',
+                        '--outdir', work / 'new_out', cwd=work)
+            c.check('第7次で55円ちょうどを対象として公式様式を生成',
+                    cp.returncode == 0 and '差: +55円' in cp.stdout,
+                    cp.stdout[-500:] + cp.stderr)
+            wrong = run_py(DRIVER, new_ledger, '--call-round', 6, cwd=work)
+            c.check('新版台帳を旧版の回として読まない', wrong.returncode == 2, wrong.stderr)
+            unstamped = run_py(DRIVER, new_ledger, '--fill', '通常', cwd=work)
+            c.check('公募回なしでは提出用様式を生成しない', unstamped.returncode == 2)
+            wb = openpyxl.load_workbook(new_ledger)
+            wb[SHEET]['E7'] = None
+            wb.save(new_ledger)
+            wb.close()
+            missing = run_py(DRIVER, new_ledger, '--call-round', 7, '--fill', '通常',
+                             '--outdir', work / 'missing_out', cwd=work)
+            c.check('時間欠損の未確定判定はexit3で提出物を作らない',
+                    missing.returncode == 3 and not list((work / 'missing_out').glob('*.xlsx')),
+                    missing.stdout[-500:] + missing.stderr)
     return c.finish()
 
 

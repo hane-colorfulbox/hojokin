@@ -7,6 +7,7 @@ import math
 import re
 import tempfile
 import unicodedata
+from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 
 from .config import get_mapping, CLAUDE_API_KEY, BIZ_DESC
@@ -25,6 +26,11 @@ from .wage_calculator import (
 from .wage_reader import read_wage_ledger, read_wage_ledgers, export_wage_ledger_summary
 from .pdf_reader import pdf_to_images
 from .warnings_catalog import tag as warn_tag
+from .application_context import (
+    ApplicationContext, ApplicationValidationError, validate_application_context,
+    build_application_wage_plan, validate_productivity_inputs, wage_requirements,
+)
+from .template_versions import validate_application_template_version
 
 logger = logging.getLogger(__name__)
 
@@ -700,6 +706,7 @@ def run_application_transfer(
     has_cost_report_hint: bool = False,
     selection_override: dict[str, list[Path]] | None = None,
     tool_override: str | None = None,
+    application_context: ApplicationContext | None = None,
 ) -> ProcessingStatus:
     """
     タスク1: 申請書転記の実行
@@ -729,10 +736,20 @@ def run_application_transfer(
         from .ai_extractor import APICreditExhaustedError
         mapping = get_mapping(template_type)
 
+        # 不明を「なし・はい」に変えず、課金・出力の前に申請前提を検査する。
+        validate_application_context(application_context, template_type)
+        validate_application_template_version(template_path, application_context.call_round)
+        requirements = wage_requirements(application_context)
+        context_fiscal_month = application_context.fiscal_year_end.month
+        if fiscal_month_override is not None and fiscal_month_override != context_fiscal_month:
+            raise ApplicationValidationError(['指定決算月と案件設定の事業年度が一致しません'])
+        fiscal_month_override = context_fiscal_month
+
         # 申請書テンプレの版ズレゲート（W-TPL-001）。原本の行レイアウトがマッピングと
         # 食い違う場合、API を呼ぶ前・ファイルを作る前にここで停止する
         from .template_filler import verify_template_labels
-        verify_template_labels(template_path, mapping, template_type)
+        verify_template_labels(template_path, mapping, template_type,
+                               call_round=application_context.call_round)
 
         if extractor is None:
             extractor = create_extractor(CLAUDE_API_KEY)
@@ -897,10 +914,34 @@ def run_application_transfer(
             wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
                 detector, extraction.financial, extractor=None,
                 fiscal_month_override=fiscal_month_override,
+                growth_rate=float(requirements.required_rate),
             )
         except Exception as e:
             logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}', exc_info=True)
             wage_plan, ledger_employees, wage_status = None, [], 'error'
+
+        # 台帳の実績は生産性の前事業年度用。0年度目見込みへ流用しない。
+        historical_wage_plan = wage_plan
+        productivity_total_annual_hours = (historical_wage_plan or {}).get('total_annual_hours')
+        if application_context.is_round7 and requirements.selected and wage_status in {'officer_only', 'no_full_year_target'}:
+            raise ApplicationValidationError([
+                '役員のみ、または全月給与支給対象者なしのため個別確認が必要です。'
+                '通常の従業員FTEとして自動処理しません'
+            ])
+        if application_context.is_round7 and template_type.startswith('通常枠'):
+            # raw給与集計の互換処理では時間欠損が0時間になるため、提出用の
+            # 生産性だけは全従業員・全対象月の時間根拠を別途検査する。
+            productivity_total_annual_hours = _validated_productivity_annual_hours(
+                ledger_employees, application_context.productivity_period)
+            validate_productivity_inputs(application_context, extraction.financial,
+                                         productivity_total_annual_hours)
+        if application_context.is_round7 or application_context.forecast_years:
+            wage_plan = build_application_wage_plan(application_context)
+        elif requirements.selected and wage_plan is None:
+            raise ApplicationValidationError([
+                '旧制度の給与計画の基準となる確認可能な賃金台帳がありません。'
+                '対象者・対象年度を確認してください'
+            ])
 
         # ユーザー指定の決算月 vs AI 推定の照合（警告のみ。処理は続行）
         _, fiscal_month_warning = _resolve_fiscal_period(
@@ -1030,6 +1071,8 @@ def run_application_transfer(
             hearing_data=hearing_data,
             extraction=extraction,
             wage_plan=wage_plan,
+            application_context=application_context,
+            productivity_total_annual_hours=productivity_total_annual_hours,
         )
 
         status.status = '完了' if not api_skipped_reason else '部分完了'
@@ -1160,7 +1203,7 @@ def run_application_transfer(
                 f'年間賞与欄から同額を差し引いて再実行してください'
             )
         # 整合性チェック: 賃金台帳合計と損益計算書の人件費の差が大きいと AI 抽出ミスの疑い
-        consistency_warning = _check_wage_pl_consistency(wage_plan, extraction.financial)
+        consistency_warning = _check_wage_pl_consistency(historical_wage_plan, extraction.financial)
         # 会計式整合（売上 − 原価 = 粗利）— ()書きマイナス誤読の自動検出
         pl_accounting_warning = _check_pl_accounting_consistency(extraction.financial)
         # 業種コードのフォーマット検証（旧3桁体系・自己流コード検出）
@@ -1265,6 +1308,7 @@ def run_application_transfer(
                     cached_company=extraction.company,
                     fiscal_month_override=fiscal_month_override,
                     selection_override=selection_override,
+                    historical_reference=application_context.is_round7,
                 )
             except Exception as e:
                 logger.warning(
@@ -1282,6 +1326,81 @@ def run_application_transfer(
     return status
 
 
+def _validated_productivity_annual_hours(employees: list, expected_period) -> float:
+    """申請用の前期総時間。欠損を0時間・非在籍に読み替えない。raw計算とは独立。"""
+    if not expected_period:
+        raise ApplicationValidationError(['生産性の総労働時間の対象前事業年度が未確認です'])
+    start, end = expected_period
+    expected = []
+    year, month = start.year, start.month
+    for _ in range(12):
+        expected.append((year, month))
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    issues = []
+    total = Decimal('0')
+    active_count = 0
+
+    def valid(value):
+        return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool) and math.isfinite(value)
+
+    for emp in employees:
+        name = str(getattr(emp, 'name', '') or '氏名未確認')
+        employment_type = str(getattr(emp, 'employment_type', '') or '')
+        if not employment_type or '推定' in employment_type:
+            issues.append(f'{name}：役員・従業員の区分が未確認です')
+            continue
+        if '役員' in employment_type:
+            continue
+        active_count += 1
+        wages = getattr(emp, 'monthly_wages', None)
+        hours = getattr(emp, 'monthly_hours', None)
+        if not isinstance(wages, (list, tuple)) or len(wages) != 12 or not isinstance(hours, (list, tuple)) or len(hours) != 12:
+            issues.append(f'{name}：前事業年度12か月の給与・労働時間の対応が未確認です')
+            continue
+        fiscal_window = getattr(emp, 'fiscal_window', None)
+        if not fiscal_window:
+            issues.append(f'{name}：労働時間の対象年度を確認できません。'
+                          '12か月の時間があっても前事業年度と推測せず、個別確認してください')
+            continue
+        if list(fiscal_window) != expected:
+            issues.append(f'{name}：労働時間の対象年月が前事業年度と一致しません')
+            continue
+        # 今の標準 raw 台帳は非在籍状態を保持しない。将来/独自の明示データが
+        # あっても、None・0円から非在籍を推測せず、False の明示だけを除外する。
+        presence = getattr(emp, 'monthly_presence', {}) or {}
+        any_monthly = any(value is not None for value in hours)
+        average = getattr(emp, 'monthly_avg_hours', None)
+        for month_index in range(12):
+            month_label = f'{month_index + 1}月'
+            ym = None
+            if fiscal_window:
+                ym = next((item for item in fiscal_window if item[1] == month_index + 1), None)
+            marked_presence = presence.get(ym, presence.get(month_index)) if isinstance(presence, dict) else None
+            h = hours[month_index]
+            wage = wages[month_index]
+            if marked_presence is False:
+                if (valid(h) and h > 0) or (valid(wage) and wage > 0):
+                    issues.append(f'{name} {month_label}：非在籍の明示と給与・労働時間が矛盾します')
+                continue
+            # 個別の月別時間が存在するときは、他月を月平均から補完しない。
+            if any_monthly:
+                if not valid(h) or h < 0 or (h == 0 and marked_presence is not True):
+                    issues.append(f'{name} {month_label}：労働時間・在籍状態が未確認です')
+                    continue
+                total += Decimal(str(h))
+            elif valid(average) and average > 0 and (marked_presence is True or (valid(wage) and wage > 0)):
+                total += Decimal(str(average))
+            else:
+                issues.append(f'{name} {month_label}：所定・実労働時間または在籍状態が未確認です')
+    if not active_count:
+        issues.append('生産性の前事業年度に用いる従業員の労働時間がありません（役員のみ等は個別確認）')
+    if issues:
+        raise ApplicationValidationError(['生産性の総労働時間を確定できません。空欄を0時間として集計しません。'] + issues)
+    if total <= 0:
+        raise ApplicationValidationError(['生産性の前事業年度の総労働時間が0以下のため個別確認してください'])
+    return float(total)
+
+
 def _attach_per_employee_wage_sheet(
     output_path: Path,
     resource_folder: Path,
@@ -1292,6 +1411,7 @@ def _attach_per_employee_wage_sheet(
     cached_company: 'CompanyInfo | None',
     fiscal_month_override: int | None,
     selection_override: dict[str, list[Path]] | None,
+    historical_reference: bool = False,
 ) -> None:
     """申請書作成タスクの出力 Excel に「一人当たり給与支給総額」シートを統合する。
 
@@ -1335,12 +1455,34 @@ def _attach_per_employee_wage_sheet(
         dest_wb = openpyxl.load_workbook(output_path)
         try:
             copied = 0
+            title_map = {}
+            for source_name in ('給与支給総額計算', '従業員別明細'):
+                if historical_reference:
+                    title_map[source_name] = (
+                        '前事業年度給与実績（参考）' if source_name == '給与支給総額計算'
+                        else '前事業年度従業員明細（参考）')
+                elif source_name in dest_wb.sheetnames:
+                    title_map[source_name] = (
+                        '賃金台帳給与集計（参考）' if source_name == '給与支給総額計算'
+                        else '賃金台帳従業員明細（参考）')
+                else:
+                    title_map[source_name] = source_name
             # 給与計算 Excel のシート構成は create_wage_calculation 仕様:
             #   1. 給与支給総額計算（メイン）
             #   2. 従業員別明細（任意。賃金台帳に12ヶ月明細がある場合のみ生成）
             for sheet_name in ('給与支給総額計算', '従業員別明細'):
                 if sheet_name in src_wb.sheetnames:
-                    copy_sheet_to_workbook(src_wb[sheet_name], dest_wb)
+                    source_ws = src_wb[sheet_name]
+                    # openpyxlのシート名変更だけでは参照式が追従しないため、
+                    # 自動生成した一時ブック内の既知の参照だけを変更する。
+                    for row in source_ws.iter_rows():
+                        for cell in row:
+                            if cell.data_type == 'f' and isinstance(cell.value, str):
+                                formula = cell.value
+                                for old_title, new_title in title_map.items():
+                                    formula = formula.replace(f"'{old_title}'!", f"'{new_title}'!")
+                                cell.value = formula
+                    copy_sheet_to_workbook(source_ws, dest_wb, new_title=title_map[sheet_name])
                     copied += 1
             dest_wb.save(output_path)
             logger.info(
@@ -1812,6 +1954,7 @@ def _calc_wage_plan_from_ledger(
     financial: 'FinancialData',
     extractor=None,
     fiscal_month_override: int | None = None,
+    growth_rate: float = 0.03,
 ) -> tuple[dict[str, float] | None, list, str]:
     """
     賃金台帳から給与支給総額を算出し、年3%成長の計画値を返す。
@@ -1961,16 +2104,19 @@ def _calc_wage_plan_from_ledger(
         # 組み合わせが残る）。round(x, 2) は float 誤差の掃除（真値は整数×1.03 の
         # 積で高々小数2桁のため、切り上げ不要な値に +1 円しない）。
         base = result.total_salary
-        rate = result.GROWTH_RATE
-        y1 = math.ceil(round(round(base) * (1 + rate), 2))
-        y2 = math.ceil(round(y1 * (1 + rate), 2))
-        y3 = math.ceil(round(y2 * (1 + rate), 2))
+        rate = growth_rate
+        factor = Decimal('1') + Decimal(str(rate))
+        y1 = int((Decimal(str(round(base))) * factor).to_integral_value(rounding=ROUND_CEILING))
+        y2 = int((Decimal(y1) * factor).to_integral_value(rounding=ROUND_CEILING))
+        y3 = int((Decimal(y2) * factor).to_integral_value(rounding=ROUND_CEILING))
         plan = {
             'employee_count_fte': result.employee_count_fte,
             'wage_total_base': base,
             'wage_total_y1': y1,
             'wage_total_y2': y2,
             'wage_total_y3': y3,
+            'growth_rate': rate,
+            'basis_kind': '前事業年度実績',
         }
         if total_annual_hours > 0:
             plan['total_annual_hours'] = round(total_annual_hours, 1)
@@ -2617,6 +2763,7 @@ def run_bonus_wage_ledger_creation(
     prefecture: str = '',
     application_ym: tuple[int, int] | None = None,
     selection_override: dict[str, list[Path]] | None = None,
+    call_round: int = 6,
 ) -> ProcessingStatus:
     """タスク「加点判定用賃金台帳の作成」: 生の賃金台帳/給与明細 → 加点判定用 Excel。
 
@@ -2627,9 +2774,11 @@ def run_bonus_wage_ledger_creation(
     """
     from .ai_extractor import APICreditExhaustedError, ImageFallbackBlockedError
     from .wage_reader import (
-        read_bonus_source_employees, BONUS1_WINDOW, prev_month,
+        read_bonus_source_employees, prev_month,
     )
     from .bonus_wage_ledger_writer import write_bonus_wage_ledger
+    from .subsidy_rules import rules_for_round
+    rules = rules_for_round(call_round)
 
     status = ProcessingStatus(
         company_name=company_name,
@@ -2683,10 +2832,11 @@ def run_bonus_wage_ledger_creation(
         write_bonus_wage_ledger(
             employees, template_path, output_path,
             prefecture=prefecture, application_ym=application_ym,
+            call_round=call_round,
         )
 
         # カバレッジ警告（加点に必要な月の基本給・所定労働時間がどれだけ埋まったか）
-        target_yms = list(BONUS1_WINDOW)
+        target_yms = list(rules.bonus1_window)
         latest_ym = prev_month(application_ym) if application_ym else None
         if latest_ym:
             target_yms.append(latest_ym)
@@ -3277,8 +3427,14 @@ def run_full_pipeline(
     company_name: str,
     fiscal_month_override: int | None = None,
     selection_override: dict[str, list[Path]] | None = None,
+    application_context: ApplicationContext | None = None,
 ) -> list[ProcessingStatus]:
     """タスク1 + タスク2 を一括実行"""
+    try:
+        validate_application_context(application_context, template_type)
+    except ApplicationValidationError as exc:
+        return [ProcessingStatus(company_name=company_name, template_type=template_type,
+                                 status='エラー', message=str(exc))]
     extractor = create_extractor(CLAUDE_API_KEY)
     results = []
 
@@ -3288,6 +3444,7 @@ def run_full_pipeline(
         resource_folder, template_path, template_type, output_app, extractor,
         fiscal_month_override=fiscal_month_override,
         selection_override=selection_override,
+        application_context=application_context,
     )
     results.append(s1)
 

@@ -28,8 +28,13 @@ from .wage_reader import (
     BWL_DATA_START_ROW,
     BWL_PREF_CELL,
     BWL_SHEET_NAME,
+    BWL_HEADER_ROW,
+    BWL_RULE_CELL,
+    BWL_ROUND_CELL,
+    parse_ym_header,
     prev_month,
 )
+from .subsidy_rules import rules_for_round
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +46,7 @@ def write_bonus_wage_ledger(
     *,
     prefecture: str = '',
     application_ym: tuple[int, int] | None = None,
+    call_round: int = 6,
 ) -> Path:
     """BonusWageEmployee リストを加点判定用賃金台帳テンプレに書き出す。
 
@@ -50,8 +56,20 @@ def write_bonus_wage_ledger(
     読み戻し時に E列固定値で時間換算給与が歪むのを防ぐ。BONUS1_WINDOW 外かつ直近月以外の
     override は判定に使われないため書き出さない（往復で落ちるのは仕様）。
     """
+    if Path(template_path).resolve() == Path(output_path).resolve():
+        raise ValueError('台帳原本と出力先は別のファイルにしてください。')
+    rules = rules_for_round(call_round)
     wb = openpyxl.load_workbook(str(template_path))
-    ws = wb[BWL_SHEET_NAME] if BWL_SHEET_NAME in wb.sheetnames else wb[wb.sheetnames[0]]
+    if BWL_SHEET_NAME not in wb.sheetnames:
+        wb.close()
+        raise ValueError(f'専用シート「{BWL_SHEET_NAME}」がありません。')
+    ws = wb[BWL_SHEET_NAME]
+    for j, ym in enumerate(rules.bonus1_window):
+        if parse_ym_header(ws.cell(BWL_HEADER_ROW, BWL_COL_WINDOW_START + j).value) != ym:
+            wb.close()
+            raise ValueError('台帳テンプレートの年月見出しが指定公募回と一致しません。')
+    ws.cell(*BWL_RULE_CELL, value=rules.rule_id)
+    ws.cell(*BWL_ROUND_CELL, value=call_round)
 
     if prefecture:
         ws.cell(*BWL_PREF_CELL, value=prefecture)
@@ -66,19 +84,24 @@ def write_bonus_wage_ledger(
         ws.cell(row, BWL_COL_NO, emp.no if emp.no else i + 1)
         ws.cell(row, BWL_COL_NAME, emp.name)
         ws.cell(row, BWL_COL_EMPTYPE, emp.employment_type or '')
+        ws.cell(row, BWL_COL_HOURS).value = None
         if emp.scheduled_hours is not None:
             ws.cell(row, BWL_COL_HOURS, round(emp.scheduled_hours, 4))
-        for j, ym in enumerate(BONUS1_WINDOW):
+        for j, ym in enumerate(rules.bonus1_window):
             base = emp.monthly_base.get(ym)
-            if base is not None:
+            if emp.monthly_presence.get(ym) is False:
+                ws.cell(row, BWL_COL_WINDOW_START + j, '非在籍')
+            elif base is not None:
                 ws.cell(row, BWL_COL_WINDOW_START + j, round(base))
         if latest_ym is not None:
             base = emp.monthly_base.get(latest_ym)
-            if base is not None:
+            if emp.monthly_presence.get(latest_ym) is False:
+                ws.cell(row, BWL_COL_LATEST, '非在籍')
+            elif base is not None:
                 ws.cell(row, BWL_COL_LATEST, round(base))
         # 時間は小数第4位まで保持する。第1位丸めだと 57:45→57.8h のように歪み、
         # 時間換算給与が1〜2円ズレて加点②の63円境界判定を覆し得る。
-        for j, ym in enumerate(BONUS1_WINDOW):
+        for j, ym in enumerate(rules.bonus1_window):
             h = emp.monthly_hours_override.get(ym)
             if h is not None and h > 0:
                 ws.cell(row, BWL_COL_HOURS_WINDOW_START + j, round(h, 4))
