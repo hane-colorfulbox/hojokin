@@ -1,0 +1,2 @@
+# 配布実体をそのまま保存し、改行変換によるハッシュの変化を防ぐ
+releases/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

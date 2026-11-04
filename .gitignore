@@ -45,8 +45,11 @@ docs/セカンドオピニオン加点/配布物テンプレ/05_会社別/_配�
 # .claude/skills/ 配下のテンプレは管理対象（Skill 同梱、ZIP ビルドのソース）
 !.claude/skills/**/*.xlsx
 
-# Skill ZIP 配布物（生成物、Drive 経由で配布するため git 管理しない）
+# ローカルの生成・検証出力。確定した担当者向け配布物は distribution/releases/ でGit管理する
 _dist/
+
+# 内容確認済みの配布PDF。顧客PDFの除外は維持する
+!distribution/releases/**/*.pdf
 
 # Skill テスト時の顧客データ（PDF/ヒアリング/案件メタ/テストレポート）
 # 顧客企業名・従業員氏名・金額が含まれるため絶対にコミットしない

@@ -126,6 +126,8 @@
 - **Streamlit Cloud のログのタイムスタンプ（`[HH:MM:SS]`）は UTC**。日本時間（JST）はそれ +9時間。ログ時刻を読むときは +9 して換算する（例：ログ `[04:23]` ＝ JST 13:23）
 
 ### 配布（組織プラグイン hojokin・2026-09-30〜）
+- 配布正本に加え、確定した担当者向けPDF・HTML・配布資料ZIPも `distribution/releases/` に保存してGit管理する。`_dist/` は生成・検証用のため引き続き除外する。配布した実体と元コミット・SHA-256を記録し、正本修正→再生成→確認→リリース登録・コミットまでを行う（2026-11-04 ユーザー指示）。
+- プラグイン本体は従来どおりprivateの生成リポジトリで管理する。内部参照を含むプラグインZIP・原本管理者用候補を開発リポジトリの配布書庫へ混ぜず、元コミット・生成物ハッシュ・再生成手順を記録する。顧客実データや未確認の作業出力は登録しない。
 - 補助金業務の資料（`引き継ぎ/`・配布可の docs）とスキル4本（hojokin-guide / wagebook-convert / katen-judge / case-docs-check）は、claude.ai 組織の「プラグインとスキル」で配る。同期元は private の `colorful-box/hojokin-plugins`（生成物専用・手で直さない）。チャット・Cowork・Claude Code（v2.1.273 以上・claude.ai ログイン）に届く
 - 組み立て: `python scripts/build_plugin.py --out <hojokin-plugins の作業コピー>`。HEAD にコミット済みの内容だけから作り、ゲート（PII・リンク・frontmatter・共通ブロック・同期・`claude plugin validate --strict`）が1つでも NG なら書き換えない。中身の許可リストは `scripts/distribution_manifest.py`。スキル本体の正本はこれまでどおり `.claude/skills/`、ガイドは `引き継ぎ/配布用SKILL_hojokin-guide.md`
 - hojokin-plugins の既定ブランチに push すると自動同期で全員に届く＝**push は管理者本人（羽根）**（他の人に届く操作のため。CC はコミットまで）

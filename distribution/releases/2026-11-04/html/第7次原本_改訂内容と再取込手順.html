@@ -1,0 +1,45 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>第7次原本の改訂候補とDriveへの反映・再取込</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f3f6fa;color:#183146;font:15px/1.85 "Yu Gothic UI",Meiryo,sans-serif}
+main{max-width:1120px;margin:auto;padding:30px 26px 70px}header{background:#163c59;color:#fff;padding:26px 30px;border-radius:12px}
+header p{color:#dae8f4;margin-bottom:0}h1{font-size:26px;line-height:1.5;margin:0 0 12px}h2{font-size:21px;margin:30px 0 14px}h3{font-size:17px}
+article{background:white;padding:26px 30px;border:1px solid #d9e2ea;border-radius:10px;margin-top:22px}a{color:#145bb4;text-underline-offset:3px}
+li{margin:7px 0}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;vertical-align:top;padding:11px;border:1px solid #d9e2ea}th{background:#edf3f9}
+pre{padding:15px;background:#f1f5f9;overflow:auto}code{font-size:13px;overflow-wrap:anywhere}.note{padding:14px 18px;background:#fff4d9;border-left:4px solid #ad761a}
+@media(max-width:650px){main{padding:16px 10px}header,article{padding:20px 15px}h1{font-size:23px}table{font-size:13px}th,td{padding:8px}}
+</style></head><body><main><header><h1>第7次原本の改訂候補とDriveへの反映・再取込</h1><p>公式資料再照合・訂正版　2026.11.04-56d30ca95c62　社内配布用</p></header><p class="note">制度の一般的な定義の再照会は不要です。案件の不足事実、社内調整、今回は保留する事項を区別します。</p><article><h1>第7次原本の改訂候補とDriveへの反映・再取込</h1>
+<p>更新日：2026-11-04。ここにあるものはローカル保有原本から作った改訂候補です。会社Driveの最新版との照合・書込みはまだ行っていません。</p>
+<h2>1. 用意したもの</h2>
+<ul>
+<li><code>ツール/第7次以降/</code>：申請書4種類、ヒアリング4種類、加点専用台帳。第1〜6次用は元の場所に保存しています。</li>
+<li><code>補助金加点/第7次以降/</code>：公式の第7次用3様式。取得した公式ファイルをそのまま保持しています。</li>
+<li><code>scripts/build_round7_templates.py</code>：旧原本からの改訂を再現する処理。入力セルの表示、関連リンク、最賃候補、制度版を限定して更新します。</li>
+</ul>
+<p>社内原本の行・シート構成・図形等は維持しています。給与は0〜3年度目、FTEは確認済み入力とし、固定された過去年月を現役計画の年度表示に使いません。生産性の旧OK/NG判定は未確認表示に変え、申請書生成時に確認済み計画を検算します。表示文字だけでなく、クリック先も第7次公式様式へ変更しています。</p>
+<h2>2. 原本管理担当へ渡す改訂内容</h2>
+<ol>
+<li>加点①の期間と上限、加点②の基準月と55円、公式様式リンク、地域最賃候補を変更します。</li>
+<li>給与0年度目を当期見込みと明示し、対象人数・根拠・確認状況を収集します。年度別FTEと詳細は生成物の「申請前提・給与見込」に保存します。</li>
+<li>生産性の前事業年度実績と、申請翌事業年度から3年の計画を分けます。給与と生産性の計画1〜3年度目は同一期間です。</li>
+<li>過去交付歴・表明方法・実施日・任意加点等は確認済みの事実だけを記録します。</li>
+<li>回収資料は用途別の指定年月とし、2冊などの固定件数で依頼しません。</li>
+</ol>
+<p>回収項目の案は公式入力に必要な情報から用意します。既存の調整済み票があれば共有してもらい整合させます。これは社内運用の調整で、事務局の定義が未公表という意味ではありません。</p>
+<h2>3. Driveへ反映する段階</h2>
+<p>会社アカウントと対象原本を確認し、既存原本をエクスポートしてバックアップします。今回の候補と最新版の差分を比較して、他担当者の変更を消さないようにします。</p>
+<p>反映先と内容を確認してから、原本管理担当が新しい第7次版として反映します。旧版は元申請の訂正・効果報告用に残します。今回の修正作業だけではDriveへの反映は完了していません。</p>
+<h2>4. 更新後の再取込</h2>
+<p>この節のコマンドは管理者が開発リポジトリで実行します。プラグインだけを受け取った利用者に原本の上書きやパッチ実行を求めるものではありません。</p>
+<ol>
+<li>Driveの更新済み原本を、新しい作業フォルダへエクスポートし、取得日・対象版・ファイルのハッシュを記録します。既存ローカル原本に直接上書きしません。</li>
+<li>通常枠個人の既存の機械修正が必要な場合は、次のように未使用の出力先を明示して実行します。<code>--allow-new-input</code> は内容確認を省く指定ではありません。想定セルが変わっていれば処理は停止します。</li>
+</ol>
+<p><code>powershell
+   python scripts/patch_genpon_tsujo_kojin_from_drive.py --input &lt;新エクスポート.xlsx&gt; --output &lt;未使用の修正候補.xlsx&gt; --allow-new-input</code></p>
+<ol>
+<li>原本管理側で既に同じ修正が入っている場合、旧パッチを無理に適用しません。停止理由と差分を確認し、変更不要なセルを二重修正しないようにします。</li>
+<li>行・設問に変更があれば、固定セルのマッピングとヒアリング判別を再測定します。旧版のマッピングを上書きして旧案件を壊さず、版別に検証します。行変更がない今回候補は既存の行配置を維持しています。</li>
+<li>原本の制度版・4種類のラベル、給与と生産性の年度、リンク実体、プルダウン、数式、画像・保護を再読取で確認します。通常枠個人の既存構造検証と、新旧4原本の統合テストを行います。</li>
+<li>配布元へ反映してコミット後、プラグインを再ビルドし検証します。Drive原本更新・本番反映・全員への配信は、それぞれ完了状態を分けて記録します。</li>
+</ol>
+<h2>5. 採用を止める条件</h2>
+<p>対象回が不明、旧版リンクが残る、ラベル・行の不一致、未確認の表明・交付歴、見込根拠不足、未確定の賃金・人数、意図しない数式や画像の欠落があれば、その候補を提出や配布に使いません。</p></article></main></body></html>

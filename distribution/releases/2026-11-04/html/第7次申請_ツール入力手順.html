@@ -1,0 +1,69 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>第7次申請：画面・ローカルCLIの入力手順</title><style>
+*{box-sizing:border-box}body{margin:0;background:#f3f6fa;color:#183146;font:15px/1.85 "Yu Gothic UI",Meiryo,sans-serif}
+main{max-width:1120px;margin:auto;padding:30px 26px 70px}header{background:#163c59;color:#fff;padding:26px 30px;border-radius:12px}
+header p{color:#dae8f4;margin-bottom:0}h1{font-size:26px;line-height:1.5;margin:0 0 12px}h2{font-size:21px;margin:30px 0 14px}h3{font-size:17px}
+article{background:white;padding:26px 30px;border:1px solid #d9e2ea;border-radius:10px;margin-top:22px}a{color:#145bb4;text-underline-offset:3px}
+li{margin:7px 0}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;vertical-align:top;padding:11px;border:1px solid #d9e2ea}th{background:#edf3f9}
+pre{padding:15px;background:#f1f5f9;overflow:auto}code{font-size:13px;overflow-wrap:anywhere}.note{padding:14px 18px;background:#fff4d9;border-left:4px solid #ad761a}
+@media(max-width:650px){main{padding:16px 10px}header,article{padding:20px 15px}h1{font-size:23px}table{font-size:13px}th,td{padding:8px}}
+</style></head><body><main><header><h1>第7次申請：画面・ローカルCLIの入力手順</h1><p>公式資料再照合・訂正版　2026.11.04-56d30ca95c62　社内配布用</p></header><p class="note">制度の一般的な定義の再照会は不要です。案件の不足事実、社内調整、今回は保留する事項を区別します。</p><article><h1>第7次申請：画面・ローカルCLIの入力手順</h1>
+<p>更新日：2026-11-04。配布案内は <a href="第7次申請_変更点と使い方.html">変更点と使い方</a> を参照。この手順は改訂版のツール向けです。本番反映前の画面には新項目は表示されません。</p>
+<h2>画面で作成する場合</h2>
+<ol>
+<li>公募回、申請枠・法人格、実際の申請予定日を選びます。給与0年度目の開始・終了日は、その申請日を含む事業年度です。</li>
+<li>申請額、実際の主たる事業場と申請画面用の地域別最低賃金額、交付決定歴を確認します。交付決定ありの場合は、年度・枠・類型をすべて入力します。曖昧な履歴を削って「なし」にしません。</li>
+<li>適用除外と任意加点の希望を確認します。第7次以降は、賃上げ率の達成義務の有無と別に、全4原本で給与0〜3年度目の総額・対象人数（FTE）・算定根拠・担当者確認を入力します。表明の実施日・方法も事実に従います。</li>
+<li>第7次以降の通常枠は、生産性1〜3年度目の営業利益・人件費・減価償却費・年間労働時間・根拠を別に入力します。計画1年度目は生産性も給与も申請翌事業年度です。基準だけが生産性は前期実績、給与は当期見込みと異なります。</li>
+<li>生産性の基準として前事業年度の損益・年間労働時間を回収します。一部の人・月の時間しかない場合は提出用生成を停止します。労働時間が12か月揃っていても対象年月を確認できない場合は停止します。現行の決定論リーダーが年度情報を返せない台帳、在籍情報を確認できない短期入退社等は、個別確認へ回します。</li>
+<li>不足表示を解消してから実行します。実行後に公募回・申請月・入力資料・計画値等を変えると、前の結果からダウンロードできなくなります。新しい条件で再実行してください。</li>
+</ol>
+<p>加点判定には公募回に対応した専用台帳を使い、画面と台帳の申請月・事業場所在地をそろえます。所在地が食い違う場合も停止します。</p>
+<h2>ローカルCLIで作成する場合</h2>
+<p>開発リポジトリの <code>run.py</code> は、申請前提をUTF-8のJSONで受け取ります。配布プラグインのスキルを直接使う手順とは別です。</p>
+<pre><code class="language-powershell">python -B run.py local --help
+</code></pre>
+<p>既存の入力フォルダ等の指定に、<code>--application-context &lt;確認済みJSONのパス&gt;</code> を加えます。対象は申請書作成を含む <code>application</code> / <code>all</code> です。管理表経由のDrive一括申請書作成は、新しい確認済み項目を管理表から取得できるまで停止します。</p>
+<p>以下は未確認状態の雛形です。空欄・null・falseを実際に確認した内容へ置き換えます。このままでは提出用生成を通しません。第7次以降は <code>forecast_years</code> を0〜3年度目の4行入力します。賃上げ率の義務がないことだけを理由に空配列にしません。通常枠以外は <code>productivity_forecast_years: []</code> を使えます。</p>
+<pre><code class="language-json">{
+  &quot;call_round&quot;: 7,
+  &quot;application_date&quot;: &quot;&quot;,
+  &quot;fiscal_year_start&quot;: &quot;&quot;,
+  &quot;fiscal_year_end&quot;: &quot;&quot;,
+  &quot;frame&quot;: &quot;通常&quot;,
+  &quot;subsidy_amount&quot;: null,
+  &quot;workplace_prefecture&quot;: &quot;&quot;,
+  &quot;workplace_confirmed&quot;: false,
+  &quot;regional_min_wage_yen&quot;: null,
+  &quot;past_grants&quot;: null,
+  &quot;wage_exempt&quot;: null,
+  &quot;wage_exemption_reason&quot;: &quot;&quot;,
+  &quot;optional_wage_bonus&quot;: null,
+  &quot;planned_min_wage_increase&quot;: null,
+  &quot;payroll_scope_confirmed&quot;: false,
+  &quot;declaration_confirmed&quot;: null,
+  &quot;declaration_method&quot;: &quot;&quot;,
+  &quot;declaration_date&quot;: null,
+  &quot;forecast_years&quot;: [
+    {&quot;total_salary&quot;: null, &quot;employee_count_fte&quot;: null, &quot;source&quot;: &quot;&quot;, &quot;confirmed&quot;: false},
+    {&quot;total_salary&quot;: null, &quot;employee_count_fte&quot;: null, &quot;source&quot;: &quot;&quot;, &quot;confirmed&quot;: false},
+    {&quot;total_salary&quot;: null, &quot;employee_count_fte&quot;: null, &quot;source&quot;: &quot;&quot;, &quot;confirmed&quot;: false},
+    {&quot;total_salary&quot;: null, &quot;employee_count_fte&quot;: null, &quot;source&quot;: &quot;&quot;, &quot;confirmed&quot;: false}
+  ],
+  &quot;productivity_forecast_years&quot;: [
+    {&quot;operating_profit&quot;: null, &quot;personnel_cost&quot;: null, &quot;depreciation&quot;: null, &quot;total_annual_hours&quot;: null, &quot;source&quot;: &quot;&quot;, &quot;confirmed&quot;: false},
+    {&quot;operating_profit&quot;: null, &quot;personnel_cost&quot;: null, &quot;depreciation&quot;: null, &quot;total_annual_hours&quot;: null, &quot;source&quot;: &quot;&quot;, &quot;confirmed&quot;: false},
+    {&quot;operating_profit&quot;: null, &quot;personnel_cost&quot;: null, &quot;depreciation&quot;: null, &quot;total_annual_hours&quot;: null, &quot;source&quot;: &quot;&quot;, &quot;confirmed&quot;: false}
+  ],
+  &quot;manual_review_reasons&quot;: []
+}
+</code></pre>
+<ul>
+<li>日付は <code>YYYY-MM-DD</code>、枠は <code>通常</code> / <code>インボイス</code> / <code>セキュリティ</code>。今回の4原本は通常・インボイスの法人／個人です。</li>
+<li><code>past_grants: null</code> は未確認、<code>[]</code> は交付決定なしと確認済み。交付決定ありは <code>[{"year": 2024, "frame": "通常枠", "decided": true}]</code> のように全履歴を記録します。曖昧な枠・類型は確定しません。</li>
+<li><code>forecast_years</code> は給与0〜3年度目の順です。人数変動がある場合も各年の確認値を入れます。自動の3%増額や前期実績の流用はしません。</li>
+<li><code>productivity_forecast_years</code> は生産性1〜3年度目の順です。生産性0年度目の前期実績は入力資料から取得し、3%／4%の初年度・3年平均を検算します。</li>
+<li><code>source</code> は算定根拠と確認記録です。数値を入れただけで <code>confirmed: true</code> にせず、対象範囲と年度も確認してください。</li>
+<li>複数県、算入範囲未確認等は <code>manual_review_reasons</code> に理由を入れ、解消するまで確定生成しません。</li>
+</ul>
+<p>任意加点の最賃上乗せは通常150万円未満・インボイス・セキュリティの基本＋30円／更なる＋50円と、通常150万円以上の任意＋50円を分けて入力します。</p>
+<p>不足・未確認はエラーとして表示し、申請前提の不備はAI抽出を始める前に停止します。前期の時間不足等は資料読取後に停止します。給与0年度目の見込み値と根拠は保存しますが、効果報告での比較基準は未確定のままです。</p></article></main></body></html>

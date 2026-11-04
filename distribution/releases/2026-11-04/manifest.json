@@ -1,0 +1,75 @@
+{
+  "release": "2026-11-04",
+  "edition": "第7次・公式資料再照合の訂正版",
+  "source_commit": "56d30ca95c62245fb955885b05c808a06e1b3c44",
+  "version": "2026.11.04-56d30ca95c62",
+  "files": {
+    "第7次申請_公式資料に基づく対応ガイド_2026-11-04_訂正版.pdf": {
+      "sha256": "f4d840d08f81dbbe4f52b9be3ee98d35172ed1d6c65b56c791ebec3be6a6cabc",
+      "bytes": 187660
+    },
+    "第7次申請_配布資料_2026-11-04_訂正版.zip": {
+      "sha256": "94010aa0cfce64be7bfa63b2e035564aab898e03ac6d74615882b95454dd922c",
+      "bytes": 204556
+    },
+    "html/第7次原本_改訂内容と再取込手順.html": {
+      "sha256": "4006159d905917c88b60981522887f81bf22566b6fa30b924c1ba37c2669bf8b",
+      "bytes": 6872
+    },
+    "html/第7次申請_ツール入力手順.html": {
+      "sha256": "6db964604499010816c13525e624286e0d6a54b845baf0a75d0ad7670c8d13c6",
+      "bytes": 9068
+    },
+    "html/第7次申請_公式資料で判断できることと確認の範囲.html": {
+      "sha256": "540009832d386dec720a3d3cc1990f172b9597be6a9712bdac299c8958ec1a20",
+      "bytes": 16993
+    },
+    "html/第7次申請_変更点と使い方.html": {
+      "sha256": "b126d5956a711c2d71b85e41bbe63b00cf057489cc0219ebdae3e7b8a3e06b05",
+      "bytes": 21553
+    },
+    "html/第7次申請_確認待ち事項.html": {
+      "sha256": "58c2920b13c462494a185ad4da7e47feb41c9d22470f0db5e906c5204f1a5a29",
+      "bytes": 6207
+    }
+  },
+  "source_inputs_sha256": {
+    "docs/第7次原本_改訂内容と再取込手順.md": "3985961604afbbb5adf2924a15c223cc2ca477bc8e16242061c69d5897612fd6",
+    "docs/第7次申請_ツール入力手順.md": "86d46f7a5dffbd81a0ebfbd3eaa08a755e1ab4b112acdcf07016013382b366b0",
+    "docs/第7次申請_公式資料で判断できることと確認の範囲.md": "c360182ccf9610af3e23afd9b2a26c4ac7c87270a02d98bd260c1fe2dd1faec4",
+    "docs/第7次申請_変更点と使い方.md": "f6b6c8b70a27c5a83aeed8647a27360d0a0716fe8f4ab9d28797e62377c803cb",
+    "docs/第7次申請_確認待ち事項.md": "ecc7db9598c49f654eee136837261b638e4475f80d36aef34f4694b0218e8d73"
+  },
+  "plugin": {
+    "managed_in": "private hojokin-plugins repository",
+    "commit": "6c6ed9c77547f3e59d23692bc8b1e4d92bc111e3",
+    "version": "2026.11.04-56d30ca95c62",
+    "zip_sha256": "13525bae5916c8b86af0e7244e1759fe5eee9728eacbbd86e6f7ff61ba378c9a",
+    "zip_archived_here": false
+  },
+  "manager_candidate": {
+    "source_templates": "ツール/第7次以降/ と 補助金加点/第7次以降/ のGit管理原本",
+    "zip_sha256": "1eb68024a4a015fae36515d2f7c88e6e57fd973dc2f243c0ef677ec4a40ad746",
+    "zip_archived_here": false
+  },
+  "verification": {
+    "synthetic": 68,
+    "subtests": 74,
+    "offline_regression": 79,
+    "offline_skipped": 4,
+    "distribution_scripts": 9,
+    "distribution_checks": 123,
+    "pdf_pages": 6,
+    "html_files": 5,
+    "recreated_html_byte_identical": true,
+    "recreated_pdf_text_identical": true,
+    "existing_output_overwrite_refused": true,
+    "expanded_pii_review": {
+      "sensitive_hits": 0,
+      "unresolved": 0,
+      "typed_pdf_datetime_false_positives": 4,
+      "allowlist_changed": false
+    }
+  },
+  "delivery_status": "未配信。本番反映・Drive更新・pushは未実施"
+}
