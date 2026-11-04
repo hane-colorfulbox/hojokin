@@ -53,6 +53,7 @@ ROUND7_GUIDES = (
     'docs/第7次申請_確認待ち事項.md',
     'docs/第7次原本_改訂内容と再取込手順.md',
     'docs/第7次申請_ツール入力手順.md',
+    'docs/第7次申請_公式資料で判断できることと確認の範囲.md',
 )
 
 GUIDE_DOCS = ROUND7_GUIDES + (

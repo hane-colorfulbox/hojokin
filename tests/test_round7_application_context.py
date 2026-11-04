@@ -70,13 +70,35 @@ class ApplicationContextTests(unittest.TestCase):
             validate_application_context(None)
 
     def test_unselected_wage_requirements_are_not_mandatory(self):
-        c = context(subsidy_amount=1_499_999, forecast_years=[],
-                    payroll_scope_confirmed=False, declaration_confirmed=None,
+        c = context(subsidy_amount=1_499_999, declaration_confirmed=None,
                     declaration_method='', declaration_date=None,
                     planned_min_wage_increase=None)
         validate_application_context(c, '通常枠_2026')
         self.assertFalse(wage_requirements(c).selected)
+        self.assertEqual(build_application_wage_plan(c)['wage_total_base'], 10_000_000)
+
+    def test_round7_plan_inputs_are_required_without_growth_obligation(self):
+        for frame in ('通常', 'インボイス', 'セキュリティ'):
+            with self.subTest(frame=frame), self.assertRaisesRegex(ApplicationValidationError, '4年分'):
+                validate_application_context(context(frame=frame, subsidy_amount=1_499_999,
+                    forecast_years=[], payroll_scope_confirmed=False, declaration_confirmed=None,
+                    declaration_method='', declaration_date=None, planned_min_wage_increase=None))
+        # 旧制度の非選択案件の正常な計算条件は維持する。
+        c = context(call_round=6, subsidy_amount=1_499_999, forecast_years=[],
+                    payroll_scope_confirmed=False, declaration_confirmed=None,
+                    declaration_method='', declaration_date=None, planned_min_wage_increase=None)
+        validate_application_context(c)
         self.assertIsNone(build_application_wage_plan(c))
+
+    def test_no_growth_obligation_does_not_require_positive_growth_or_declaration(self):
+        v = values(subsidy_amount=1_499_999, declaration_confirmed=None,
+                   declaration_method='', declaration_date=None, planned_min_wage_increase=None)
+        for year, amount in zip(v['forecast_years'], (10_000_000, 9_000_000, 8_000_000, 7_000_000)):
+            year['total_salary'] = amount
+        c = ApplicationContext.from_dict(v)
+        validate_application_context(c)
+        self.assertFalse(wage_requirements(c).selected)
+        self.assertEqual(build_application_wage_plan(c)['wage_total_y3'], 7_000_000)
 
     def test_150_man_boundary(self):
         c = context()
@@ -125,10 +147,50 @@ class ApplicationContextTests(unittest.TestCase):
             with self.subTest(updates=updates), self.assertRaises(ApplicationValidationError):
                 validate_application_context(context(**updates))
 
-    def test_optional_bonus_requires_50_yen(self):
+    def test_large_normal_optional_bonus_requires_50_yen(self):
         with self.assertRaises(ApplicationValidationError):
             validate_application_context(context(optional_wage_bonus=True, planned_min_wage_increase=30))
         validate_application_context(context(optional_wage_bonus=True, planned_min_wage_increase=50))
+
+    def test_optional_basic_bonus_30_and_further_bonus_50_have_correct_frame_scope(self):
+        for frame, amount in (('通常', 1_499_999), ('インボイス', 1_499_999),
+                              ('インボイス', 1_500_000), ('セキュリティ', 1_500_000)):
+            for increase in (30, 49, 50):
+                with self.subTest(frame=frame, amount=amount, increase=increase):
+                    c = context(frame=frame, subsidy_amount=amount,
+                                optional_wage_bonus=True, planned_min_wage_increase=increase)
+                    validate_application_context(c)
+                    self.assertEqual(wage_requirements(c).min_wage_increase, 30)
+                    self.assertEqual(wage_requirements(c).required_rate, Decimal('0.03'))
+            with self.subTest(frame=frame), self.assertRaisesRegex(ApplicationValidationError, '30円'):
+                validate_application_context(context(frame=frame, subsidy_amount=amount,
+                    optional_wage_bonus=True, planned_min_wage_increase=29))
+        # 150万円の境界を越えた通常枠では基本加点+30円を誤って採用しない。
+        for increase in (30, 49):
+            with self.subTest(increase=increase), self.assertRaisesRegex(ApplicationValidationError, '50円'):
+                validate_application_context(context(subsidy_amount=1_500_000,
+                    optional_wage_bonus=True, planned_min_wage_increase=increase))
+
+    def test_optional_basic_bonus_growth_and_prior_grant_conditions_remain_independent(self):
+        v = values(subsidy_amount=1_499_999, optional_wage_bonus=True, planned_min_wage_increase=30)
+        v['forecast_years'][1]['total_salary'] = 10_000_000
+        c = ApplicationContext.from_dict(v)
+        validate_application_context(c)  # 任意のみは1年後要件を追加せず、3年平均を検証。
+        self.assertFalse(wage_requirements(c).first_year_required)
+        v['forecast_years'][3]['total_salary'] = 10_500_000
+        with self.assertRaisesRegex(ApplicationValidationError, '3年間'):
+            validate_application_context(ApplicationContext.from_dict(v))
+        v = values(subsidy_amount=1_499_999, optional_wage_bonus=True, planned_min_wage_increase=30,
+                   past_grants=[{'year': 2024, 'frame': '通常枠', 'decided': True}])
+        for year, amount in zip(v['forecast_years'], (10_000_000, 10_400_000, 10_900_000, 11_500_000)):
+            year['total_salary'] = amount
+        c = ApplicationContext.from_dict(v)
+        validate_application_context(c)
+        self.assertEqual(wage_requirements(c).required_rate, Decimal('0.035'))
+        self.assertTrue(wage_requirements(c).first_year_required)
+        v['forecast_years'][1]['total_salary'] = 10_300_000
+        with self.assertRaisesRegex(ApplicationValidationError, '1年後'):
+            validate_application_context(ApplicationContext.from_dict(v))
 
     def test_forecast_not_inferred_from_prior_actuals(self):
         with self.assertRaises(ApplicationValidationError):
@@ -410,8 +472,41 @@ class TemplateOutputTests(unittest.TestCase):
             self.assertIn('未確定', text)
             self.assertIn('担当者確認の合成見込表', text)
             self.assertIn('担当者確認の合成生産性予算', text)
-            self.assertIn('1年度目\n2026-04-01〜2027-03-31', text)
+            self.assertIn('1年度目\n2027-04-01〜2028-03-31', text)
             wb.close()
+
+    def test_salary_and_productivity_plans_share_next_fiscal_year_periods(self):
+        cases = [
+            ('3月決算', '2026-04-01', '2027-03-31', '2025-04-01', '2026-03-31',
+             ['2027-04-01〜2028-03-31', '2028-04-01〜2029-03-31', '2029-04-01〜2030-03-31']),
+            ('12月決算', '2026-01-01', '2026-12-31', '2025-01-01', '2025-12-31',
+             ['2027-01-01〜2027-12-31', '2028-01-01〜2028-12-31', '2029-01-01〜2029-12-31']),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / 'template.xlsx'
+            mapping = self.template(source)
+            for name, start, end, prior_start, prior_end, expected in cases:
+                with self.subTest(name=name):
+                    out = Path(td) / f'{name}.xlsx'
+                    c = context(application_date='2026-10-15', declaration_date='2026-10-01',
+                                fiscal_year_start=start, fiscal_year_end=end)
+                    fi = actual_financial(fiscal_year_start=prior_start, fiscal_year_end=prior_end)
+                    fill_template(source, out, mapping, {}, ExtractionResult(financial=fi),
+                                  application_context=c, productivity_total_annual_hours=1000)
+                    wb = openpyxl.load_workbook(out, data_only=False)
+                    rows = list(wb['申請前提・給与見込'].values)
+                    salary_periods = {row[0]: row[1] for row in rows if type(row[0]) is int}
+                    productivity_periods = {
+                        int(row[0].split('年度目')[0]): row[0].split('\n')[1]
+                        for row in rows if isinstance(row[0], str)
+                        and row[0].startswith(('1年度目\n', '2年度目\n', '3年度目\n'))}
+                    for idx, period in enumerate(expected, 1):
+                        self.assertEqual(salary_periods[idx], period)
+                        self.assertEqual(productivity_periods[idx], period)
+                    self.assertEqual(salary_periods[0], f'{start}〜{end}')
+                    self.assertIn(('生産性基準年度（前事業年度）', f'{prior_start}〜{prior_end}', None, None, None, None), rows)
+                    self.assertNotEqual(productivity_periods[1], salary_periods[0])
+                    wb.close()
 
     def test_missing_context_or_mismatched_template_does_not_create_file(self):
         with tempfile.TemporaryDirectory() as td:
@@ -444,16 +539,16 @@ class TemplateOutputTests(unittest.TestCase):
                               productivity_total_annual_hours=1000)
             self.assertFalse(out.exists())
 
-    def test_unselected_plan_clears_legacy_formulas(self):
+    def test_unselected_growth_still_outputs_confirmed_plan_and_clears_declaration(self):
         with tempfile.TemporaryDirectory() as td:
             source, out = Path(td) / 'template.xlsx', Path(td) / 'out.xlsx'
             mapping = self.template(source)
-            c = context(subsidy_amount=1_000_000, forecast_years=[], declaration_confirmed=None,
-                        declaration_method='', declaration_date=None, payroll_scope_confirmed=False)
+            c = context(subsidy_amount=1_000_000, declaration_confirmed=None,
+                        declaration_method='', declaration_date=None)
             fill_template(source, out, mapping, {}, self.extraction(), application_context=c,
                           productivity_total_annual_hours=1000)
             wb = openpyxl.load_workbook(out)
-            self.assertIsNone(wb['申請内容'].cell(mapping.shinsei['wage_total_base'], 3).value)
+            self.assertEqual(wb['申請内容'].cell(mapping.shinsei['wage_total_base'], 3).value, 10_000_000)
             self.assertIsNone(wb['申請内容'].cell(mapping.shinsei['wage_raise_declaration'], 3).value)
             wb.close()
 

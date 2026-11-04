@@ -854,7 +854,7 @@ def _write_application_context_sheet(wb, context: ApplicationContext, wage_plan:
         ('過去交付決定', context.past_grant_text()),
         ('主たる事業場の地域最賃', f'{context.workplace_prefecture}/{context.regional_min_wage_yen}円'
          if context.workplace_confirmed else '旧制度原本の記載・ヒアリングを確認'),
-        ('給与計画の必要年率', f'{req.required_rate * 100}%' if req.selected else '申請必須・任意加点の選択なし'),
+        ('給与計画の必要年率', f'{req.required_rate * 100}%' if req.selected else '賃上げ率の義務なし（確認済み計画は別途記録）'),
         ('生産性の必要年率', f'{req.productivity_rate * 100}%（給与の過去交付条件とは別）'),
         ('表明確認', '確認済み' if context.declaration_confirmed is True else
          '未実施' if context.declaration_confirmed is False else '当該賃上げ要件を選択していない'),
@@ -914,8 +914,9 @@ def _write_application_context_sheet(wb, context: ApplicationContext, wage_plan:
             cell.font = Font(bold=True, color='FFFFFF')
         ws.row_dimensions[ws.max_row].height = 34
         for idx, year in enumerate(context.productivity_forecast_years, start=1):
-            # 生産性の0年度目は前事業年度。給与0年度目（申請当年度）と1年ずれる。
-            start = context.fiscal_year_start.replace(year=context.fiscal_year_start.year + idx - 1)
+            # 生産性の基準だけは前事業年度実績。計画1〜3年度目は申請時点の
+            # 翌事業年度からの3年間で、給与計画1〜3年度目と同じ対象期間。
+            start = context.fiscal_year_start.replace(year=context.fiscal_year_start.year + idx)
             end = start.replace(year=start.year + 1) - timedelta(days=1)
             ws.append([f'{idx}年度目\n{period_text(start, end)}', year.operating_profit,
                        year.personnel_cost, year.depreciation, year.total_annual_hours, year.source])

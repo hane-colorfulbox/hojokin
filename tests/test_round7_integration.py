@@ -5,20 +5,24 @@ import ast
 import hashlib
 import sys
 import subprocess
+import tempfile
 import unittest
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import openpyxl
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
-from hojokin.application_context import validate_application_context
+from hojokin.application_context import ApplicationContext, validate_application_context
 from hojokin.config import get_mapping, detect_prefecture
-from hojokin.template_filler import verify_template_labels
+from hojokin.template_filler import fill_template, verify_template_labels
+from hojokin.models import ExtractionResult, FinancialData
 from hojokin.template_versions import (APPLICATION_FILENAMES, select_application_template,
                                       validate_application_template_version)
 from hojokin.result_identity import processing_identity
@@ -75,6 +79,55 @@ class Round7IntegrationTests(unittest.TestCase):
         }
         for name, digest in expected.items():
             self.assertEqual(hashlib.sha256((ROOT/'補助金加点/第7次以降'/name).read_bytes()).hexdigest(), digest)
+
+    def test_real_normal_template_records_official_next_fiscal_year_plan_periods(self):
+        source = select_application_template(ROOT, '通常枠_2026', 7)
+        cases = [
+            ('2026-04-01', '2027-03-31', '2025-04-01', '2026-03-31',
+             ['2027-04-01〜2028-03-31', '2028-04-01〜2029-03-31', '2029-04-01〜2030-03-31']),
+            ('2026-01-01', '2026-12-31', '2025-01-01', '2025-12-31',
+             ['2027-01-01〜2027-12-31', '2028-01-01〜2028-12-31', '2029-01-01〜2029-12-31']),
+        ]
+        with tempfile.TemporaryDirectory() as td:
+            for start, end, prior_start, prior_end, expected in cases:
+                with self.subTest(fiscal_start=start):
+                    c = ApplicationContext.from_dict({
+                        'call_round': 7, 'application_date': '2026-10-15',
+                        'fiscal_year_start': start, 'fiscal_year_end': end,
+                        'frame': '通常', 'subsidy_amount': 1_000_000, 'past_grants': [],
+                        'optional_wage_bonus': False, 'wage_exempt': False,
+                        'payroll_scope_confirmed': True,
+                        'workplace_prefecture': '東京都', 'workplace_confirmed': True,
+                        'regional_min_wage_yen': 1280,
+                        # 率義務なしでも確認済みの0〜3計画をすべて入力する。
+                        'forecast_years': [dict(total_salary=10_000_000, employee_count_fte=10,
+                                                source='確認済み合成給与計画', confirmed=True) for _ in range(4)],
+                        'productivity_forecast_years': [dict(operating_profit=2_000_000, personnel_cost=4_000_000,
+                            depreciation=0, total_annual_hours=1000, source='確認済み合成事業計画', confirmed=True)
+                            for _ in range(3)],
+                    })
+                    fi = FinancialData(fiscal_year_start=prior_start, fiscal_year_end=prior_end,
+                                       operating_profit=1_000_000, salary=4_000_000)
+                    output = Path(td) / f'{start}.xlsx'
+                    fill_template(source, output, get_mapping('通常枠_2026'), {},
+                                  ExtractionResult(financial=fi), application_context=c,
+                                  productivity_total_annual_hours=1000)
+                    wb = openpyxl.load_workbook(output)
+                    rows = list(wb['申請前提・給与見込'].values)
+                    salary = {row[0]: row[1] for row in rows if type(row[0]) is int}
+                    productivity = {int(row[0].split('年度目')[0]): row[0].split('\n')[1]
+                                    for row in rows if isinstance(row[0], str)
+                                    and row[0].startswith(('1年度目\n', '2年度目\n', '3年度目\n'))}
+                    for year, period in enumerate(expected, 1):
+                        self.assertEqual(salary[year], period)
+                        self.assertEqual(productivity[year], period)
+                    self.assertEqual(salary[0], f'{start}〜{end}')
+                    self.assertIn(('生産性基準年度（前事業年度）', f'{prior_start}〜{prior_end}', None, None, None, None), rows)
+                    ws = wb['申請内容']
+                    mapping = get_mapping('通常枠_2026')
+                    self.assertEqual(ws.cell(mapping.shinsei['wage_total_base'], 3).value, 10_000_000)
+                    self.assertIsNone(ws.cell(mapping.shinsei['wage_raise_declaration'], 3).value)
+                    wb.close()
 
     def test_application_preflight_stops_before_extractor(self):
         tree = ast.parse((ROOT/'app.py').read_text(encoding='utf-8'))

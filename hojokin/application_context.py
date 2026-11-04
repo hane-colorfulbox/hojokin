@@ -217,7 +217,13 @@ def wage_requirements(context: ApplicationContext) -> WageRequirements:
     large_normal = frame == '通常' and (context.subsidy_amount or 0) >= 1_500_000
     mandatory = (wage_past or large_normal) and context.wage_exempt is not True
     selected = mandatory or context.optional_wage_bonus is True
-    minimum = 50 if context.optional_wage_bonus is True else (30 if large_normal and mandatory else 0)
+    # 第7次：通常150万円未満・インボイス・セキュリティは基本加点+30円、
+    # +50円以上は更なる加点。通常150万円以上の任意加点は+50円。
+    # 任意加点を選ばない通常150万円以上の申請必須要件は+30円のまま。
+    if context.optional_wage_bonus is True:
+        minimum = 50 if large_normal or not context.is_round7 else 30
+    else:
+        minimum = 30 if large_normal and mandatory else 0
     return WageRequirements(
         mandatory=mandatory,
         selected=selected,
@@ -302,7 +308,10 @@ def validate_application_context(context: ApplicationContext | None, template_ty
             issues.append('表明日が交付申請日より後になっています')
         if req.min_wage_increase and (not _finite_number(context.planned_min_wage_increase) or context.planned_min_wage_increase < req.min_wage_increase):
             issues.append(f'事業場内最低賃金の計画は地域別最低賃金＋{req.min_wage_increase}円以上の確認が必要です')
-    if context.forecast_years or (context.is_round7 and req.selected):
+    # 率義務の有無と計画入力の要否を分ける。第7次は適用外でも給与0〜3年度目の
+    # 計画値が必要（通常枠FAQ No.39／各枠の交付申請マニュアル画面指示）。
+    forecast_required = context.is_round7
+    if context.forecast_years or forecast_required:
         if context.payroll_scope_confirmed is not True:
             issues.append('給与見込の対象従業員・FTE・算入範囲が未確認です')
         if len(context.forecast_years) != 4:

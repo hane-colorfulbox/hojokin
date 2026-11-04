@@ -332,7 +332,9 @@
       ],
       "content_length": "13838654",
       "verified": "2026-11-04",
-      "verification_scope": "給与0〜3年度目、基準年度、表明・関連加点"
+      "verification_scope": "給与0〜3年度目、基準年度、表明・関連加点",
+      "sha256": "9278aabff9c8434e7e5b322a95f4c29f88146df7344d85e33d0c6a4db794c40a",
+      "verification_note": "再取得した現行版は当日取得済み版と一致。p.86/88/89/91を再照合。計画年度を訂正。"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_manual_kofu_fukusu.pdf",
@@ -490,7 +492,8 @@
         "hojokin/subsidy_rules.py",
         "hojokin/application_context.py",
         "引き継ぎ/02_制度知識ベース.md"
-      ]
+      ],
+      "sha256": "bc5102711c5363693b8d888719c1533f579855223af9687212b3e2bc2ea5ae1f"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_kitei_tsujyo.pdf",
@@ -506,7 +509,8 @@
         "hojokin/subsidy_rules.py",
         "hojokin/application_context.py",
         "引き継ぎ/02_制度知識ベース.md"
-      ]
+      ],
+      "sha256": "05f5127efe0b1dd495d201185ebb1105cf468ad419578185e1f722c43b0cb29d"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_koubo_invoice.pdf",
@@ -522,7 +526,8 @@
         "hojokin/subsidy_rules.py",
         "hojokin/application_context.py",
         "引き継ぎ/02_制度知識ベース.md"
-      ]
+      ],
+      "sha256": "b93e4135d5e0f432afb34ffd538577a717ca352dc7b1db8ad22b4e23913ead2d"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_kitei_invoice.pdf",
@@ -554,7 +559,8 @@
         "hojokin/subsidy_rules.py",
         "hojokin/application_context.py",
         "引き継ぎ/02_制度知識ベース.md"
-      ]
+      ],
+      "sha256": "8c11730ca16ab88af4b1bb8024e9a5a264c3ece0917c383dcf35e1ad9b6ca96e"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_kitei_denshi.pdf",
@@ -586,7 +592,8 @@
         "hojokin/subsidy_rules.py",
         "hojokin/application_context.py",
         "引き継ぎ/02_制度知識ベース.md"
-      ]
+      ],
+      "sha256": "18b20143adb84a1092b45c29cd94e1bbfc60cb18ebaa879c276b41a5ccb97794"
     },
     {
       "url": "https://it-shien.smrj.go.jp/pdf/it2026_kaitei_kitei_security.pdf",
@@ -654,12 +661,67 @@
         "hojokin/application_context.py",
         "引き継ぎ/02_制度知識ベース.md"
       ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_faq_tsujyo.pdf",
+      "title": "公開FAQ（tsujyo）",
+      "label": "公開FAQ（tsujyo）",
+      "verified": "2026-11-04",
+      "official_updated": "2026-06-03",
+      "sha256": "cc0bc34b137f4c36bee4eac7edaf0a125462dbafb3ff3c498a7dc397b875becc",
+      "verification_note": "旧基準年度の回答は後発の第7回以降公表資料を優先。未変更の定義・入力要否等は参照。",
+      "depends": [
+        "docs/第7次申請_公式資料で判断できることと確認の範囲.md",
+        "docs/第7次申請_確認待ち事項.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_faq_invoice.pdf",
+      "title": "公開FAQ（invoice）",
+      "label": "公開FAQ（invoice）",
+      "verified": "2026-11-04",
+      "official_updated": "2026-06-03",
+      "sha256": "987bb46e0c770447c7213b879c526602edcdac693d495c45a7b44fca5146fdf4",
+      "verification_note": "旧基準年度の回答は後発の第7回以降公表資料を優先。未変更の定義・入力要否等は参照。",
+      "depends": [
+        "docs/第7次申請_公式資料で判断できることと確認の範囲.md",
+        "docs/第7次申請_確認待ち事項.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_faq_denshi.pdf",
+      "title": "公開FAQ（denshi）",
+      "label": "公開FAQ（denshi）",
+      "verified": "2026-11-04",
+      "official_updated": "2026-06-03",
+      "sha256": "541c7ea464f25e167877893507ce08b25d0dd4644a60eb4be106f9a4cee92423",
+      "verification_note": "旧基準年度の回答は後発の第7回以降公表資料を優先。未変更の定義・入力要否等は参照。",
+      "depends": [
+        "docs/第7次申請_公式資料で判断できることと確認の範囲.md",
+        "docs/第7次申請_確認待ち事項.md"
+      ]
+    },
+    {
+      "url": "https://it-shien.smrj.go.jp/pdf/it2026_faq_security.pdf",
+      "title": "公開FAQ（security）",
+      "label": "公開FAQ（security）",
+      "verified": "2026-11-04",
+      "official_updated": "2026-06-03",
+      "sha256": "46ac55c5518d047472e68db0eb0957edfc9f86bbe561c6d26ed2516b8197f69e",
+      "verification_note": "旧基準年度の回答は後発の第7回以降公表資料を優先。未変更の定義・入力要否等は参照。",
+      "depends": [
+        "docs/第7次申請_公式資料で判断できることと確認の範囲.md",
+        "docs/第7次申請_確認待ち事項.md"
+      ]
     }
   ],
-  "last_verified_scope": "第7次変更に関係する新規項目と申請マニュアル。旧資料の全件再確認を意味しない。",
+  "last_verified_scope": "第7次の一般的申請ルール26項目、要領4枠・通常規程・現行申請manual・公開FAQ・公式加点様式を再照合。制度照会と個別事実・社内運用を分離。旧資料の全件再確認を意味しない。",
   "round7_confirmation": {
     "salary_year0": "見込み値。窓口担当が事務局へ照会した回答を利用者提示の連絡で確認。",
     "effect_report_baseline": "未確定。実績への読み替えや後年比較は実装しない。",
-    "collection_items": "顧客への回収項目の最終形は窓口担当との確認待ち。"
+    "collection_items": "公式入力項目から社内回収案を用意。既存票の共有・調整は社内運用で、制度上の一括再照会は不要。",
+    "productivity_period": "前期実績が基準。計画1〜3年度目は給与と同じ申請翌事業年度から。前版の申請当年度開始は誤りとして訂正。",
+    "salary_plan_input": "通常FAQ No.39と各枠manual p.86/89/91に基づき、賃上げ率義務の有無と別に0〜3計画を入力。",
+    "inquiry_scope": "対象者・FTE・通常手当の一般定義は公式から判断。課税通勤は一般定義からの解釈。社内運用と個別事実、既知保留を分離。"
   }
 }

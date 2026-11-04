@@ -63,11 +63,12 @@ def render_application_context(template_type: str, call_round: int | None):
     optional = None if optional_state == '未確認' else optional_state == '希望する'
     min_wage_increase = st.number_input('計画する事業場内最低賃金の上乗せ額（円）', min_value=0,
                                        value=0, step=1, key='ctx_mw_increase',
-                                       help='申請必須の＋30円と任意加点の＋50円を区別します。')
+                                       help='通常150万円未満・インボイス枠は任意の基本加点が＋30円、'
+                                            '更なる加点が＋50円です。通常150万円以上の任意加点は＋50円です。')
     payroll_scope_confirmed = st.checkbox('給与に算入する範囲と対象人数を担当者が確認済み',
                                           key='ctx_payroll_scope')
     st.caption('0〜3年度目の見込み総額と対象人数を入力してください。'
-               '任意加点を希望せず賃上げ必須要件にも該当しない場合、給与計画の確認は必須にしません。')
+               '第7次以降は全4原本で、賃上げ率の義務がない場合も4年分の確認済み計画が必要です。')
     forecasts = st.data_editor(
         [{'year': i, 'total_salary': 0, 'employee_count_fte': 0.0, 'source': '', 'confirmed': False}
          for i in range(4)], hide_index=True, disabled=['year'], key='ctx_forecasts',
@@ -82,8 +83,8 @@ def render_application_context(template_type: str, call_round: int | None):
     productivity_rows = []
     if call_round is not None and call_round >= 7 and template_type.startswith('通常枠'):
         st.subheader('労働生産性の確認済み計画')
-        st.caption('生産性の基準は前事業年度です。生産性1年度目は申請当年度、'
-                   '2年度目は翌事業年度、3年度目は翌々事業年度です。給与の年度と区別し、'
+        st.caption('生産性の基準は前事業年度の実績です。1年度目は交付申請時点の翌事業年度、'
+                   '2年度目は翌々事業年度、3年度目はその次の事業年度で、給与1〜3年度目と同じ期間です。'
                    '営業利益・人件費・減価償却費・総労働時間の確認済み値を入力します。'
                    '過去交付歴に応じた3%／4%を別に検算します。')
         productivity = st.data_editor(

@@ -158,10 +158,10 @@ def build(official_source_dir: Path) -> list[dict]:
                     edits.setdefault(sheet_name, {})['A2'] = original + '\n第7次：生産性は前事業年度実績、給与0年度目は申請年度の見込み。給与の提出値は「申請前提・給与見込」を確認。旧計算式を申請値へ流用しない。'
             if '生産性指標給与支給総額計算' in wb:
                 labels = edits.setdefault('生産性指標給与支給総額計算', {})
-                labels.update({'B27': '前事業年度（生産性の実績）',
-                               'C27': '1年度目（申請当年度）確認済み計画',
-                               'D27': '2年度目（翌事業年度）確認済み計画',
-                               'E27': '3年度目（翌々事業年度）確認済み計画'})
+                labels.update({'B27': '前事業年度（生産性の基準実績）',
+                               'C27': '1年度目（申請時点の翌事業年度）確認済み計画',
+                               'D27': '2年度目（申請時点の翌々事業年度）確認済み計画',
+                               'E27': '3年度目（申請時点の3事業年度後）確認済み計画'})
                 labels['B42'] = '生産性計画は未確認（確認済み値と3%／4%の要件を別途検算）'
         elif '確認事項' in wb:
             # Existing comments contain fixed collection assumptions. No row insertion.
