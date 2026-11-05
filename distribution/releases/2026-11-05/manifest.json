@@ -1,0 +1,75 @@
+{
+  "release": "2026-11-05",
+  "edition": "第7次対応版（11/4訂正版を再検証して修正）",
+  "source_commit": "608a459c0c68c1ea964a0f0ef817ea037b9f7f71",
+  "version": "2026.11.05-608a459c0c68",
+  "supersedes": "2026-11-04（未配信のまま差し替え。配布対象にしない）",
+  "files": {
+    "README.txt": {
+      "sha256": "a2a8c85382560e86cdba28e282f423e03838754600a915cba3aedf27cad1c7b4",
+      "bytes": 1666
+    },
+    "第7次申請_担当者向け要点と公式資料の確認範囲_2026-11-05.pdf": {
+      "sha256": "023312ac81dc4057c01db26ab669c48f350a235b996a7de60c8ff77a6b0d939d",
+      "bytes": 264015
+    },
+    "第7次申請_配布資料_2026-11-05.zip": {
+      "sha256": "cf1ff3749d88a74ef26e139e9eb20da766eb0118dd36e599824ccf850b7ff823",
+      "bytes": 287706
+    },
+    "案内HTML/第7次申請_ツール入力手順.html": {
+      "sha256": "144be8ae3982205c46a3fa1654819d2e35827a12d222b22e75ef79d7a7b85cdf",
+      "bytes": 11069
+    },
+    "案内HTML/第7次申請_公式資料で判断できることと確認の範囲.html": {
+      "sha256": "cc5db77a1a6cefc9f6fbee5f9e68ba866e5866fd472a5020832ac721287af3bf",
+      "bytes": 22615
+    },
+    "案内HTML/第7次申請_変更点と使い方.html": {
+      "sha256": "ac4bbb6fd4dc503e74c3396797a7040be6c69f1c832e07a1184fce49009c451d",
+      "bytes": 30410
+    },
+    "案内HTML/第7次申請_担当者向け要点.html": {
+      "sha256": "281f8dfeb0b277805613095ade60738938f8cbe598ef6c5fcbedb70aae39d6ac",
+      "bytes": 9418
+    },
+    "案内HTML/第7次申請_確認待ち事項.html": {
+      "sha256": "06e6d83047f0684fc6f09a8a6e65ec5f9d2acb3eba7599d194c6e715419d44aa",
+      "bytes": 10948
+    },
+    "案内HTML/管理者・開発者向け/第7次原本_改訂内容と再取込手順.html": {
+      "sha256": "ca3e69fae0a99e1f4fb4308ae7e4f64e3cfeae9cb277d7ecb8aedc94cd01ddb7",
+      "bytes": 11428
+    }
+  },
+  "source_inputs_sha256": {
+    "docs/第7次申請_担当者向け要点.md": "e5dff8ae03e3206437d89f2dfa149fd225d765774d4cf1afdeb11b864c94c201",
+    "docs/第7次申請_変更点と使い方.md": "70ce4b83b670fbcb154e2c23c616c9554ff37f08917e26e55e6f024c654cd2e8",
+    "docs/第7次申請_確認待ち事項.md": "3ea64453922da4dbd906fda631614ba4ab3a419c2e94c3f1b964a76d430ebdb4",
+    "docs/第7次申請_公式資料で判断できることと確認の範囲.md": "3c8249a86ece59fcc6b3152444906a48e051cfea94f1d96df0c97f55fa50f44f",
+    "docs/第7次申請_ツール入力手順.md": "19eca950722f0b33e8cb077e22bfeb25eb5877a0329ce56a6b0c06129542e688",
+    "docs/第7次原本_改訂内容と再取込手順.md": "6296d7c1ffc71621cef9dbe308835931ba7828e3a8100ed480307d3cfc99f81e"
+  },
+  "plugin": {
+    "managed_in": "private hojokin-plugins repository",
+    "commit": "1ba5af4",
+    "version": "2026.11.05-608a459c0c68",
+    "zip_sha256": "923ae064eee33e90e71cbb23fb51debb93005a2df4dcc51a8b282a8e70ea1de3",
+    "zip_archived_here": false
+  },
+  "tool": {
+    "app_footer_version": "v0.2.99",
+    "source_commit": "608a459c0c68"
+  },
+  "verification": {
+    "pytest_tests": "127 passed, 101 subtests passed",
+    "plugin_tests": "9/9 passed（HEADから組み立て）",
+    "plugin_gates": "全ゲート合格（同期・frontmatter・構成・相対リンク・古い語・共通ブロック・xlsxメタデータ・PII・claude plugin validate）",
+    "debug_scripts": "82本中81本合格。test_ai_midyear_position_reconcile は v0.2.70 の0円月仕様より前の前提が残る既知の古いテスト（今回の変更前から失敗。顧客データがない環境ではスキップ）。実APIを呼ぶ test_v0_2_24_real_api_minimal は方針により未実行",
+    "pdf_pages": 9,
+    "pdf_line_start_kinsoku": 0,
+    "official_sources_checked": "第7回〜公募要領4枠・交付規程（通常・インボイス）・交付申請マニュアル11/2版・加点項目一覧10/8版・賃金状況報告シート11/2版・FAQ・後年手続きマニュアル11/5版・スマートレジ類型案内・厚労省R7/R8地域別最低賃金一覧（2026-11-05取得）",
+    "review": "8観点の独立検証で53件を指摘→修正後に通しテストと事実の再点検で再確認"
+  },
+  "delivery_status": "未配信。本番反映（hojokin main の push）・プラグイン配信（hojokin-plugins の push）・Drive原本更新・担当者への周知は管理者が行う"
+}
