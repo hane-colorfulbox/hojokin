@@ -4,6 +4,9 @@
 表示セル・プルダウンの額・版メタデータ・通常枠の生産性計画欄だけを変更し、
 図形・その他の数式・入力規則・保護を保持する。行・列の挿入削除はしない。
 通常枠個人は既存のDrive由来パッチ済み原本を入力にする。
+加点判定用の専用台帳だけは、右端に時間換算の対象月額の列（AH〜AT）を足す。既存の行・列は動かさず、
+書式は原本にある番号を使う（styles.xml・workbook.xml は旧回の台帳と同じバイトのまま）。
+専用台帳だけを作り直すときは --ledger-only を使う（公式原本のフォルダは不要）。
 文言の根拠: 第7回〜公募要領（通常枠 印刷p.9〜10・23〜25、インボイス枠 印刷p.8〜9・22）、
 交付申請マニュアル11/2版 p.86〜88、公式「賃金状況報告シート」第7次公募回以降用。
 """
@@ -26,6 +29,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from hojokin.config import get_mapping
 from hojokin.template_versions import APPLICATION_FILENAMES, ROUND7_SUBJECT
+from hojokin.wage_reader import (BWL_BASIS_HEADER_KEYWORD, BWL_COL_BASIS_LATEST, BWL_COL_BASIS_WINDOW_START,
+                                 BWL_DATA_START_ROW, BWL_HEADER_ROW)
 from hojokin.xlsx_surgical import _patch_sheet_xml, _resolve_sheet_part
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -119,16 +124,28 @@ LEDGER_RULES = {
     'B5': ('連番／氏名／「正社員」「パート・アルバイト」「役員」等。判定の母数は各月の常時使用する従業員'
            '（労働基準法第20条の解雇予告が必要な人）。役員・事業主本人と、その月に日雇い・2か月以内の期間雇用・'
            '季節的業務で4か月以内・試用期間14日以内の人は母数に入れない（所定の期間を超えて引き続き使用している人は入れる）。'),
-    'A7': '令和7年10月〜令和8年9月 基本給（F〜Q列）',
-    'B7': ('各暦月の、時間換算の元になる月額（基本給と、職務手当など毎月決まって払う通常の手当）。'
-           '厚生労働省「最低賃金額以上かどうかを確認する方法」で除く6種類（臨時の賃金・賞与など1か月を超える期間ごとの賃金・'
-           '時間外/休日/深夜の割増賃金・精皆勤手当・通勤手当・家族手当）は含めない。通常の手当を含めた人は、'
-           '提出様式の【基本給】欄を原本の基本給に直す。'
+    'A7': '令和7年10月〜令和8年9月 基本給（F〜Q列）・交付申請直近月 基本給（R列）',
+    'B7': ('各暦月の基本給（本給）。職務手当などの手当は含めない（提出様式の【基本給】欄にそのまま書く）。'
+           'R列は加点②用の交付申請月の前月。'
            '在籍していない月は「非在籍」と記入。空欄・0円の月は未確認として扱い、判定が確定しません。'
            '公募回・申請月と暦月の対応を確認し、金額・所定労働時間が分からない月は確定させない。'),
-    'B8': '加点②用。交付申請月の前月の月額（F〜Q列と同じ考え方：基本給＋職務手当などの通常の手当。厚労省方式で除く6種類は含めない）。',
-    'B10': '本台帳には記入不要（ツールが「台帳の月額÷その月の労働時間」で自動算出します。月別労働時間が空欄の月はE列の所定労働時間を使います）。',
+    'A8': '時間換算の対象月額（AH〜AS列・交付申請直近月はAT列）',
+    'B8': ('時間換算給与の分子。各暦月の基本給と、職務手当など毎月決まって払う通常の手当の合計。'
+           '厚生労働省「最低賃金額以上かどうかを確認する方法」で除く6種類（臨時の賃金・賞与など1か月を超える期間ごとの賃金・'
+           '時間外/休日/深夜の割増賃金（固定残業代を含む）・精皆勤手当・通勤手当・家族手当）は含めない。'
+           '通常の手当がない人も基本給と同じ額を入れる（空欄・0円の月は未確認）。'
+           '基本給の欄に「非在籍」と書いた月は空欄でよい。'),
+    'B10': ('本台帳には記入不要（ツールが「時間換算の対象月額（AH〜AT列）÷その月の労働時間」で自動算出し、'
+            '提出様式の【基本給】欄には F〜R列、【時間換算給与】欄にはこの値を書きます。'
+            '月別労働時間が空欄の月はE列の所定労働時間を使います）。'),
 }
+LEDGER_B4 = ('第7次以降用：2025年10月〜2026年9月＋実際の申請月の前月。F〜R列に基本給、AH〜AT列に時間換算の対象月額'
+             '（基本給＋職務手当などの通常の手当）を入力。非在籍は「非在籍」と明記。空欄・0円は未確認として扱います。')
+LEDGER_BASIS_BANNER = ('時間換算の対象月額（必須）— 基本給＋職務手当など毎月決まって払う手当。厚労省方式で除く6種類は含めない。'
+                       '通常の手当がない人も基本給と同じ額')
+LEDGER_LAST_ROW = 26   # 罫線済みデータ行の末尾（原本の既存仕様）
+LEDGER_BASIS_WIDTH = 11
+LEDGER_STYLE = {'banner': '9', 'header': '6', 'data': '7'}   # 原本の S5 / F6 / F7 の書式番号
 # 再生成後に残っていてはいけない旧回・旧運用の表記（数値の一部の「…63円」は対象外）。
 STALE_PATTERNS = (r'R[7７][.．][7７]', r'R[7７]年度改定', r'(?<![0-9０-９,，])[6６][3３]円',
                   r'令和[6６]年\s*[1１][0０]月', r'令和[7７]年度改定', r'適用補助率確認シート',
@@ -176,6 +193,48 @@ def _patch_formula_xml(sheet_xml: str, cells: dict[str, str | None]) -> str:
     return sheet_xml
 
 
+def _add_hourly_basis_block(sheet_xml: str) -> str:
+    """専用台帳の明細シートに AH〜AT列（時間換算の対象月額）の書式付き空セル・結合・列幅を足す。
+
+    既存の行・列・セルは変えない。書式は原本の番号（S5/F6/F7 と同じ）を使い、styles.xml は触らない。
+    値（見出し・バナー）は後段の _patch_sheet_xml が既存セルの書式を保って書く。
+    """
+    first, last = BWL_COL_BASIS_WINDOW_START, BWL_COL_BASIS_LATEST
+    letters = [openpyxl.utils.get_column_letter(c) for c in range(first, last + 1)]
+    if f'<c r="{letters[0]}{BWL_HEADER_ROW}"' in sheet_xml:
+        raise ValueError('台帳の原本にすでに AH〜AT列があります。旧回の台帳を入力にしてください。')
+    for name, style in LEDGER_STYLE.items():
+        ref = {'banner': 'S5', 'header': 'F6', 'data': 'F7'}[name]
+        if not re.search(rf'<c r="{ref}" s="{style}"', sheet_xml):
+            raise ValueError(f'原本の {ref} の書式番号が想定（{style}）と違います。')
+
+    def append_cells(xml: str, row: int, cells: str) -> str:
+        match = re.search(rf'<row r="{row}"[^>]*>.*?</row>', xml, re.S)
+        if match is None:
+            raise ValueError(f'台帳の原本に {row} 行目がありません。')
+        block = match.group(0)
+        block = block[:-len('</row>')] + cells + '</row>'
+        return xml[:match.start()] + block + xml[match.end():]
+
+    sheet_xml = append_cells(sheet_xml, BWL_HEADER_ROW - 1,
+                             f'<c r="{letters[0]}{BWL_HEADER_ROW - 1}" s="{LEDGER_STYLE["banner"]}"/>')
+    sheet_xml = append_cells(sheet_xml, BWL_HEADER_ROW, ''.join(
+        f'<c r="{col}{BWL_HEADER_ROW}" s="{LEDGER_STYLE["header"]}"/>' for col in letters))
+    for row in range(BWL_DATA_START_ROW, LEDGER_LAST_ROW + 1):
+        sheet_xml = append_cells(sheet_xml, row, ''.join(
+            f'<c r="{col}{row}" s="{LEDGER_STYLE["data"]}" t="n"></c>' for col in letters))
+    merge = f'<mergeCell ref="{letters[0]}{BWL_HEADER_ROW - 1}:{letters[-1]}{BWL_HEADER_ROW - 1}"/>'
+    count = re.search(r'<mergeCells count="(\d+)">', sheet_xml)
+    sheet_xml = sheet_xml.replace(count.group(0), f'<mergeCells count="{int(count.group(1)) + 1}">', 1)
+    sheet_xml = sheet_xml.replace('</mergeCells>', merge + '</mergeCells>', 1)
+    cols = ''.join(f'<col width="{LEDGER_BASIS_WIDTH}" customWidth="1" min="{c}" max="{c}"/>'
+                   for c in range(first, last + 1))
+    sheet_xml = sheet_xml.replace('</cols>', cols + '</cols>', 1)
+    sheet_xml = re.sub(r'<dimension ref="([A-Z]+\d+):[A-Z]+(\d+)"/>',
+                       lambda m: f'<dimension ref="{m.group(1)}:{letters[-1]}{m.group(2)}"/>', sheet_xml, count=1)
+    return sheet_xml
+
+
 def _assert_no_stale_text(path: Path) -> None:
     wb = openpyxl.load_workbook(path, read_only=True, data_only=False)
     hits = [f'{ws.title}!{cell.coordinate}' for ws in wb for row in ws for cell in row
@@ -187,15 +246,20 @@ def _assert_no_stale_text(path: Path) -> None:
 
 
 def _patch_book(source: Path, output: Path, edits: dict[str, dict[str, object]],
-                formulas: dict[str, dict[str, str | None]] | None = None) -> dict:
+                formulas: dict[str, dict[str, str | None]] | None = None,
+                structure: dict | None = None) -> dict:
     formulas = formulas or {}
+    structure = structure or {}
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(source) as zin:
         wb = openpyxl.load_workbook(source, read_only=True, data_only=False)
         replacements = {}
-        for sheet_name in dict.fromkeys([*edits, *formulas]):
+        for sheet_name in dict.fromkeys([*structure, *edits, *formulas]):
             part = _resolve_sheet_part(zin, wb.sheetnames.index(sheet_name))
-            xml = _patch_sheet_xml(zin.read(part).decode('utf-8'), edits.get(sheet_name, {}))
+            xml = zin.read(part).decode('utf-8')
+            if sheet_name in structure:
+                xml = structure[sheet_name](xml)
+            xml = _patch_sheet_xml(xml, edits.get(sheet_name, {}))
             replacements[part] = _patch_formula_xml(xml, formulas.get(sheet_name, {})).encode('utf-8')
         core = zin.read('docProps/core.xml').decode('utf-8')
         subject = '<dc:subject xmlns:dc="http://purl.org/dc/elements/1.1/">' + escape(ROUND7_SUBJECT) + '</dc:subject>'
@@ -410,29 +474,49 @@ def build(official_source_dir: Path) -> list[dict]:
             _hearing_edits(wb, unicodedata.normalize('NFC', name), edits)
         wb.close()
         log.append(_patch_book(source, tools_dir / '第7次以降' / name, edits, formulas))
+    log.append(build_ledger_template(tools_dir))
+    return log
+
+
+def build_ledger_template(tools_dir: Path) -> dict:
+    """旧回の専用台帳から第7次以降の専用台帳を作る（見出し・記入ルール・AH〜AT列）。"""
     source = tools_dir / '加点判定用賃金台帳テンプレート.xlsx'
     wb = openpyxl.load_workbook(source, read_only=True, data_only=False)
     sheet = '加点判定用明細'
-    values = {'B4': '第7次以降用：2025年10月〜2026年9月＋実際の申請月の前月。非在籍は「非在籍」と明記。空欄・0円は未確認として扱います。',
-              'AG2': '2026_rounds_7_plus', 'AG3': 7}
+    values = {'B4': LEDGER_B4, 'AG2': '2026_rounds_7_plus', 'AG3': 7}
+    basis_letter = openpyxl.utils.get_column_letter
+    values[f'{basis_letter(BWL_COL_BASIS_WINDOW_START)}{BWL_HEADER_ROW - 1}'] = LEDGER_BASIS_BANNER
     for idx in range(12):
         year, month = (2025, idx + 10) if idx < 3 else (2026, idx - 2)
         label = f'令和{year - 2018}年{month}月'
-        values[f'{openpyxl.utils.get_column_letter(6 + idx)}6'] = label + '\n基本給'
-        values[f'{openpyxl.utils.get_column_letter(19 + idx)}6'] = label + '\n労働時間'
+        values[f'{basis_letter(6 + idx)}6'] = label + '\n基本給'
+        values[f'{basis_letter(19 + idx)}6'] = label + '\n労働時間'
+        values[f'{basis_letter(BWL_COL_BASIS_WINDOW_START + idx)}{BWL_HEADER_ROW}'] = (
+            f'{label}\n{BWL_BASIS_HEADER_KEYWORD}')
+    values[f'{basis_letter(BWL_COL_BASIS_LATEST)}{BWL_HEADER_ROW}'] = f'交付申請直近月\n{BWL_BASIS_HEADER_KEYWORD}'
     edits = {sheet: values}
     if '記入ルール' in wb:
         edits['記入ルール'] = dict(LEDGER_RULES)
     wb.close()
-    log.append(_patch_book(source, tools_dir / '第7次以降' / source.name, edits))
-    return log
+    return _patch_book(source, tools_dir / '第7次以降' / source.name, edits,
+                       structure={sheet: _add_hourly_basis_block})
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--official-source-dir', type=Path, required=True)
+    parser.add_argument('--official-source-dir', type=Path)
+    parser.add_argument('--ledger-only', action='store_true',
+                        help='加点判定用の専用台帳だけを作り直す（公式原本のフォルダは不要）')
     parser.add_argument('--log', type=Path, required=True)
     args = parser.parse_args()
+    if args.ledger_only:
+        result = [build_ledger_template(ROOT / 'ツール')]
+        args.log.parent.mkdir(parents=True, exist_ok=True)
+        args.log.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
+        print(f'第7次以降の専用台帳を作成・再読取確認。ログ {args.log}')
+        return
+    if args.official_source_dir is None:
+        parser.error('--official-source-dir が必要です（専用台帳だけなら --ledger-only）')
     result = build(args.official_source_dir)
     args.log.parent.mkdir(parents=True, exist_ok=True)
     args.log.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')

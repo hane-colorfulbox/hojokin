@@ -10,7 +10,9 @@
   - シート「従業員別明細」
   - ヘッダー行 5: B5=No, C5=氏名, D5=雇用形態,
                   E5=月間平均時間, F5=時給,
-                  G5〜R5=1月〜12月, S5=年間通勤手当
+                  G5〜R5=1月〜12月, S5=年間通勤手当, T5=年間賞与
+  - 月の欄: 課税支給合計の数値、空欄（支給なし／未確認）、または「非在籍」
+    （monthly_presence が False の月だけ。空欄・0円の月を非在籍とは書かない）
   - データ行: B6 以降（テンプレ既定 10 行、超える分は追記）
 
 設計方針:
@@ -35,7 +37,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .wage_reader import MONTH_NAMES, WageEmployee, wareki_label
+from .wage_reader import ABSENT_MARKER, MONTH_NAMES, WageEmployee, wareki_label
 
 logger = logging.getLogger(__name__)
 
@@ -485,8 +487,16 @@ class WriteResult:
     officer_suspects: list[OfficerSuspect] = None
     # 改善 C: パート時間欠落
     part_time_missing: list[PartTimeHoursMissing] = None
+    # 月の欄に「非在籍」と書いた従業員（氏名, 月のラベル, 根拠）
+    absent_rows: list[tuple[str, list[str], str]] = None
+    # 非在籍の明示と給与が重なり、給与を書いた月がある従業員（氏名, 月のラベル）
+    presence_conflicts: list[tuple[str, list[str]]] = None
 
     def __post_init__(self):
+        if self.absent_rows is None:
+            self.absent_rows = []
+        if self.presence_conflicts is None:
+            self.presence_conflicts = []
         if self.officer_matches is None:
             self.officer_matches = []
         if self.officer_suspects is None:
@@ -571,17 +581,31 @@ def _write_meta(
     )
 
 
+def _presence_for_column(emp: WageEmployee, ym: tuple[int, int] | None, cal_idx: int):
+    """その列の在籍状態の明示。キーは (年, 月) を優先し、年のない台帳由来は暦月Index。"""
+    presence = getattr(emp, 'monthly_presence', None) or {}
+    if ym is not None and ym in presence:
+        return presence[ym]
+    return presence.get(cal_idx)
+
+
 def _write_employee_row(
     ws, row: int, no: int, emp: WageEmployee, is_kojin: bool,
     cal_indices: list[int] | None = None,
-) -> None:
+    col_yms: list[tuple[int, int]] | None = None,
+) -> tuple[list[str], list[str]]:
     """1名分のデータをテンプレ行に書き込む。
 
     cal_indices: 月列（G〜R）の各列に入れる monthly_wages の暦月Index。
         事業年度順ヘッダー時は [期首月-1, …, 期末月-1]。None なら暦年順（0..11）。
+    col_yms: 各列の (西暦年, 月)。在籍状態（monthly_presence）の照合に使う。None なら暦月Indexで照合。
+
+    戻り値: (「非在籍」と書いた月のラベル, 非在籍の明示があるのに給与があり給与を書いた月のラベル)
     """
     if cal_indices is None:
         cal_indices = list(range(12))
+    absent_labels: list[str] = []
+    conflict_labels: list[str] = []
     ws.cell(row=row, column=COL_NO, value=no)
     ws.cell(row=row, column=COL_NAME, value=emp.name)
     norm_type = normalize_employment_type(emp.employment_type, is_kojin=is_kojin)
@@ -600,9 +624,19 @@ def _write_employee_row(
     if not skip_hours_and_rate and emp.hourly_rate and emp.hourly_rate > 0:
         ws.cell(row=row, column=COL_HOURLY, value=int(round(emp.hourly_rate)))
 
-    # G〜R列: monthly_wages を月列レイアウト（事業年度順 or 暦年順）に従って書込
+    # G〜R列: monthly_wages を月列レイアウト（事業年度順 or 暦年順）に従って書込。
+    # 在籍状態が明示的に False の月は「非在籍」と書く（空欄・0円から推測しない）。
+    # 非在籍の明示と給与が重なる月は給与を書き、矛盾として報告する（どちらかに決めない）。
     for pos, cal_idx in enumerate(cal_indices[:12]):
         val = emp.monthly_wages[cal_idx] if cal_idx < len(emp.monthly_wages) else None
+        ym = col_yms[pos] if col_yms and pos < len(col_yms) else None
+        label = wareki_label(*ym) if ym else MONTH_NAMES[cal_idx]
+        if _presence_for_column(emp, ym, cal_idx) is False:
+            if val is None or val == 0:
+                ws.cell(row=row, column=COL_MONTH_START + pos, value=ABSENT_MARKER)
+                absent_labels.append(label)
+                continue
+            conflict_labels.append(label)
         if val is None:
             continue
         cell = ws.cell(row=row, column=COL_MONTH_START + pos, value=int(round(val)))
@@ -626,6 +660,7 @@ def _write_employee_row(
     if abonus > 0:
         t_cell = ws.cell(row=row, column=COL_BONUS, value=int(round(abonus)))
         t_cell.number_format = '#,##0'
+    return absent_labels, conflict_labels
 
 
 def _write_memo_sheet(
@@ -645,6 +680,9 @@ def _write_memo_sheet(
     cell_consistency_warnings: list[str] | None = None,
     fiscal_window: list[tuple[int, int]] | None = None,
     bonus_rows: list[tuple[str, float]] | None = None,
+    absent_rows: list[tuple[str, list[str], str]] | None = None,
+    presence_conflicts: list[tuple[str, list[str]]] | None = None,
+    presence_notes: list[tuple[str, str]] | None = None,
 ) -> None:
     """「変換メモ」シートを新規追加して、人間チェック用のメタ情報を書き込む。
 
@@ -722,6 +760,32 @@ def _write_memo_sheet(
             r += 1
     else:
         _set(r, 1, '年間賞与: 検出なし', font=note_font)
+        r += 1
+    r += 1
+
+    # 1-c. 在籍していない月（月の欄に「非在籍」と書いた月）。読み取り側が表の見出しと誤認しないよう、
+    # 「氏名」の見出し行は作らず、月の一覧は「非在籍：」で始める。
+    _set(r, 1, '【在籍していない月（非在籍）】', font=header_font, fill=header_fill)
+    r += 1
+    _set(r, 1, '台帳に印字された入社日・退職日、入力の台帳の「非在籍」だけから判定。空欄・0円の月は'
+               '非在籍にしていません。原本で入社日・退職日を確かめてください。', font=note_font)
+    r += 1
+    for name, labels, basis in (absent_rows or []):
+        _set(r, 1, name)
+        _set(r, 2, '非在籍：' + '、'.join(labels))
+        _set(r, 3, basis or '', font=note_font)
+        r += 1
+    for name, labels in (presence_conflicts or []):
+        _set(r, 1, name, font=Font(bold=True, color='C00000'))
+        _set(r, 2, '⚠ 非在籍の明示と給与が重なる月（給与を記入）：' + '、'.join(labels),
+             font=Font(bold=True, color='C00000'))
+        r += 1
+    for name, note in (presence_notes or []):
+        _set(r, 1, name)
+        _set(r, 2, '⚠ ' + note, font=note_font)
+        r += 1
+    if not absent_rows and not presence_conflicts and not presence_notes:
+        _set(r, 1, '非在籍の月: なし（入社日・退職日の印字がない台帳では判定しません）', font=note_font)
         r += 1
     r += 1
 
@@ -1041,10 +1105,22 @@ def write_wage_ledger_to_template(
     officer_count = 0
     full_year_count = 0
     midyear_count = 0
+    col_yms = list(fiscal_window) if fiscal_window and len(fiscal_window) == 12 else None
+    absent_rows: list[tuple[str, list[str], str]] = []
+    presence_conflicts: list[tuple[str, list[str]]] = []
+    presence_notes: list[tuple[str, str]] = []
     for i, emp in enumerate(employees_list):
         row = FIRST_DATA_ROW + i
-        _write_employee_row(ws, row, no=i + 1, emp=emp, is_kojin=is_kojin,
-                            cal_indices=cal_indices)
+        absent, conflicts = _write_employee_row(
+            ws, row, no=i + 1, emp=emp, is_kojin=is_kojin,
+            cal_indices=cal_indices, col_yms=col_yms)
+        note = getattr(emp, 'presence_note', '') or ''
+        if absent:
+            absent_rows.append((emp.name, absent, note))
+        elif note:
+            presence_notes.append((emp.name, note))
+        if conflicts:
+            presence_conflicts.append((emp.name, conflicts))
         norm_type = normalize_employment_type(emp.employment_type, is_kojin=is_kojin)
         if norm_type == '役員':
             officer_count += 1
@@ -1061,6 +1137,10 @@ def write_wage_ledger_to_template(
         meta_warnings.append(f'役員疑い {len(officer_suspects)}名 → 変換メモシート参照')
     if part_time_missing:
         meta_warnings.append(f'パート時間欠落 {len(part_time_missing)}名 → 変換メモシート参照')
+    if presence_conflicts:
+        meta_warnings.append(f'非在籍と給与が重なる月 {len(presence_conflicts)}名 → 変換メモシート参照')
+    if absent_rows:
+        meta_warnings.append(f'非在籍の月 {len(absent_rows)}名 → 変換メモシートで入社日・退職日を原本と照合')
 
     _write_meta(
         ws,
@@ -1089,6 +1169,9 @@ def write_wage_ledger_to_template(
         cell_consistency_warnings=cell_consistency_warnings,
         fiscal_window=fiscal_window,
         bonus_rows=[(e.name, getattr(e, 'annual_bonus', 0) or 0) for e in employees_list],
+        absent_rows=absent_rows,
+        presence_conflicts=presence_conflicts,
+        presence_notes=presence_notes,
     )
 
     wb.save(str(output_path))
@@ -1113,4 +1196,6 @@ def write_wage_ledger_to_template(
         officer_matches=officer_matches,
         officer_suspects=officer_suspects,
         part_time_missing=part_time_missing,
+        absent_rows=absent_rows,
+        presence_conflicts=presence_conflicts,
     )

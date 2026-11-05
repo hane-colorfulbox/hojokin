@@ -4,7 +4,7 @@ verify_transcript.py（原本転記シートの受入検査）:
   正常 → 0 / 通勤手当が課税支給額に含まれているのに S列が空（控除漏れ）→ 1 / 転記シートなし → 2
 verify_wagebook.py（従業員別明細の検算）:
   通勤手当欄は常に「要確認」になる設計なので正常でも 1。FAIL（役員ラベル未正規化）が出るかで見分ける。
-  シートが無ければ 2。
+  シートが無ければ 2。月の欄の「非在籍」は正常、数値でも「非在籍」でもない文字列は FAIL。
 """
 import shutil
 import tempfile
@@ -40,7 +40,7 @@ TRANSCRIPT_ROWS = [
 ]
 
 
-def make_book(path: Path, *, s_col=True, transcript=True, officer_label=None) -> None:
+def make_book(path: Path, *, s_col=True, transcript=True, officer_label=None, second_months=None) -> None:
     shutil.copy(TEMPLATE, path)
     wb = openpyxl.load_workbook(path)
     ws = wb[LEDGER_SHEET]
@@ -53,7 +53,8 @@ def make_book(path: Path, *, s_col=True, transcript=True, officer_label=None) ->
         if hourly:
             ws.cell(r, COL_HOURLY, hourly)
         for m in range(12):
-            ws.cell(r, COL_MONTH_FIRST + m, monthly)
+            value = second_months[m] if (second_months and i == 1) else monthly
+            ws.cell(r, COL_MONTH_FIRST + m, value)
         if s_col and s:
             ws.cell(r, COL_S, s)
     if transcript:
@@ -94,6 +95,17 @@ def main() -> int:
         r = run_py(VERIFY_BOOK, officer, cwd=work)
         c.check('明細: 役員ラベル未正規化は FAIL', r.returncode == 1 and '役員ラベル未正規化' in r.stdout,
                 r.stdout[-900:])
+        absent = work / 'absent.xlsx'
+        make_book(absent, second_months=['非在籍'] * 3 + [88000] * 9)
+        r = run_py(VERIFY_BOOK, absent, cwd=work)
+        c.check('明細: 入社前の月の「非在籍」は FAIL にせず一覧に出す',
+                r.returncode == 1 and '修正必須 FAIL' not in r.stdout and '[非在籍の月]（1名' in r.stdout,
+                r.stdout[-900:])
+        invalid = work / 'invalid.xlsx'
+        make_book(invalid, second_months=['退職'] * 3 + [88000] * 9)
+        r = run_py(VERIFY_BOOK, invalid, cwd=work)
+        c.check('明細: 月の欄の数値でも「非在籍」でもない文字列は FAIL',
+                r.returncode == 1 and '月の欄の不正な値 1名' in r.stdout, r.stdout[-900:])
         wb = openpyxl.Workbook()
         wb.save(work / 'empty.xlsx')
         r = run_py(VERIFY_BOOK, work / 'empty.xlsx', cwd=work)

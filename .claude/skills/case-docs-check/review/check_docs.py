@@ -139,6 +139,11 @@ WAGE_HEADERS = [  # B5〜T5（プレーン月名。注記混入はツールの�
 # 第7次以降用の原本: ツール/第7次以降/加点判定用賃金台帳テンプレート.xlsx（年月見出しは bonus_headers(7)）。
 BWL_SHEET = '加点判定用明細'
 BWL_HEADER_ROW = 6
+# AH〜AT列＝時間換算の対象月額（基本給＋通常の手当）。第7次以降の台帳テンプレートだけが持つ
+# （hojokin/wage_reader.py の BWL_COL_BASIS_WINDOW_START / BWL_COL_BASIS_LATEST と同じ列）。
+BWL_BASIS_FIRST_COL = 34
+BWL_BASIS_LAST_COL = 46
+BWL_BASIS_LABEL = '時間換算の対象月額'
 # 第1〜6次（旧回）用の見出し。第7次の現役値ではない。bonus_headers() が公募回に応じて
 # 年月部分（第7次以降は令和7年10月〜令和8年9月）を差し替え、No〜時間列と直近月列だけを共用する。
 BWL_HEADERS = [  # B6〜R6（第1〜6次: 令和6年10月〜令和7年9月＋交付申請直近月）
@@ -667,6 +672,26 @@ def check_excel_structures(rep: Report, detected, task: str, frame: str, entity:
                 if any(norm(x) != y for x, y in zip(expected_hours, actual_hours)):
                     rep.fail('TPL-BONUS-HOURS-HEADER',
                              f'{e["name"]}: 月別労働時間の年月見出しが基本給列と一致しません', [e['name']])
+            # 時間換算の対象月額の列（AH〜AT）。あれば年月見出しを照合し、無い第7次台帳は旧形式と知らせる。
+            basis_cols = range(BWL_BASIS_FIRST_COL, BWL_BASIS_LAST_COL + 1)
+            if any(ws.cell(BWL_HEADER_ROW, col).value is not None for col in basis_cols):
+                year_headers = bonus_headers(call_round or 6)[4:-1]
+                if call_round is None:
+                    first = norm(ws.cell(BWL_HEADER_ROW, 6).value)
+                    year_headers = bonus_headers(7 if first.startswith('令和7年10月') else 6)[4:-1]
+                expected_basis = [h.replace('基本給', BWL_BASIS_LABEL) for h in year_headers]
+                expected_basis.append(f'交付申請直近月\n{BWL_BASIS_LABEL}')
+                actual_basis = [norm(ws.cell(BWL_HEADER_ROW, col).value) for col in basis_cols]
+                if any(norm(x) != y for x, y in zip(expected_basis, actual_basis)):
+                    rep.fail('TPL-BONUS-BASIS-HEADER',
+                             f'{e["name"]}: 時間換算の対象月額（AH〜AT列）の見出しが基本給列の年月と一致しません',
+                             [e['name']])
+            elif (call_round or 0) >= 7:
+                rep.info('BONUS-BASIS-LEGACY',
+                         f'{e["name"]}: 時間換算の対象月額の列（AH〜AT）がない旧形式の第7次台帳です。'
+                         '基本給の欄の1つの月額で時間換算と様式の【基本給】欄の両方を作ります。'
+                         '職務手当など通常の手当がある人がいれば、最新の台帳テンプレートに移してください',
+                         [e['name']])
             if not norm(ws[BWL_PREF_CELL].value):
                 rep.warn('BONUS-PREF-EMPTY',
                          f'{e["name"]}: 事業場所在地（都道府県、{BWL_PREF_CELL}）が未記入です'

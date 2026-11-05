@@ -24,6 +24,8 @@ FORMS = SKILL / '補助金加点'
 SHEET = '加点判定用明細'
 FIRST_ROW = 7
 COL_NO, COL_NAME, COL_TYPE, COL_HOURS, COL_FIRST_MONTH, COL_LATEST = 2, 3, 4, 5, 6, 18
+# 第7次以降の台帳だけにある時間換算の対象月額（AH〜AS列＝対象期間12か月、AT列＝直近月）
+COL_BASIS_FIRST, COL_BASIS_LATEST = 34, 46
 # 旧版の適法な合成例: 基準月1200円→直近月1270円（差+70円）。
 EMPLOYEES = [
     ('甲野花子', 'パート', 100, [120000] * 12, 127000),
@@ -107,9 +109,12 @@ def main() -> int:
             ws['C2'] = '東京都'
             ws['C3'] = datetime.datetime(2026, 12, 1)
             ws['C7'], ws['D7'], ws['E7'] = '合成従業員', '正社員', 100
+            # 基本給（F〜R列）は様式の【基本給】欄、対象月額（AH〜AT列）は時間換算給与の分子。
             for col in range(6, 18):
-                ws.cell(7, col, 122600)
-            ws['R7'] = 128100  # +55円ちょうど
+                ws.cell(7, col, 120000)
+                ws.cell(7, COL_BASIS_FIRST + col - 6, 122600)
+            ws['R7'] = 125000
+            ws.cell(7, COL_BASIS_LATEST, 128100)  # +55円ちょうど
             wb.save(new_ledger)
             wb.close()
             cp = run_py(DRIVER, new_ledger, '--call-round', 7, '--fill', '通常', '--company', '新版テスト',
@@ -117,6 +122,27 @@ def main() -> int:
             c.check('第7次で55円ちょうどを対象として公式様式を生成',
                     cp.returncode == 0 and '差: +55円' in cp.stdout,
                     cp.stdout[-500:] + cp.stderr)
+            form2 = next((p for p in sorted((work / 'new_out').glob('*.xlsx'))
+                          if '②' in str(openpyxl.load_workbook(p).worksheets[0]['B2'].value or '')), None)
+            if form2 is not None:
+                sheet = openpyxl.load_workbook(form2).worksheets[0]
+                c.check('様式②の基本給欄と時間換算給与欄を別の値から作る',
+                        (sheet['F17'].value, sheet['G17'].value, sheet['N17'].value, sheet['O17'].value)
+                        == (120000, 1226, 125000, 1281),
+                        str((sheet['F17'].value, sheet['G17'].value, sheet['N17'].value, sheet['O17'].value)))
+            else:
+                c.check('様式②の基本給欄と時間換算給与欄を別の値から作る', False, '様式②が生成されていない')
+            blank_basis = work / 'blank_basis.xlsx'
+            shutil.copy(new_ledger, blank_basis)
+            wb = openpyxl.load_workbook(blank_basis)
+            for col in range(COL_BASIS_FIRST, COL_BASIS_LATEST + 1):
+                wb[SHEET].cell(7, col).value = None
+            wb.save(blank_basis)
+            wb.close()
+            blank = run_py(DRIVER, blank_basis, '--call-round', 7, cwd=work)
+            c.check('時間換算の対象月額が空欄なら基本給で代用せず未確定（exit3）',
+                    blank.returncode == 3 and '時間換算の対象月額' in blank.stdout,
+                    blank.stdout[-500:] + blank.stderr)
             wrong = run_py(DRIVER, new_ledger, '--call-round', 6, cwd=work)
             c.check('新版台帳を旧版の回として読まない', wrong.returncode == 2, wrong.stderr)
             unstamped = run_py(DRIVER, new_ledger, '--fill', '通常', cwd=work)

@@ -65,6 +65,27 @@ MONTH_NAMES = ['1月', '2月', '3月', '4月', '5月', '6月',
 # 変更する場合はスキル側 SKILL.md §4.1.2 と必ず同期すること。
 TRANSCRIPT_SHEET_PREFIX = '原本転記'
 
+# 「在籍していない月」の印。標準台帳の月の欄（G〜R列）と、加点判定用台帳の金額の欄に書く文字列。
+# 名簿・入退社日などで在籍していないと確認できた月だけに書く。空欄・0円の月は「支給なし／未確認」の
+# ままで、非在籍とは推測しない。
+# ⚠ wagebook-convert スキルの review/verify_wagebook.py の ABSENT_LABELS と同じ集合にすること
+#   （verify は hojokin を import できないため写しを持つ。tests/test_round7_presence_basis.py が照合する）。
+ABSENT_MARKER = '非在籍'
+ABSENT_LABELS = frozenset({'非在籍', '在籍なし', '対象外（非在籍）'})
+
+
+def _normalize_marker_text(value: str) -> str:
+    return unicodedata.normalize('NFKC', value).replace('　', '').replace(' ', '').strip()
+
+
+_ABSENT_NORMALIZED = frozenset(_normalize_marker_text(label) for label in ABSENT_LABELS)
+
+
+def is_absent_marker(value) -> bool:
+    """セル値が「在籍していない月」の印か。全角・半角や前後の空白の違いは同じとみなす。"""
+    return isinstance(value, str) and _normalize_marker_text(value) in _ABSENT_NORMALIZED
+
+
 # 第1〜6次の加点①の対象暦月（令和6年10月〜令和7年9月）。年をまたぐため (西暦年, 月) で持つ。
 # 第7次以降は令和7年10月〜令和8年9月（rules_for_round(7).bonus1_window）。
 BONUS1_WINDOW: list[tuple[int, int]] = list(_RULES_ROUNDS_1_6.bonus1_window)
@@ -98,6 +119,13 @@ BWL_COL_LATEST = 18       # R: 交付申請直近月の基本給
 # 空欄の月は E列（月間所定労働時間）で換算する（v0.2.72〜。旧形式＝列なし台帳も読める）。
 BWL_COL_HOURS_WINDOW_START = 19  # S〜AD: 加点①の対象期間12か月の月別労働時間
 BWL_COL_HOURS_LATEST = 31        # AE: 交付申請直近月の月別労働時間
+# AH〜AS / AT: 時間換算の対象月額（厚労省「最低賃金額以上かどうかを確認する方法」の月額＝基本給＋
+# 職務手当など通常の手当。除く6種類は含めない）。第7次以降の台帳テンプレートだけが持つ列。
+# この列がある台帳は、F〜R列（基本給）を様式の【基本給】欄に、AH〜AT列を時間換算給与の分子に使う。
+# 列がない台帳（旧回の台帳・第7次の旧テンプレート）は、F〜R列の1つの月額で両方を作る。
+BWL_COL_BASIS_WINDOW_START = 34  # AH〜AS: 加点①の対象期間12か月の時間換算の対象月額
+BWL_COL_BASIS_LATEST = 46        # AT: 交付申請直近月の時間換算の対象月額
+BWL_BASIS_HEADER_KEYWORD = '時間換算の対象月額'
 BWL_PREF_CELL = (2, 3)    # C2: 事業場所在地（都道府県）
 BWL_APPYM_CELL = (3, 3)   # C3: 交付申請月（yyyy/mm）
 BWL_RULE_CELL = (2, 33)   # AG2: 制度版（入力欄・年月列を動かさず保持）
@@ -342,6 +370,14 @@ class WageEmployee:
     # その従業員が R215/R216 から丸ごと落ちる（中途入社・退職とは原因が違う）。
     # 控除額が増える 2026-07-27 運用で発生確率が上がるため、警告 surfacing 用に記録する。
     transport_clamped_months: int = 0
+    # 在籍状態の明示。キーは (西暦年, 月)、年のない月見出しの台帳だけ暦月Index（0=1月）。
+    # False＝台帳の月の欄に「非在籍」と書かれた月、または台帳に印字された入社日より前・退職日より後の月。
+    # 空欄・0円の月からは作らない（非在籍と推測しない）。True も作らない（休職など在籍・無給の月と
+    # 区別できないため）。第7次通常枠の生産性（前事業年度の総労働時間）で、False の月だけを除く。
+    # R215/R216 には影響しない（非在籍の月は給与 None＝全月支給でない、で従来どおり算定外）。
+    monthly_presence: dict = field(default_factory=dict)
+    # 在籍状態の根拠と、非在籍にしなかった理由（入退社日の外の月に給与がある等）。変換メモ・報告用。
+    presence_note: str = ''
 
     @property
     def is_full_year(self) -> bool:
@@ -374,23 +410,32 @@ class BonusWageEmployee:
     R215/R216 用の WageEmployee（暦月12スロット）とは別物。加点判定は暦月固定で
     加点①の対象期間（第7次以降は令和7年10月〜令和8年9月、第1〜6次は令和6年10月〜
     令和7年9月）＋申請直近月をまたいで見るため、(西暦年,月)→基本給 の
-    辞書で保持する。時間換算給与 = 台帳の月額 ÷ その月の労働時間。台帳の月額は、厚労省「最低賃金額以上か
-    どうかを確認する方法」で除く6種類（臨時の賃金・賞与等・割増賃金・精皆勤・通勤・家族手当）以外を含む額
-    （基本給＋職務手当などの通常の手当）。様式の【基本給】欄にも同じ月額を書くため、通常の手当がある人は
-    様式側の【基本給】欄を原本の基本給に手で直す（katen-judge SKILL §1.2）。
+    辞書で保持する。時間換算給与 = 時間換算の対象月額 ÷ その月の労働時間。時間換算の対象月額は、
+    厚労省「最低賃金額以上かどうかを確認する方法」で除く6種類（臨時の賃金・賞与等・割増賃金・精皆勤・
+    通勤・家族手当）以外を含む額（基本給＋職務手当などの通常の手当）。
+
+    hourly_basis_separate=True（第7次以降の台帳の AH〜AT列、または AI 抽出で hourly_basis が返った場合）:
+      monthly_base＝基本給（様式の【基本給】欄）、monthly_hourly_basis＝時間換算の対象月額。
+      対象月額が無い月は未確認として扱い、基本給で代用しない。
+    hourly_basis_separate=False（旧形式。月額が1つだけの台帳・コードで直接作った従業員）:
+      monthly_base の1つの月額で時間換算し、様式の【基本給】欄にも同じ額を書く（従来どおり）。
     """
     no: int
     name: str
     employment_type: str = ''
     # 月間所定労働時間（最賃比較の分母。月給÷1か月平均所定労働時間 ＝厚労省の換算式）。
     scheduled_hours: float | None = None
-    # (西暦年, 月) → 基本給（所定内賃金、円）
+    # (西暦年, 月) → 基本給（円）。旧形式では時間換算の対象月額を兼ねる。
     monthly_base: dict[tuple[int, int], float] = field(default_factory=dict)
     # (西暦年, 月) → 所定労働時間の月次上書き（任意。無ければ scheduled_hours を使う）
     monthly_hours_override: dict[tuple[int, int], float] = field(default_factory=dict)
     source_file: str = ''
     # 明示された非在籍と欠損を区別する。未指定を非在籍として扱わない。
     monthly_presence: dict[tuple[int, int], bool] = field(default_factory=dict)
+    # (西暦年, 月) → 時間換算の対象月額（基本給＋通常の手当。厚労省方式で除く6種類は含めない）
+    monthly_hourly_basis: dict[tuple[int, int], float] = field(default_factory=dict)
+    # 基本給と時間換算の対象月額を別に持つか（上の docstring）。位置引数で作る既存呼び出しのため末尾に置く。
+    hourly_basis_separate: bool = False
 
     @property
     def is_officer(self) -> bool:
@@ -403,15 +448,35 @@ class BonusWageEmployee:
         return self.scheduled_hours if (self.scheduled_hours or 0) > 0 else None
 
     def base_for(self, ym: tuple[int, int]) -> float | None:
+        """様式の【基本給】欄に書く額。"""
+        return self.monthly_base.get(ym)
+
+    def basis_for(self, ym: tuple[int, int]) -> float | None:
+        """時間換算の分子（時間換算の対象月額）。旧形式は基本給の欄の1つの月額。"""
+        if self.hourly_basis_separate:
+            return self.monthly_hourly_basis.get(ym)
         return self.monthly_base.get(ym)
 
     def hourly_for(self, ym: tuple[int, int]) -> float | None:
-        """その月の時間換算給与 = 台帳の月額（厚労省方式で除く6種類以外を含む）÷ その月の労働時間。算出不能なら None。"""
-        base = self.monthly_base.get(ym)
+        """その月の時間換算給与 = 時間換算の対象月額 ÷ その月の労働時間。算出不能なら None。"""
+        basis = self.basis_for(ym)
         hours = self.hours_for(ym)
-        if base is None or base <= 0 or hours is None or hours <= 0:
+        if basis is None or basis <= 0 or hours is None or hours <= 0:
             return None
-        return base / hours
+        return basis / hours
+
+    def missing_reason(self, ym: tuple[int, int]) -> str:
+        """時間換算給与を出せない月の理由（判定の未確定理由に使う）。"""
+        if not self.hourly_basis_separate:
+            return '基本給・所定労働時間・在籍のいずれかが未確認'
+        parts = []
+        if (self.monthly_hourly_basis.get(ym) or 0) <= 0:
+            parts.append('時間換算の対象月額（基本給＋通常の手当）')
+        if (self.monthly_base.get(ym) or 0) <= 0:
+            parts.append('基本給')
+        if self.hours_for(ym) is None:
+            parts.append('所定労働時間')
+        return '・'.join(parts or ['在籍']) + 'が未確認'
 
 
 @dataclass
@@ -425,6 +490,8 @@ class BonusWageLedger:
     call_round: int = 6
     workplace_prefectures: list[str] = field(default_factory=list)
     input_issues: list[str] = field(default_factory=list)
+    # 台帳が基本給と時間換算の対象月額を別に持つか（AH〜AT列の有無。BonusWageEmployee 参照）
+    hourly_basis_separate: bool = False
 
     @property
     def rule_id(self) -> str:
@@ -443,7 +510,8 @@ class BonusPointResult:
     # 30%以上を満たした対象月（(年,月) のリスト）
     bonus1_months_met: list[tuple[int, int]] = field(default_factory=list)
     # 加点①の対象期間（公募回で変わる）の各月の詳細。要素: {'ym','label','total','under_r7','ratio',
-    #   'meets_30pct','has_data','employees':[{'name','base','hourly','is_target'}]}
+    #   'meets_30pct','has_data','employees':[{'name','base','basis','hourly','is_target'}]}
+    #   base＝基本給（様式の【基本給】欄）、basis＝時間換算の対象月額、hourly＝basis÷労働時間（四捨五入）
     bonus1_details: list[dict] = field(default_factory=list)
 
     bonus2_eligible: bool = False
@@ -451,7 +519,7 @@ class BonusPointResult:
     bonus2_min_wage_july: float = 0.0
     bonus2_min_wage_latest: float = 0.0
     bonus2_diff: float = 0.0
-    # 加点措置②の各期間詳細。{'ym','label','min_wage','employees':[{'name','base','hourly'}]}
+    # 加点措置②の各期間詳細。{'ym','label','min_wage','employees':[{'name','base','basis','hourly'}]}
     bonus2_july_detail: dict = field(default_factory=dict)
     bonus2_latest_detail: dict = field(default_factory=dict)
 
@@ -543,6 +611,8 @@ def _detect_field_map(ws, header_row: int) -> dict[str, int]:
     # 見出しの (年 or None, 月) を全列分残す（同じ暦月の列が複数あっても上書きしない）。
     # 決定論リーダーの対象年月（fiscal_window）の判定材料。
     month_yms: list[tuple[int | None, int]] = []
+    # 列番号 → その列の見出しの (年 or None, 月)。「非在籍」の月を年月で記録するために使う。
+    month_col_yms: dict[int, tuple[int | None, int]] = {}
     for c in range(1, min(ws.max_column + 1, 80)):
         val = ws.cell(header_row, c).value
         s = _norm(val)
@@ -557,6 +627,7 @@ def _detect_field_map(ws, header_row: int) -> dict[str, int]:
             if 0 <= idx <= 11:
                 month_cols[idx] = c
                 month_yms.append(ym)
+                month_col_yms[c] = ym
                 continue
         for key, aliases in _HEADER_ALIASES.items():
             if key in fmap:
@@ -574,6 +645,7 @@ def _detect_field_map(ws, header_row: int) -> dict[str, int]:
     if month_cols:
         fmap['_month_cols'] = month_cols  # type: ignore[assignment]
         fmap['_month_yms'] = month_yms  # type: ignore[assignment]
+        fmap['_month_col_yms'] = month_col_yms  # type: ignore[assignment]
     return fmap
 
 
@@ -697,6 +769,8 @@ def _new_emp_record(name: str, emp_type: str = '') -> dict:
         'transport_clamped_months': 0,
         # 載っていた表ごとの対象年月の票（_window_vote）。_emp_dict_to_list で確定する。
         'window_votes': [],
+        # 月の欄に「非在籍」と書かれた月（キーは (年, 月)、年のない見出しは暦月Index）→ False
+        'monthly_presence': {},
     }
 
 
@@ -813,6 +887,7 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
     col_transport = fmap.get('transport_annual')
     col_bonus = fmap.get('bonus_annual')
     month_cols: dict[int, int] = fmap['_month_cols']  # type: ignore[assignment]
+    month_col_yms: dict = fmap.get('_month_col_yms') or {}
     window_vote = _window_vote(fmap.get('_month_yms'))
 
     for r in range(header_row + 1, ws.max_row + 1):
@@ -841,7 +916,14 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
                 rec['hourly_rate_flat'] = hr
 
         for midx, c in month_cols.items():
-            v = _to_float(ws.cell(r, c).value)
+            raw = ws.cell(r, c).value
+            if is_absent_marker(raw):
+                # 「非在籍」は給与を持たない明示の印。給与は None のまま（R215/R216 は従来どおり算定外）。
+                ym = month_col_yms.get(c)
+                key = (ym[0], ym[1]) if ym and ym[0] is not None else midx
+                rec.setdefault('monthly_presence', {})[key] = False
+                continue
+            v = _to_float(raw)
             if v is not None:
                 existing = rec['monthly_wages'][midx]
                 rec['monthly_wages'][midx] = (existing or 0) + v
@@ -1311,6 +1393,7 @@ def _emp_dict_to_list(emp_data: dict) -> list[WageEmployee]:
             transport_clamped_months=int(data.get('transport_clamped_months') or 0),
             fiscal_window=window,
             fiscal_window_issue=window_issue,
+            monthly_presence=dict(data.get('monthly_presence') or {}),
         ))
     return employees
 
@@ -1736,6 +1819,65 @@ def _sum_window_bonuses(
     return total, undated, dropped
 
 
+def _parse_ai_date_ym(value) -> tuple[int, int] | None:
+    """AI が返した入社日・退職日（'2025-06-15'・'2025/6'・'令和7年6月15日' 等）を (西暦年, 月) にする。"""
+    if value is None or isinstance(value, bool):
+        return None
+    text = unicodedata.normalize('NFKC', str(value)).strip()
+    if not text or text.lower() in ('null', 'none'):
+        return None
+    m = re.match(r'(\d{4})\s*[-/.年]\s*(\d{1,2})(?!\d)', text)
+    if m:
+        year, month = int(m.group(1)), int(m.group(2))
+        return (year, month) if 1 <= month <= 12 else None
+    parsed = parse_ym_header(text)
+    if parsed and parsed[0] is not None:
+        return (parsed[0], parsed[1])
+    return None
+
+
+def _date_bounded_absent_months(emp: dict, months, has_value) -> tuple[list, list[str], str]:
+    """台帳に印字された入社日・退職日（AI の hire_date / leave_date）から非在籍の月を決める。
+
+    入社月より前・退職月より後の月だけが候補。入社月・退職月そのものは在籍のまま。
+    候補の月に給与・時間が残っている（has_value(ym) が真）ときは非在籍にせず、理由に残す
+    （支給月ラベルの台帳では退職翌月に最終給与が載るため。どちらが正しいかは原本で確認）。
+    日付が無い・読めない・抽出結果の中で食い違う場合は何も決めない（空欄から推測しない）。
+
+    戻り値: (非在籍の (年,月) のリスト, 非在籍にしなかった月のラベル, 根拠・注意の文)
+    """
+    hire_raw, leave_raw = emp.get('hire_date'), emp.get('leave_date')
+    conflicts = emp.get('_date_conflicts') or []
+    if conflicts:
+        return [], [], ('入社日・退職日が抽出結果の中で食い違うため、非在籍の月を決めていません（'
+                        + '、'.join(str(c) for c in conflicts) + '）')
+    hire, leave = _parse_ai_date_ym(hire_raw), _parse_ai_date_ym(leave_raw)
+    unreadable = [f'{label}「{raw}」' for label, raw, parsed in
+                  (('入社日', hire_raw, hire), ('退職日', leave_raw, leave))
+                  if raw not in (None, '') and parsed is None]
+    if unreadable:
+        return [], [], '読めない日付があるため非在籍の月を決めていません：' + '、'.join(unreadable)
+    if not hire and not leave:
+        return [], [], ''
+    if hire and leave and hire > leave:
+        return [], [], f'入社日（{hire_raw}）が退職日（{leave_raw}）より後のため、非在籍の月を決めていません'
+    absent, kept = [], []
+    for ym in months:
+        if not ((hire and ym < hire) or (leave and ym > leave)):
+            continue
+        if has_value(ym):
+            kept.append(wareki_label(*ym))
+        else:
+            absent.append(ym)
+    basis = '・'.join(f'{label} {raw}' for label, raw, parsed in
+                     (('入社日', hire_raw, hire), ('退職日', leave_raw, leave)) if parsed)
+    note = f'台帳の{basis}から判定'
+    if kept:
+        note += ('。入社前・退職後の月に給与・時間があるため非在籍にしなかった月：'
+                 + '、'.join(kept) + '（原本で確認）')
+    return absent, kept, note
+
+
 def _normalize_ai_employee_dict(
     emp: dict, fiscal_window: list[tuple[int, int]] | None,
     *, undated_paid_months: list[tuple[int | None, int]] | None = None,
@@ -1757,6 +1899,16 @@ def _normalize_ai_employee_dict(
         bonus_entries, fiscal_window, undated_paid_months=undated_paid_months,
     )
     out = dict(emp)
+    if fiscal_window:
+        def _has_value(ym):
+            idx = ym[1] - 1
+            return (wages[idx] or 0) > 0 or (hours[idx] or 0) > 0
+        absent, _kept, note = _date_bounded_absent_months(emp, fiscal_window, _has_value)
+        for ym in absent:
+            idx = ym[1] - 1
+            wages[idx] = hours[idx] = days[idx] = None
+        out['monthly_presence'] = {ym: False for ym in absent}
+        out['_presence_note'] = note
     out['monthly_wages'] = wages
     out['monthly_hours'] = hours
     out['monthly_work_days'] = days
@@ -1992,6 +2144,8 @@ def _ai_data_to_wage_employees(
             bonus_dropped_total=float(sum(emp.get('_bonus_dropped') or [])),
             transport_deducted_total=_deducted,
             transport_clamped_months=_clamped,
+            monthly_presence=dict(emp.get('monthly_presence') or {}),
+            presence_note=str(emp.get('_presence_note') or ''),
         ))
     return employees
 
@@ -2039,13 +2193,34 @@ def _load_wage_ai_payload(
     return tsv_blocks, pdf_files
 
 
-def _ai_data_to_bonus_employees(ai_data: list[dict]) -> list[BonusWageEmployee]:
-    """AI抽出データ（ymキーの monthly[{ym,base,hours,...}]）を BonusWageEmployee に変換。
+def _ai_output_has_hourly_basis(ai_data: list) -> bool:
+    """AI の出力が hourly_basis（時間換算の対象月額）の項目を持つ新しい形か。
 
-    12スロットには畳まず (年,月)→基本給 を保持する。
+    項目そのものが無い出力（旧い指示文・録画済みの応答）は旧形式として扱い、基本給の1つの月額で
+    時間換算する（従来どおり）。項目があって値が null の月は「読めなかった月」＝未確認のまま。
+    """
+    return any(
+        isinstance(m, dict) and 'hourly_basis' in m
+        for emp in (ai_data or []) if isinstance(emp, dict)
+        for m in (emp.get('monthly') or [])
+    )
+
+
+def _ai_data_to_bonus_employees(
+    ai_data: list[dict],
+    target_yms: list[tuple[int, int]] | None = None,
+) -> list[BonusWageEmployee]:
+    """AI抽出データ（ymキーの monthly[{ym,base,hourly_basis,hours,...}]）を BonusWageEmployee に変換。
+
+    12スロットには畳まず (年,月)→金額 を保持する。base＝基本給（様式の【基本給】欄）、
+    hourly_basis＝時間換算の対象月額（基本給＋通常の手当）。hourly_basis の項目がある出力は
+    hourly_basis_separate=True にし、対象月額が読めなかった月を基本給で代用しない。
     AI抽出の月次hoursは当該月だけに使う。他月の中央値等を固定所定時間へ推定せず、
     scheduled_hoursはNoneにする。確認済みの固定所定時間は、別途人が台帳E列へ入力する。
+    target_yms（加点の対象月）を渡すと、台帳に印字された入社日・退職日の外の月を非在籍にする
+    （_date_bounded_absent_months。空欄の月から非在籍を推測しない）。
     """
+    separate = _ai_output_has_hourly_basis(ai_data)
     out: list[BonusWageEmployee] = []
     for i, emp in enumerate(ai_data):
         if not isinstance(emp, dict):
@@ -2055,6 +2230,7 @@ def _ai_data_to_bonus_employees(ai_data: list[dict]) -> list[BonusWageEmployee]:
             continue
         emp_type = str(emp.get('employment_type', '') or '').strip()
         base_by_ym: dict[tuple[int, int], float] = {}
+        basis_by_ym: dict[tuple[int, int], float] = {}
         hours_by_ym: dict[tuple[int, int], float] = {}
         for m in (emp.get('monthly') or []):
             if not isinstance(m, dict):
@@ -2066,13 +2242,25 @@ def _ai_data_to_bonus_employees(ai_data: list[dict]) -> list[BonusWageEmployee]:
             base = _to_float(m.get('base'))
             if base is not None and base > 0:
                 base_by_ym[ym] = base
+            basis = _to_float(m.get('hourly_basis'))
+            if basis is not None and basis > 0:
+                basis_by_ym[ym] = basis
             h = _to_float(m.get('hours'))
             if h is not None and h > 0:
                 hours_by_ym[ym] = h
+        presence: dict[tuple[int, int], bool] = {}
+        if target_yms:
+            absent, _kept, _note = _date_bounded_absent_months(
+                emp, target_yms,
+                lambda ym: ym in base_by_ym or ym in basis_by_ym or ym in hours_by_ym)
+            presence = {ym: False for ym in absent}
         out.append(BonusWageEmployee(
             no=i + 1, name=name, employment_type=emp_type,
             scheduled_hours=None, monthly_base=base_by_ym,
             monthly_hours_override=hours_by_ym,
+            monthly_presence=presence,
+            monthly_hourly_basis=basis_by_ym if separate else {},
+            hourly_basis_separate=separate,
         ))
     return out
 
@@ -2082,12 +2270,13 @@ def read_bonus_source_employees(
     extractor,
     *,
     disable_image_fallback: bool = False,
+    target_yms: list[tuple[int, int]] | None = None,
 ) -> list[BonusWageEmployee]:
-    """生の賃金台帳/給与明細から加点判定用の従業員（(年,月)→基本給）を AI 抽出する。
+    """生の賃金台帳/給与明細から加点判定用の従業員（(年,月)→基本給・時間換算の対象月額）を AI 抽出する。
 
     read_wage_ledgers_with_ai と同じ抽出経路を使うが、事業年度12スロットに畳まず
-    ymキーの基本給を保持する（加点①の対象期間は年をまたぐため。第7次以降は令和7年10月〜
-    令和8年9月）。
+    ymキーの金額を保持する（加点①の対象期間は年をまたぐため。第7次以降は令和7年10月〜
+    令和8年9月）。target_yms は入社日・退職日から非在籍の月を決める対象（加点の対象月＋直近月）。
     """
     if not file_paths:
         return []
@@ -2111,7 +2300,7 @@ def read_bonus_source_employees(
             raise
         logger.error(f'加点用AI抽出例外: {e}', exc_info=True)
         return []
-    employees = _ai_data_to_bonus_employees(ai_data)
+    employees = _ai_data_to_bonus_employees(ai_data, target_yms=target_yms)
     logger.info(f'加点用AI抽出結果: 入力{len(ai_data)}名 → {len(employees)}名')
     return employees
 
@@ -2329,7 +2518,22 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
         transport_clamped_months=max(
             a.transport_clamped_months or 0, b.transport_clamped_months or 0
         ),
+        monthly_presence=_merge_presence(a, b),
+        presence_note=' / '.join(dict.fromkeys(
+            n for n in (a.presence_note, b.presence_note) if n)),
     )
+
+
+def _merge_presence(a: WageEmployee, b: WageEmployee) -> dict:
+    """同一人物の在籍状態を合わせる。明示は False だけなので和集合。
+
+    片方の台帳で「非在籍」、もう片方で給与がある月は、給与も非在籍もそのまま残す
+    （第7次の生産性の確認が矛盾として止める。どちらが正しいかをここで決めない）。
+    """
+    merged = dict(getattr(a, 'monthly_presence', None) or {})
+    for key, value in (getattr(b, 'monthly_presence', None) or {}).items():
+        merged[key] = False if merged.get(key) is False else value
+    return merged
 
 
 def _merge_fiscal_windows(
@@ -2510,7 +2714,38 @@ def _reconcile_midyear_positions_with_deterministic(
             f'位置を決定論側で上書き（中途者の備考月ラベルを正しく出すため）'
         )
 
+    for ai_emp in ai_employees:
+        det = det_by_name.get(_normalize_name_key(ai_emp.name))
+        if det is not None:
+            _adopt_explicit_absence(ai_emp, det)
+
     return ai_employees
+
+
+def _adopt_explicit_absence(ai_emp: WageEmployee, det: WageEmployee) -> None:
+    """入力の Excel 台帳に書かれた「非在籍」（決定論で読んだ月）を AI 抽出の結果へ引き継ぐ。
+
+    AI は TSV の「非在籍」を給与 null として返すだけなので、在籍状態は決定論の値を採る。
+    対象は年付きの見出しで、AI の事業年度ウィンドウ内の月だけ。AI がその月に給与を返して
+    いる場合は非在籍にせず、理由を残す（どちらが正しいかは原本で確認）。
+    """
+    window = {tuple(ym) for ym in (ai_emp.fiscal_window or [])}
+    kept = []
+    for key, value in (det.monthly_presence or {}).items():
+        if value is not False or not isinstance(key, tuple) or key not in window:
+            continue
+        idx = key[1] - 1
+        if (ai_emp.monthly_wages[idx] or 0) > 0:
+            kept.append(wareki_label(*key))
+            continue
+        ai_emp.monthly_wages[idx] = None
+        ai_emp.monthly_hours[idx] = None
+        ai_emp.monthly_hourly_rates[idx] = None
+        ai_emp.monthly_presence[key] = False
+    if kept:
+        note = ('入力の台帳で「非在籍」の月に給与が読み取られたため非在籍にしなかった月：'
+                + '、'.join(kept) + '（原本で確認）')
+        ai_emp.presence_note = ' / '.join(n for n in (ai_emp.presence_note, note) if n)
 
 
 def _read_ledger_transport_column(file_paths: list[Path]) -> dict[str, float]:
@@ -3307,6 +3542,34 @@ def _check_stamped_round(stamped_value, call_round: int, rules) -> str:
             f'加点の判定ルールが同じため、そのまま読み込みました。')
 
 
+def _legacy_single_amount_note(call_round: int) -> str:
+    """AH〜AT列がない台帳を読んだときの注意。第7次以降は新しいテンプレートへの移し替えを案内する。"""
+    head = ('時間換算の対象月額（AH〜AT列）がない形式の台帳です。基本給の欄（F〜R列）の1つの月額で'
+            '時間換算し、様式の【基本給】欄にも同じ額を書きます。')
+    if call_round >= 7:
+        return head + ('職務手当など通常の手当がある人がいる場合は、第7次以降の最新の台帳テンプレートに移し、'
+                       '基本給と時間換算の対象月額を分けて入力してください。')
+    return head + ('職務手当など通常の手当がある人は、台帳の月額を基本給＋通常の手当にして時間換算給与を確かめ、'
+                   '様式の【基本給】欄を原本の基本給に直してください。')
+
+
+def _has_hourly_basis_block(ws, window) -> bool:
+    """台帳が AH〜AT列（時間換算の対象月額）を持つか。見出しが一部だけ・年月違いなら止める。"""
+    headers = [ws.cell(BWL_HEADER_ROW, BWL_COL_BASIS_WINDOW_START + i).value for i in range(len(window))]
+    latest = ws.cell(BWL_HEADER_ROW, BWL_COL_BASIS_LATEST).value
+    present = [h for h in headers + [latest] if h is not None and str(h).strip()]
+    if not present:
+        return False
+    if len(present) != len(window) + 1 or any(
+            BWL_BASIS_HEADER_KEYWORD not in str(h) for h in present):
+        raise ValueError('時間換算の対象月額の列（AH〜AT列）の見出しが欠けているか、別の見出しになっています。'
+                         'テンプレートの見出しを書き換えずに使ってください。')
+    for i, ym in enumerate(window):
+        if parse_ym_header(headers[i]) != ym:
+            raise ValueError('時間換算の対象月額の年月見出しが、公募回の対象期間と一致しません。')
+    return True
+
+
 def read_bonus_wage_ledger(
     path: Path,
     application_ym_fallback: tuple[int, int] | None = None,
@@ -3326,6 +3589,7 @@ def read_bonus_wage_ledger(
             hours_header = ws.cell(BWL_HEADER_ROW, BWL_COL_HOURS_WINDOW_START + i).value
             if hours_header and parse_ym_header(hours_header) != ym:
                 raise ValueError('月別労働時間の年月見出しが、公募回の対象期間と一致しません。')
+        separate = _has_hourly_basis_block(ws, rules.bonus1_window)
         stamp = ws.cell(*BWL_RULE_CELL).value
         if stamp and str(stamp).strip() != rules.rule_id:
             raise ValueError('台帳の制度版と指定公募回が一致しません。')
@@ -3344,8 +3608,10 @@ def read_bonus_wage_ledger(
         if ledger.application_ym is None:
             ledger.application_ym = application_ym_fallback
         latest_ym = ledger.latest_ym
+        ledger.hourly_basis_separate = separate
+        if not separate:
+            ledger.notes.append(_legacy_single_amount_note(call_round))
         seen = set()
-        absent_labels = {'非在籍', '在籍なし', '対象外（非在籍）'}
         for row in range(BWL_DATA_START_ROW, ws.max_row + 1):
             name_val = ws.cell(row, BWL_COL_NAME).value
             if name_val is None or not str(name_val).strip():
@@ -3361,26 +3627,34 @@ def read_bonus_wage_ledger(
                 employment_type=str(ws.cell(row, BWL_COL_EMPTYPE).value or '').strip(),
                 scheduled_hours=_to_float(ws.cell(row, BWL_COL_HOURS).value),
                 source_file=path.name,
+                hourly_basis_separate=separate,
             )
-            month_columns = [(ym, BWL_COL_WINDOW_START + i, BWL_COL_HOURS_WINDOW_START + i)
+            month_columns = [(ym, BWL_COL_WINDOW_START + i, BWL_COL_HOURS_WINDOW_START + i,
+                              BWL_COL_BASIS_WINDOW_START + i)
                              for i, ym in enumerate(rules.bonus1_window)]
             if latest_ym is not None:
-                month_columns.append((latest_ym, BWL_COL_LATEST, BWL_COL_HOURS_LATEST))
-            for ym, base_col, hours_col in month_columns:
-                raw = ws.cell(row, base_col).value
-                if str(raw).strip() in absent_labels:
-                    if ym in emp.monthly_base:
-                        ledger.input_issues.append(f'{name} {ym_label(ym)} の在籍指定が重複列で矛盾しています。')
-                    emp.monthly_presence[ym] = False
-                    continue
-                base = _to_float(raw)
-                # 直近月と判定窓が重なる場合に、空欄の直近列で既存値を消さない。
-                if base is not None:
-                    if ym in emp.monthly_base and emp.monthly_base[ym] != base:
-                        ledger.input_issues.append(f'{name} {ym_label(ym)} の基本給が重複列で一致しません。')
+                month_columns.append((latest_ym, BWL_COL_LATEST, BWL_COL_HOURS_LATEST,
+                                      BWL_COL_BASIS_LATEST))
+            for ym, base_col, hours_col, basis_col in month_columns:
+                amount_cells = [('基本給', emp.monthly_base, ws.cell(row, base_col).value)]
+                if separate:
+                    amount_cells.append(('時間換算の対象月額', emp.monthly_hourly_basis,
+                                         ws.cell(row, basis_col).value))
+                for label, store, raw in amount_cells:
+                    if is_absent_marker(raw):
+                        if ym in store or emp.monthly_presence.get(ym) is True:
+                            ledger.input_issues.append(f'{name} {ym_label(ym)} の非在籍指定と金額が矛盾しています（{label}の欄）。')
+                        emp.monthly_presence[ym] = False
+                        continue
+                    amount = _to_float(raw)
+                    # 直近月と判定窓が重なる場合に、空欄の直近列で既存値を消さない。
+                    if amount is None:
+                        continue
+                    if ym in store and store[ym] != amount:
+                        ledger.input_issues.append(f'{name} {ym_label(ym)} の{label}が重複列で一致しません。')
                     if emp.monthly_presence.get(ym) is False:
-                        ledger.input_issues.append(f'{name} {ym_label(ym)} の非在籍指定と基本給が矛盾しています。')
-                    emp.monthly_base[ym] = base
+                        ledger.input_issues.append(f'{name} {ym_label(ym)} の非在籍指定と{label}が矛盾しています。')
+                    store[ym] = amount
                     emp.monthly_presence[ym] = True
                 hours = _to_float(ws.cell(row, hours_col).value)
                 if hours is not None and hours > 0:
@@ -3445,23 +3719,36 @@ def judge_bonus_points(ledger: BonusWageLedger) -> BonusPointResult:
             if not emp.employment_type.strip():
                 issues.append(f'{emp.name}: 雇用区分が未確認（役員・従業員の区別を確認）')
             hourly = emp.hourly_for(ym)
+            base, basis = emp.base_for(ym), emp.basis_for(ym)
             if hourly is None or hourly <= 0:
-                issues.append(f'{emp.name}: 基本給・所定労働時間・在籍のいずれかが未確認')
-                employees.append({'name': emp.name, 'base': emp.base_for(ym), 'hourly': None, 'is_target': None})
+                issues.append(f'{emp.name}: {emp.missing_reason(ym)}')
+                employees.append({'name': emp.name, 'base': base, 'basis': basis,
+                                  'hourly': None, 'is_target': None})
                 continue
+            if emp.hourly_basis_separate:
+                # 様式の【基本給】欄は対象月額で代用しない。対象月額は基本給を必ず含む。
+                if base is None or base <= 0:
+                    issues.append(f'{emp.name}: 基本給（様式の【基本給】欄）が未確認')
+                elif basis < base:
+                    issues.append(f'{emp.name}: 時間換算の対象月額が基本給より少ない'
+                                  '（列の取り違え・欠勤控除の扱いを原本で確認）')
             hourly = round(hourly)
             low, high, ambiguous = legal_minimum_bounds(ledger.prefecture, ym)
             if not high:
                 issues.append(f'{emp.name}: 当該月の法定最低賃金マスタが未確認です。')
-            # 基本給だけでは法定算入賃金を断定しない。疑義がある場合は比較資料の確認へ。
+            # 法定最賃を下回る換算は入力の誤り（手当の入れ漏れ・時間）か違法状態の疑い。断定せず確認へ。
             if high and hourly < high:
                 if ambiguous:
                     issues.append(f'{emp.name}: 最賃の発効日・賃金計算期間を確認（{low}〜{high}円、換算{hourly}円）')
+                elif emp.hourly_basis_separate:
+                    issues.append(f'{emp.name}: 法定最低賃金を下回る換算です。時間換算の対象月額（通常の手当の入れ漏れ）'
+                                  f'と労働時間を原本で確認（参照{high}円、換算{hourly}円）')
                 else:
                     issues.append(f'{emp.name}: 法定最低賃金との比較・通常手当を含む入力定義を確認（参照{high}円、換算{hourly}円）')
             target = hourly < result.min_wage_r7
             under += int(target)
-            employees.append({'name': emp.name, 'base': emp.base_for(ym), 'hourly': hourly, 'is_target': target})
+            employees.append({'name': emp.name, 'base': base, 'basis': basis,
+                              'hourly': hourly, 'is_target': target})
         if total == 0:
             issues.append('対象従業員が0名です。')
         ratio = under / total if total else 0.0

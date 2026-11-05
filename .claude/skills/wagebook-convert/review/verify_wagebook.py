@@ -14,6 +14,8 @@
 
 出力（=§9 完了報告にそのまま貼る）:
     各行の Σ(G:R)+T、月別縦計、雇用形態内訳、各 FLAG、末尾に PASS/要対応 件数。
+    月の欄は「数値」「空欄（支給なし／未確認）」「非在籍（在籍していない月の印）」の3通りだけを認め、
+    それ以外の文字列は FAIL（ツールは空欄として読み、給与が黙って落ちるため）。
 終了コード: 0=要対応なし / 1=要対応あり（FAIL or 要確認が残っている） / 2=ファイル/構造エラー。
 """
 import re
@@ -51,6 +53,52 @@ ALLOWED_SHEET_PREFIXES = ('原本転記', '変換メモ')
 TRANSCRIPT_ITEM_HINTS = ('基本給', '通勤手当', '所得税', '住民税', '健康保険', '厚生年金',
                          '雇用保険', '社会保険', '控除', '残業', '時間外', '出勤', '労働時間', '差引')
 TRANSCRIPT_MIN_HINTS = 3
+
+# 「在籍していない月」の印（§1 月の欄）。ツール側 hojokin/wage_reader.py の ABSENT_LABELS と同じ集合にする
+# （このスクリプトは hojokin を import しないため写しを持つ。開発リポジトリのテストが一致を照合する）。
+ABSENT_LABELS = frozenset({'非在籍', '在籍なし', '対象外（非在籍）'})
+
+
+def _marker_text(v):
+    return unicodedata.normalize('NFKC', str(v)).replace('\u3000', '').replace(' ', '').strip()
+
+
+_ABSENT_NORMALIZED = frozenset(_marker_text(s) for s in ABSENT_LABELS)
+
+
+def _month_state(v):
+    """月の欄の値を ('num', 値) / ('absent', None) / ('blank', None) / ('invalid', 元の値) に分ける。"""
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return 'blank', None
+    if isinstance(v, bool):
+        return 'invalid', v
+    if isinstance(v, (int, float)):
+        return 'num', float(v)
+    if isinstance(v, str) and _marker_text(v) in _ABSENT_NORMALIZED:
+        return 'absent', None
+    return 'invalid', v
+
+
+def _month_order(ws, fiscal_month):
+    """月の列（0〜11）を時系列の順に並べる。年付きの見出しがあれば年月、無ければ決算月の翌月から。"""
+    keys = []
+    for m in range(12):
+        text = unicodedata.normalize('NFKC', str(ws.cell(HEADER_ROW, COL_MONTH_FIRST + m).value or ''))
+        text = re.sub(r'[\s　]+', '', text)
+        era = re.match(r'(令和|平成)(\d+|元)年(\d{1,2})月', text)
+        west = re.match(r'(\d{4})[年/\-.](\d{1,2})', text)
+        if era:
+            year = (2018 if era.group(1) == '令和' else 1988) + (1 if era.group(2) == '元' else int(era.group(2)))
+            keys.append((year, int(era.group(3))))
+        elif west:
+            keys.append((int(west.group(1)), int(west.group(2))))
+        else:
+            keys = None
+            break
+    if keys and len(set(keys)) == 12:
+        return sorted(range(12), key=lambda m: keys[m])
+    start = fiscal_month % 12 if fiscal_month else 0
+    return [(start + i) % 12 for i in range(12)]
 
 
 def _num(v):
@@ -156,7 +204,8 @@ def main(argv):
         name = ws.cell(r, COL_NAME).value
         if name is None or str(name).strip() == '':
             continue
-        months = [_num(ws.cell(r, c).value) for c in range(COL_MONTH_FIRST, COL_MONTH_LAST + 1)]
+        states = [_month_state(ws.cell(r, c).value) for c in range(COL_MONTH_FIRST, COL_MONTH_LAST + 1)]
+        months = [value if kind == 'num' else None for kind, value in states]
         rows.append({
             'row': r,
             'name': str(name).strip(),
@@ -164,6 +213,8 @@ def main(argv):
             'hours': _num(ws.cell(r, COL_HOURS).value),
             'hourly': _num(ws.cell(r, COL_HOURLY).value),
             'months': months,
+            'absent': {m for m, (kind, _v) in enumerate(states) if kind == 'absent'},
+            'invalid': [(m, value) for m, (kind, value) in enumerate(states) if kind == 'invalid'],
             'S': _num(ws.cell(r, COL_TRANSPORT).value),
             'T': _num(ws.cell(r, COL_BONUS).value),
         })
@@ -179,11 +230,47 @@ def main(argv):
     for e in rows:
         gr = sum(v for v in e['months'] if v is not None)
         t = e['T'] or 0
-        print(f"  行{e['row']:>2} {e['name']}: Σ(G:R)={gr:,.0f} +T={t:,.0f} → 計={gr + t:,.0f}")
+        absent = f"（非在籍{len(e['absent'])}か月）" if e['absent'] else ''
+        print(f"  行{e['row']:>2} {e['name']}: Σ(G:R)={gr:,.0f} +T={t:,.0f} → 計={gr + t:,.0f}{absent}")
     print()
 
     fail = []       # 修正必須（PASSをブロック）
     confirm = []    # 要確認（PDFで素性確認し報告に解決を明記してから進む）
+
+    # --- 月の欄の不正な文字列（FAIL: ツールは数値・空欄・「非在籍」以外を空欄として読み、給与が落ちる） ---
+    invalid_rows = [e for e in rows if e['invalid']]
+    if invalid_rows:
+        print('[FAIL 月の欄に数値でも「非在籍」でもない値]（ツールは空欄として読み、その月の給与が消える）')
+        for e in invalid_rows:
+            detail = ', '.join(f'{MONTH_LABELS[m]}={v!r}' for m, v in e['invalid'])
+            print(f"  行{e['row']} {e['name']}: {detail} → 金額は数値（カンマ・円なし）、在籍していない月は「非在籍」")
+        fail.append(f'月の欄の不正な値 {len(invalid_rows)}名')
+        print()
+
+    # --- 非在籍（在籍していない月の印）の並び（§1 月の欄） ---
+    order = _month_order(ws, _extract_fiscal_month(ws))
+    absent_rows = [e for e in rows if e['absent']]
+    if absent_rows:
+        print(f'[非在籍の月]（{len(absent_rows)}名。入社日・退職日・名簿で確認できた月だけに書く。根拠を§9報告に）')
+        all_absent, sandwiched = [], []
+        for e in absent_rows:
+            labels = [MONTH_LABELS[m] for m in order if m in e['absent']]
+            print(f"  行{e['row']} {e['name']}: {','.join(labels)}")
+            if len(e['absent']) == 12:
+                all_absent.append(e)
+                continue
+            seq = [m in e['absent'] for m in order]
+            first_in, last_in = seq.index(False), len(seq) - 1 - seq[::-1].index(False)
+            if any(seq[first_in:last_in + 1]):
+                sandwiched.append(e)
+        if all_absent:
+            print('  ⚠ 12か月すべて非在籍の行 → 対象事業年度に在籍していない人。台帳から外すか、事業年度の取り違えを確認')
+            confirm.append(f'12か月すべて非在籍 {len(all_absent)}名')
+        if sandwiched:
+            print('  ⚠ 在籍月の間に非在籍が挟まる行 → 再雇用か入力ミスかを原本で確認:'
+                  + ' '.join(f"行{e['row']}" for e in sandwiched))
+            confirm.append(f'在籍月の間の非在籍 {len(sandwiched)}名（再雇用・入力ミスを確認）')
+        print()
 
     # --- 規格外シート名（FAIL: ツールのリーダーは「原本転記*」以外の可視シートを表として読む） ---
     irregular_sheets = []
@@ -262,6 +349,16 @@ def main(argv):
         if any(e['months'][m] is None for m in range(12))
         and not all(e['months'][m] is None for m in range(12))
     ]
+    blank_non_officer = [
+        e for e in rows
+        if '役員' not in (e['type'] or '')
+        and any(e['months'][m] is None and m not in e['absent'] for m in range(12))
+        and any(v is not None for v in e['months'])
+    ]
+    if blank_non_officer:
+        print(f'  ℹ 空欄の月（数値でも「非在籍」でもない）がある非役員 {len(blank_non_officer)}名: 第7次以降の通常枠では、'
+              '前事業年度の総労働時間を確かめられずツールが止まる。在籍していないと確認できた月は「非在籍」、'
+              '在籍していて給与のない月（休職など）は空欄のまま§9報告で個別確認と書く')
     if gap_rows:
         print(f'  ⚠ 途中に空欄月のある社員 {len(gap_rows)}名 → §5.5-3 でこの全員＋無作為3名を'
               'PDFと1セル突合（縦計が出た≠OK。左詰めズレは年間合計検算を素通りする §1.1.0）:')
@@ -368,7 +465,7 @@ def main(argv):
     for m in range(12):
         col = COL_MONTH_FIRST + m
         htext = ws.cell(HEADER_ROW, col).value
-        col_has_data = any(e['months'][m] is not None for e in rows)
+        col_has_data = any(e['months'][m] is not None or m in e['absent'] for e in rows)
         if htext is None or str(htext).strip() == '':
             if col_has_data:
                 bad_headers.append((col, '(見出し空欄・データ有り)'))
@@ -387,10 +484,10 @@ def main(argv):
                  for e in rows]
     zero_rows = [(e, zs) for e, zs in zero_rows if zs]
     if zero_rows:
-        print('[FLAG-0 月セルに0]（中途/退社/休職は空欄が規約。0は誤判定の元）')
+        print('[FLAG-0 月セルに0]（0は入れない。在籍していない月は「非在籍」、支給がない月は空欄。0は誤判定の元）')
         for e, zs in zero_rows:
             print(f"  行{e['row']} {e['name']}: {','.join(zs)} が0")
-        confirm.append(f'月セルに0が {len(zero_rows)}名（空欄にすべきか確認）')
+        confirm.append(f'月セルに0が {len(zero_rows)}名（空欄か「非在籍」にすべきか確認）')
         print()
 
     # --- 雇用形態内訳・全月在籍非役員数（観測） ---
@@ -404,6 +501,10 @@ def main(argv):
         if all(v is not None for v in e['months']) and '役員' not in (e['type'] or '')
     )
     print(f'[全月在籍の非役員] {full_year_non_officer}名')
+    no_hours_staff = [e for e in rows if '役員' not in (e['type'] or '') and e['hours'] is None]
+    if no_hours_staff:
+        print(f'  ℹ E列(月平均時間)が空の非役員 {len(no_hours_staff)}名: 第7次以降の通常枠は生産性の総労働時間に使うため、'
+              '役員以外の全員にE列が必要（§1。インボイス枠・旧回は正社員の空欄可）')
     if full_year_non_officer == 0:
         print('  ❌ 0名 → R216/R215 が台帳だけでは確定不能（§0.2/§6-9 役員報酬ベース要否を報告）')
         fail.append('全月在籍非役員0名')
