@@ -13,6 +13,16 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING
 from typing import Any
 
+# 過去交付歴の year は「IT導入補助金2024」の2024のような補助金名の年度（交付決定日の暦年ではない）。
+# 賃上げの3.5%要件は IT導入補助金2022〜2025 の交付決定（公募要領 第7回〜 通常枠 印刷p.9（テ）（ナ））。
+# 生産性の4%要件は 2023（通常枠A・B類型／複数社連携）・2024・2025（通常枠／複数社連携）（別紙1 ※1）。
+# 2021以前の交付決定も過去年度の交付歴として記録できる（賃上げ・生産性の要件判定には使わない）。
+# デジタル化・AI導入補助金2026（当該年度）の交付決定や、交付決定日の暦年（2026年など）は入れない。
+IT_SUBSIDY_FIRST_NAME_YEAR = 2016
+IT_SUBSIDY_LAST_NAME_YEAR = 2025
+WAGE_PAST_GRANT_FIRST_YEAR = 2022
+PRODUCTIVITY_PAST_GRANT_YEARS = (2023, 2024, 2025)
+
 
 class ApplicationValidationError(ValueError):
     """申請前提や確認済み入力が不足しているため確定出力できない。"""
@@ -171,7 +181,7 @@ class ApplicationContext:
         if self.past_grants is None:
             return None
         records = [r for r in self.past_grants if r.decided is True]
-        return 'なし' if not records else '\n'.join(f'{r.year}年度 {r.frame}（交付決定）' for r in records)
+        return 'なし' if not records else '\n'.join(f'IT導入補助金{r.year} {r.frame}（交付決定）' for r in records)
 
 
 @dataclass(frozen=True)
@@ -185,7 +195,7 @@ class WageRequirements:
 
 
 def _productivity_grant_status(record: GrantRecord) -> bool | None:
-    if record.decided is not True or record.year not in (2023, 2024, 2025):
+    if record.decided is not True or record.year not in PRODUCTIVITY_PAST_GRANT_YEARS:
         return False
     normalize = lambda value: unicodedata.normalize('NFKC', value).replace(' ', '').replace('　', '')
     frame = normalize(record.frame)
@@ -211,7 +221,8 @@ def _productivity_grant_status(record: GrantRecord) -> bool | None:
 
 def wage_requirements(context: ApplicationContext) -> WageRequirements:
     grants = context.past_grants or []
-    wage_past = any(r.decided is True and 2022 <= r.year <= 2025 for r in grants)
+    wage_past = any(r.decided is True and WAGE_PAST_GRANT_FIRST_YEAR <= r.year <= IT_SUBSIDY_LAST_NAME_YEAR
+                    for r in grants)
     prod_past = any(_productivity_grant_status(r) is True for r in grants)
     frame = _frame(context.frame)
     large_normal = frame == '通常' and (context.subsidy_amount or 0) >= 1_500_000
@@ -254,8 +265,16 @@ def validate_application_context(context: ApplicationContext | None, template_ty
         issues.append('IT導入補助金の過去交付歴が未確認です（交付なしの場合も明示確認が必要）')
     else:
         for rec in context.past_grants:
-            if not isinstance(rec, GrantRecord) or not isinstance(rec.year, int) or isinstance(rec.year, bool) or not 2000 <= rec.year <= 2100 or not isinstance(rec.frame, str) or not rec.frame.strip() or type(rec.decided) is not bool:
+            if not isinstance(rec, GrantRecord) or not isinstance(rec.year, int) or isinstance(rec.year, bool) or not isinstance(rec.frame, str) or not rec.frame.strip() or type(rec.decided) is not bool:
                 issues.append('過去交付歴の年度・枠・交付決定の有無を確認してください')
+                break
+            if not IT_SUBSIDY_FIRST_NAME_YEAR <= rec.year <= IT_SUBSIDY_LAST_NAME_YEAR:
+                issues.append(
+                    f'過去交付歴の年度「{rec.year}」は使えません。年度は「IT導入補助金2024」なら2024のように、'
+                    f'補助金名の年度（{IT_SUBSIDY_LAST_NAME_YEAR}まで）で入力してください。交付決定日の暦年ではありません'
+                    f'（IT導入補助金{IT_SUBSIDY_LAST_NAME_YEAR}の交付決定が2026年でも{IT_SUBSIDY_LAST_NAME_YEAR}）。'
+                    f'賃上げ要件の判定に使うのはIT導入補助金{WAGE_PAST_GRANT_FIRST_YEAR}〜{IT_SUBSIDY_LAST_NAME_YEAR}です。'
+                    f'デジタル化・AI導入補助金2026の交付決定は、この欄に入れません')
                 break
             if _productivity_grant_status(rec) is None:
                 issues.append('2023〜2025年の過去交付について、枠・類型が不明なため生産性要件を決められません。'

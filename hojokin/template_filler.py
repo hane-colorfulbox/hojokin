@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-import unicodedata
 from datetime import timedelta
 from pathlib import Path
 import openpyxl
@@ -17,10 +16,13 @@ from .models import ExtractionResult
 from .config import TemplateMapping, get_min_wage
 from .warnings_catalog import tag as warn_tag
 from .application_context import (
-    ApplicationContext, ApplicationValidationError, build_application_wage_plan,
-    validate_application_context, validate_productivity_inputs, wage_requirements,
+    IT_SUBSIDY_LAST_NAME_YEAR, ApplicationContext, ApplicationValidationError, WageRequirements,
+    build_application_wage_plan, validate_application_context, validate_productivity_inputs,
+    wage_requirements,
 )
-from .template_versions import validate_application_template_version
+from .template_versions import (  # noqa: F401  ラベル照合は配布エンジンと共有（従来の名前でも使える）
+    check_shinsei_anchor_labels, normalize_label, validate_application_template_version,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +37,27 @@ WAGE_RAISE_NONE = '賃上げを行わない'
 WAGE_RAISE_30 = '＋30円'
 WAGE_RAISE_50 = '＋50円'
 
+# 賃上げ幅のプルダウン値に対応する事業場内最低賃金の上乗せ額（円）
+WAGE_RAISE_30_YEN = 30
+WAGE_RAISE_50_YEN = 50
+
 # ヒアリング回答の表記揺れ吸収用（選択肢は「❷＋３０円以上」だが手入力で
 # 半角数字・円なし等が混ざるため、数字だけ半角に正規化して判定する）
 _ZEN2HAN_DIGITS = str.maketrans('０１２３４５６７８９', '0123456789')
+
+# 表明日セルの表示形式（原本の入力規則は日付を求める）
+DECLARATION_DATE_FORMAT = 'yyyy/m/d'
+# 原本D列に残る旧来の誘導文（表明方法を「口頭」、表明日を「シート作成日」にさせる）。
+# 実際と違う表明の申告は交付決定取消しの対象（公募要領 第7回〜 通常枠 印刷p.10の※）。
+# 出力では、確認済みの事実だけを入れる指示に差し替える。
+STALE_DECLARATION_GUIDANCE = ('特に指定がなければ', 'シート作成日')
+DECLARATION_GUIDANCE = {
+    'wage_raise_method': '顧客に確認した実際の表明方法を選ぶ。確認が取れるまで空欄のままにし、推測で「口頭」を選ばない',
+    'wage_raise_date': '顧客に確認した実際の表明日（交付申請日以前）を入れる。確認が取れるまで空欄のままにし、'
+                       'シート作成日などの仮の日付は入れない',
+}
+DECLARATION_LABELS = {'wage_raise_method': '表明を行った方法', 'wage_raise_date': '表明を行った日付'}
+_EMPTY_CELL_ROW_RE = re.compile(r'^行\s*(\d+)\s')
 
 
 # ══════════════ 申請書テンプレの版ズレゲート（W-TPL-001）══════════════
@@ -48,39 +68,6 @@ _ZEN2HAN_DIGITS = str.maketrans('０１２３４５６７８９', '0123456789')
 
 class TemplateLayoutMismatchError(RuntimeError):
     """テンプレ原本の行レイアウトがツールのマッピングと不一致（処理停止用）"""
-
-
-_WS_RE = re.compile(r'\s+')
-
-
-def normalize_label(value) -> str:
-    """B列ラベル比較用の正規化: NFKC ＋ 全空白（改行・タブ・全半角スペース）除去"""
-    return _WS_RE.sub('', unicodedata.normalize('NFKC', str(value if value is not None else '')))
-
-
-def check_shinsei_anchor_labels(ws, mapping: TemplateMapping,
-                                call_round: int | None = None) -> list[tuple[int, str, str]]:
-    """申請内容シートのアンカー行 B列ラベルを照合し、不一致 [(行, 期待, 実際), ...] を返す。
-
-    比較は先頭 ANCHOR_PREFIX_LEN 文字の相互切詰め等値（startswith だと
-    「強み」が隣の「強み（転記）」に一致して ±1 行ズレを見逃す）。
-    """
-    n = _config.ANCHOR_PREFIX_LEN
-    mismatches = []
-    for field, expected in _config.SHINSEI_ANCHOR_LABELS.items():
-        if call_round is not None and call_round >= 7 and field == 'employee_count_fte':
-            expected = '0年度目の対象従業員数（確認済みの正社員換算人数）'
-        row = mapping.shinsei.get(field)
-        if row is None:
-            continue
-        candidates = expected if isinstance(expected, tuple) else (expected,)
-        actual_raw = ws.cell(row=row, column=2).value
-        got = normalize_label(actual_raw)[:n]
-        if any(got == normalize_label(want)[:n] for want in candidates):
-            continue
-        shown = str(actual_raw)[:30] if actual_raw is not None else '（空欄）'
-        mismatches.append((row, candidates[0], shown))
-    return mismatches
 
 
 def verify_template_labels(template_path: Path, mapping: TemplateMapping, template_type: str,
@@ -150,6 +137,40 @@ def wage_raise_choice_from_hearing(hearing_data: dict, mapping: TemplateMapping)
     if amount == '30':
         return WAGE_RAISE_30
     return None
+
+
+def confirmed_wage_raise_choice(context: ApplicationContext, req: WageRequirements) -> str:
+    """第7次：案件設定（担当者確認済み）から申請内容の「賃上げ幅」を決める。
+
+    ＋30円・＋50円の選択は、申請要件か加点の申告になる（公募要領 第7回〜 通常枠 印刷p.23〜24
+    の5)〜8)、別紙1）。任意加点を希望しない案件で、ヒアリングの回答だけを理由に加点の水準を書かない。
+    - 任意加点を希望する：計画上乗せ額が＋50円以上なら＋50円、それ以外は＋30円（下限は検証済み）
+    - 希望しない・通常枠150万円以上（申請要件が＋30円）：＋30円
+    - それ以外（賃上げ計画を選ばない、または最賃の上乗せが要件にない）：賃上げを行わない
+    """
+    if context.optional_wage_bonus is True and req.selected:
+        planned = context.planned_min_wage_increase or 0
+        return WAGE_RAISE_50 if planned >= WAGE_RAISE_50_YEN else WAGE_RAISE_30
+    if req.selected and req.min_wage_increase >= WAGE_RAISE_30_YEN:
+        return WAGE_RAISE_30
+    return WAGE_RAISE_NONE
+
+
+def _round7_wage_raise_choice(context: ApplicationContext, req: WageRequirements,
+                              hearing_choice: str | None) -> tuple[str, str | None]:
+    """確認済みの賃上げ幅と、ヒアリング回答との食い違いの注意文を返す。"""
+    confirmed = confirmed_wage_raise_choice(context, req)
+    if not hearing_choice or hearing_choice == confirmed:
+        return confirmed, None
+    if confirmed != WAGE_RAISE_NONE:
+        raise ApplicationValidationError([
+            f'ヒアリングの賃金引上げ幅（{hearing_choice}）と、案件設定から決まる賃上げ幅（{confirmed}）が'
+            f'一致しません。顧客に確認し、案件設定（任意の賃上げ計画加点・計画する上乗せ額）か'
+            f'ヒアリングシートを直してから作り直してください'])
+    return confirmed, (
+        f'ヒアリングの賃金引上げ幅は「{hearing_choice}」ですが、案件設定では賃上げ計画の加点を'
+        f'希望しない（または賃上げ計画を選ばない）と確認済みのため「{WAGE_RAISE_NONE}」と出力しました。'
+        f'加点を希望する場合は、案件設定を直してから作り直してください')
 
 
 def _safe_write_cell(ws, row: int, col: int, value):
@@ -272,11 +293,13 @@ def fill_shinsei_sheet(
     data: ExtractionResult,
     wage_raise_choice: str | None = None,
     application_context: ApplicationContext | None = None,
+    review_notes: list[tuple[int, str]] | None = None,
 ) -> list[str]:
     """申請内容シートにデータを転記。転記した項目のログリストを返す。
 
-    wage_raise_choice: ヒアリング回答由来の賃上げ幅プルダウン値
-        （wage_raise_choice_from_hearing の戻り値）。None なら空欄のまま。
+    wage_raise_choice: 申請内容へ書く賃上げ幅プルダウン値（第7次は案件設定から決めた値、
+        旧回はヒアリング回答由来）。None なら空欄のまま。
+    review_notes: 担当者に確認してもらう注意文の受け皿（(行, 文) を追加する）。
     """
     writes = []
     m = mapping.shinsei
@@ -285,9 +308,17 @@ def fill_shinsei_sheet(
     ai = data.ai_judgment
 
     # 原本の初期値・旧参照式も申告事実として残さない。
-    for field in ('past_subsidies', 'wage_raise_declaration', 'wage_raise_method'):
+    for field in ('past_subsidies', 'wage_raise_declaration', 'wage_raise_method', 'wage_raise_date'):
         if field in m:
             _safe_write_cell(ws, m[field], 3, None)
+    # 第7次：表明方法・表明日を既定値へ誘導するD列の旧指示（Drive側の原本に残っている場合）は、
+    # 確認済みの事実を入れる指示に差し替える。第1〜6次（旧回）の訂正用の出力は原本のまま。
+    round7 = application_context is not None and application_context.is_round7
+    for field, guidance in DECLARATION_GUIDANCE.items():
+        if round7 and field in m:
+            current = ws.cell(row=m[field], column=4).value
+            if isinstance(current, str) and any(s in current for s in STALE_DECLARATION_GUIDANCE):
+                _safe_write_cell(ws, m[field], 4, guidance)
 
     def write(field: str, value, label: str = ''):
         if field not in m:
@@ -336,7 +367,8 @@ def fill_shinsei_sheet(
     # ── 認定・補助金系 ──
     # 不明を「なし」にしない。確認済みの申告だけを出力する。
     if application_context is not None and application_context.past_grants is not None:
-        prior_decided = any(r.decided is True and r.year < 2026
+        # 年度は補助金名の年度（IT導入補助金2025まで）。当該年度（2026）の交付は含めない。
+        prior_decided = any(r.decided is True and r.year <= IT_SUBSIDY_LAST_NAME_YEAR
                             for r in application_context.past_grants)
         # 原本の入力規則は「あり,なし」。年度・枠の詳細は申請前提シートへ残す。
         write('past_subsidies', 'あり' if prior_decided else 'なし', '過年度交付決定（確認済み）')
@@ -394,8 +426,28 @@ def fill_shinsei_sheet(
             f'⚠ 行{m["wage_raise_amount"]:3d} [賃上げ幅]: ヒアリングの賃金引上げ幅'
             f'回答が見つからないため空欄（プルダウンから手動選択してください）'
         )
-    if application_context is not None and application_context.declaration_confirmed is True:
-        write('wage_raise_method', application_context.declaration_method, '表明方法（確認済み）')
+    confirmed_declaration = (application_context is not None
+                             and application_context.declaration_confirmed is True)
+    if confirmed_declaration:
+        write('wage_raise_method', application_context.declaration_method or None, '表明方法（確認済み）')
+        if application_context.declaration_date and 'wage_raise_date' in m:
+            write('wage_raise_date', application_context.declaration_date, '表明日（確認済み）')
+            date_cell = ws.cell(row=m['wage_raise_date'], column=3)
+            if not isinstance(date_cell, MergedCell):
+                date_cell.number_format = DECLARATION_DATE_FORMAT
+    for field, label in DECLARATION_LABELS.items():
+        if field not in m or ws.cell(row=m[field], column=3).value is not None:
+            continue
+        if application_context is not None and application_context.declaration_confirmed is False:
+            reason = '従業員への表明は「未実施」と確認済みのため空欄です'
+        elif confirmed_declaration:
+            reason = '表明の実施は確認済みですが、この項目が未確認のため空欄です。顧客に確認して入力してください'
+        else:
+            reason = '賃上げ計画の表明を確認していないため空欄です。表明が必要な申請では、顧客に確認してから入力してください'
+        note = f'⚠ 行{m[field]:3d} [{label}]: {reason}（推測の方法・日付は入れない）'
+        writes.append(note)
+        if review_notes is not None:
+            review_notes.append((m[field], note))
 
     # ── ツール名 ──
     if data.estimate.tool_name:
@@ -625,6 +677,20 @@ def check_empty_cells(wb: openpyxl.Workbook) -> list[str]:
     return empty
 
 
+def merge_review_notes(empty: list[str], notes: list[tuple[int, str]]) -> list[str]:
+    """空セル一覧の該当行を理由つきの注意文に置き換え、空欄でない行の注意文は末尾に足す。"""
+    pending = {}
+    for row, text in notes:
+        pending.setdefault(row, text)
+    merged = []
+    for entry in empty:
+        match = _EMPTY_CELL_ROW_RE.match(entry)
+        row = int(match.group(1)) if match else None
+        merged.append(pending.pop(row) if row in pending else entry)
+    merged.extend(pending.values())
+    return merged
+
+
 def fill_template(
     template_path: Path,
     output_path: Path,
@@ -649,7 +715,7 @@ def fill_template(
     mapping_frame = ('通常' if mapping.kyuyo_sheet_name == '生産性指標給与支給総額計算' else 'インボイス')
     template_hint = f'{mapping_frame}枠_' + ('個人_' if mapping.is_kojin else '') + '2026'
     validate_application_context(application_context, template_hint)
-    validate_application_template_version(template_path, application_context.call_round)
+    validate_application_template_version(template_path, application_context.call_round, template_hint)
     productivity_validation = None
     if application_context.is_round7:
         wage_plan = build_application_wage_plan(application_context)
@@ -658,9 +724,18 @@ def fill_template(
                 application_context, extraction.financial, productivity_total_annual_hours)
     wage_raise_choice = wage_raise_choice_from_hearing(hearing_data or {}, mapping)
     req = wage_requirements(application_context)
-    if req.selected and application_context.planned_min_wage_increase is not None:
-        confirmed_choice = (WAGE_RAISE_50 if application_context.planned_min_wage_increase >= 50
-                            else WAGE_RAISE_30 if application_context.planned_min_wage_increase >= 30
+    review_notes: list[tuple[int, str]] = []
+    if application_context.is_round7:
+        # 第7次は案件設定（担当者確認済み）だけで決め、ヒアリング回答は照合に使う。
+        wage_raise_choice, wage_note = _round7_wage_raise_choice(
+            application_context, req, wage_raise_choice)
+        if wage_note and 'wage_raise_amount' in mapping.shinsei:
+            row = mapping.shinsei['wage_raise_amount']
+            review_notes.append((row, f'⚠ 行{row:3d} [賃上げ幅]: {wage_note}'))
+    elif req.selected and application_context.planned_min_wage_increase is not None:
+        # 第1〜6次（旧回）の訂正用：従来どおり、確認済みの上乗せ額とヒアリング回答を照合する。
+        confirmed_choice = (WAGE_RAISE_50 if application_context.planned_min_wage_increase >= WAGE_RAISE_50_YEN
+                            else WAGE_RAISE_30 if application_context.planned_min_wage_increase >= WAGE_RAISE_30_YEN
                             else WAGE_RAISE_NONE)
         if wage_raise_choice and wage_raise_choice != confirmed_choice:
             raise ApplicationValidationError(['ヒアリングの賃上げ幅と確認済みの案件設定が一致しません'])
@@ -714,6 +789,7 @@ def fill_template(
             wb['申請内容'], mapping, extraction,
             wage_raise_choice=wage_raise_choice,
             application_context=application_context,
+            review_notes=review_notes,
         )
         for w in shinsei_writes:
             logger.info(f'STEP 3: {w}')
@@ -776,11 +852,12 @@ def fill_template(
             _safe_write_cell(ws_prod, 42, col, productivity_validation[key])
 
     _write_application_context_sheet(wb, application_context, wage_plan,
-                                     productivity_total_annual_hours, productivity_validation)
+                                     productivity_total_annual_hours, productivity_validation,
+                                     wage_raise_choice=wage_raise_choice)
 
-    # STEP 4: 空セル確認
-    empty = check_empty_cells(wb)
-    logger.info(f'STEP 4: 空セル {len(empty)}件')
+    # STEP 4: 空セル確認（確認が必要な理由がある行は、理由つきの文に置き換える）
+    empty = merge_review_notes(check_empty_cells(wb), review_notes)
+    logger.info(f'STEP 4: 空セル・要確認 {len(empty)}件')
 
     # STEP 5: テンプレ原本の行高バグを修正
     # 法人通常枠/インボイス枠テンプレで申請内容シートの 20+ 行が height=6.0/9.0
@@ -827,7 +904,8 @@ def fill_template(
 
 def _write_application_context_sheet(wb, context: ApplicationContext, wage_plan: dict | None,
                                      productivity_total_annual_hours: float | None,
-                                     productivity_validation: dict | None = None) -> None:
+                                     productivity_validation: dict | None = None,
+                                     wage_raise_choice: str | None = None) -> None:
     """年度別FTEと確認根拠を申請者が追える形で出力する。実績表とは別シート。"""
     from openpyxl.styles import Font, PatternFill, Alignment
     title = '申請前提・給与見込'
@@ -861,6 +939,8 @@ def _write_application_context_sheet(wb, context: ApplicationContext, wage_plan:
         ('表明方法・日付', f'{context.declaration_method} / {context.declaration_date}'
          if context.declaration_confirmed else ''),
         ('最賃に対する計画上乗せ額', context.planned_min_wage_increase),
+        ('申請内容の賃上げ幅', (f'{wage_raise_choice}（案件設定の任意加点・上乗せ額から決定）'
+                          if context.is_round7 else wage_raise_choice) if wage_raise_choice else '空欄（要確認）'),
     ]
     for label, value in entries:
         ws.append([label, value])

@@ -11,13 +11,17 @@
     (c) 先頭列に YYYYMM 値     … YYYYMM月次型（給与ソフト出力・1ファイル1人のケース）
   個人台帳型（行=項目、列=月、月度給与ブロック）は別ルートで温存。
 
-加点措置の判定ロジック:
-  ①用（インボイス枠/セキュリティ枠）:
-    R6年10月～R7年9月の間で、地域別最低賃金以上かつR7年度改定後未満で
-    雇用していた従業員が全従業員の30%以上いる月が3か月以上あるか
-  ②用（共通）:
-    交付申請の直近月における事業場内最低賃金が、
-    R7年7月の事業場内最低賃金+63円以上の水準か
+加点措置の判定ロジック（公募回ごとの期間・基準月・閾値は subsidy_rules.rules_for_round が正本）:
+  ①用（通常枠では補助率1/2→2/3の引上げ条件と共通。項目番号は枠ごとに異なる）:
+    対象期間の任意の3か月で、地域別最低賃金以上かつ改定後の地域別最低賃金未満で
+    雇用している従業員が全従業員の30%以上いる月が3か月以上あるか
+      第7次以降: 令和7年10月〜令和8年9月、上限＝令和8年度改定額
+      第1〜6次（旧回）: 令和6年10月〜令和7年9月、上限＝令和7年度改定額
+  ②用:
+    交付申請の直近月（申請月の前月）の事業場内最低賃金が、
+    基準月の事業場内最低賃金＋閾値以上の水準か
+      第7次以降: 令和8年6月＋55円
+      第1〜6次（旧回）: 令和7年7月＋63円
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ import openpyxl
 
 from .config import MIN_WAGE_MAP
 from .xlsx_surgical import patch_xlsx
+from .subsidy_rules import MIN_WAGE_R6 as _SUBSIDY_MIN_WAGE_R6
 from .subsidy_rules import rules_for_round, legal_minimum_bounds
 
 # pandas は CSV 経路（_read_csv / _csv_to_tsv）でのみ使うため関数内で遅延 import する。
@@ -39,23 +44,18 @@ from .subsidy_rules import rules_for_round, legal_minimum_bounds
 
 logger = logging.getLogger(__name__)
 
-# R6年度の最低賃金（加点措置①の下限判定に使用）
-MIN_WAGE_R6 = {
-    '北海道': 1010, '青森県': 953, '岩手県': 952, '宮城県': 973,
-    '秋田県': 951, '山形県': 955, '福島県': 955, '東京都': 1163,
-    '茨城県': 1005, '栃木県': 1004, '群馬県': 985, '埼玉県': 1078,
-    '千葉県': 1076, '神奈川県': 1162, '新潟県': 985, '富山県': 998,
-    '石川県': 984, '福井県': 984, '山梨県': 988, '長野県': 998,
-    '岐阜県': 1001, '静岡県': 1034, '愛知県': 1077, '京都府': 1058,
-    '大阪府': 1114, '三重県': 1023, '滋賀県': 1017, '兵庫県': 1052,
-    '奈良県': 986, '和歌山県': 980, '鳥取県': 957, '島根県': 962,
-    '岡山県': 982, '広島県': 1020, '山口県': 979, '徳島県': 980,
-    '香川県': 970, '愛媛県': 956, '高知県': 952, '福岡県': 992,
-    '佐賀県': 956, '長崎県': 953, '大分県': 954, '熊本県': 952,
-    '宮崎県': 952, '鹿児島県': 953, '沖縄県': 952,
-}
+# ── 第1〜6次（旧回）互換の定数 ──
+# 加点の判定は rules_for_round(公募回) を使い、以下の定数は判定に使わない。旧回の値を参照する
+# 既存スクリプト・テストのために名前だけ残す（第7次の現役値ではない）。値は subsidy_rules の
+# 第1〜6次ルールから作るので、最低賃金の年次更新でここを直す必要はない。
+LEGACY_CALL_ROUND = 6
+_RULES_ROUNDS_1_6 = rules_for_round(LEGACY_CALL_ROUND)
 
-BONUS_THRESHOLD_YEN = 63
+# 令和6年度の地域別最低賃金（第1〜6次の加点①の下限）。正本は subsidy_rules.MIN_WAGE_R6
+MIN_WAGE_R6 = dict(_SUBSIDY_MIN_WAGE_R6)
+
+# 第1〜6次の加点②の閾値（63円）。第7次以降は55円（rules_for_round(7).bonus2_threshold_yen）
+BONUS_THRESHOLD_YEN = _RULES_ROUNDS_1_6.bonus2_threshold_yen
 
 MONTH_NAMES = ['1月', '2月', '3月', '4月', '5月', '6月',
                '7月', '8月', '9月', '10月', '11月', '12月']
@@ -65,17 +65,11 @@ MONTH_NAMES = ['1月', '2月', '3月', '4月', '5月', '6月',
 # 変更する場合はスキル側 SKILL.md §4.1.2 と必ず同期すること。
 TRANSCRIPT_SHEET_PREFIX = '原本転記'
 
-# ── 加点判定の対象暦月（デジタル化・AI導入補助金2026 公募要領で固定）──
-# 加点措置①（補助率1/2→2/3 トリガー兼用／加点項目14）の対象期間。
-# 令和6年10月〜令和7年9月の暦月12か月。Oct-Dec は令和6年・Jan-Sep は令和7年と
-# 年をまたぐため、暦月12スロット配列では表現できない。(西暦年, 月) タプルで固定保持する。
-BONUS1_WINDOW: list[tuple[int, int]] = [
-    (2024, 10), (2024, 11), (2024, 12),
-    (2025, 1), (2025, 2), (2025, 3), (2025, 4), (2025, 5), (2025, 6),
-    (2025, 7), (2025, 8), (2025, 9),
-]
-# 加点措置②（加点項目15）の基準月＝令和7年7月。比較対象は交付申請の直近月。
-BONUS2_BASE_YM: tuple[int, int] = (2025, 7)
+# 第1〜6次の加点①の対象暦月（令和6年10月〜令和7年9月）。年をまたぐため (西暦年, 月) で持つ。
+# 第7次以降は令和7年10月〜令和8年9月（rules_for_round(7).bonus1_window）。
+BONUS1_WINDOW: list[tuple[int, int]] = list(_RULES_ROUNDS_1_6.bonus1_window)
+# 第1〜6次の加点②の基準月（令和7年7月）。第7次以降は令和8年6月（rules_for_round(7).bonus2_base_ym）。
+BONUS2_BASE_YM: tuple[int, int] = _RULES_ROUNDS_1_6.bonus2_base_ym
 
 
 def prev_month(ym: tuple[int, int]) -> tuple[int, int]:
@@ -98,11 +92,11 @@ BWL_COL_NO = 2          # B
 BWL_COL_NAME = 3        # C
 BWL_COL_EMPTYPE = 4     # D
 BWL_COL_HOURS = 5       # E 月間所定労働時間
-BWL_COL_WINDOW_START = 6  # F〜Q: BONUS1_WINDOW（令和6年10月〜令和7年9月）の基本給12列
+BWL_COL_WINDOW_START = 6  # F〜Q: 加点①の対象期間12か月の基本給（年月は公募回で変わる。第7次以降=令和7年10月〜令和8年9月）
 BWL_COL_LATEST = 18       # R: 交付申請直近月の基本給
 # S〜AD / AE: 月別労働時間（任意）。時給制など月により労働時間が変動する従業員のみ入力し、
 # 空欄の月は E列（月間所定労働時間）で換算する（v0.2.72〜。旧形式＝列なし台帳も読める）。
-BWL_COL_HOURS_WINDOW_START = 19  # S〜AD: BONUS1_WINDOW 12ヶ月の月別労働時間
+BWL_COL_HOURS_WINDOW_START = 19  # S〜AD: 加点①の対象期間12か月の月別労働時間
 BWL_COL_HOURS_LATEST = 31        # AE: 交付申請直近月の月別労働時間
 BWL_PREF_CELL = (2, 3)    # C2: 事業場所在地（都道府県）
 BWL_APPYM_CELL = (3, 3)   # C3: 交付申請月（yyyy/mm）
@@ -196,6 +190,97 @@ def parse_ym_header(text) -> tuple[int | None, int] | None:
     return None
 
 
+# ── 決定論リーダーの対象年月（fiscal_window）──────────────────────────
+# 年付きの月見出し（'令和7年4月' / 'R7.4' / '2025年4月' / '2025/04' / Excelの日付 等）から、
+# 台帳が「どの12か月」を表すかを確定する。年のない見出し（'4月'）からは推測しない
+# （第7次通常枠の生産性は前事業年度の総労働時間を使うため、年度を取り違えると基準がずれる）。
+# 確定できない理由は WageEmployee.fiscal_window_issue に残し、停止メッセージで具体的に示す。
+FISCAL_WINDOW_MONTHS = 12
+_WINDOW_ISSUE_NO_HEADER = '台帳の月見出しを確認できません'
+_WINDOW_ISSUE_NO_YEAR = '月見出しに年がありません（例：「4月」）'
+_WINDOW_ISSUE_DUPLICATE = '同じ年月の月見出しが2つ以上あります'
+_WINDOW_ISSUE_NOT_CONSECUTIVE = '月見出しの年月が連続した12か月になっていません'
+_WINDOW_ISSUE_ROW_NO_YEAR = '対象年月の列に年のない行があります（例：「4月」）'
+_WINDOW_ISSUE_CSV = 'CSVの簡易読込（年間合計のみ）では月ごとの年月を確認できません'
+_WINDOW_ISSUE_CONFLICT = '同じ従業員が、対象年月の異なる台帳に含まれています'
+# 月見出しに年を書き足せば解消する理由（停止メッセージの案内を出し分けるために公開する）
+YEARLESS_WINDOW_ISSUES = frozenset({_WINDOW_ISSUE_NO_YEAR, _WINDOW_ISSUE_ROW_NO_YEAR})
+
+
+def _next_ym(ym: tuple[int, int]) -> tuple[int, int]:
+    year, month = ym
+    return (year + 1, 1) if month == 12 else (year, month + 1)
+
+
+def _window_span_label(yms) -> str:
+    """[(年,月), ...] → '令和7年4月〜令和8年3月'。"""
+    ordered = sorted(yms)
+    return f'{wareki_label(*ordered[0])}〜{wareki_label(*ordered[-1])}'
+
+
+def _ym_with_year_from_cell(value) -> tuple[int | None, int] | None:
+    """セル値から (年 or None, 月) を取る。Excel が数値で返す 202504.0 も 202504 として読む。"""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    ym = parse_ym_header(value)
+    if ym is None or not 1 <= ym[1] <= 12:
+        return None
+    return ym
+
+
+def _window_vote(yms) -> tuple[frozenset | None, str]:
+    """1つの表（見出し行）の年月群を、対象年月を決める材料（票）にする。
+
+    年のない月が1つでもあれば (None, 理由)。それ以外は年月の集合を返す。
+    """
+    yms = list(yms or [])
+    if not yms:
+        return None, _WINDOW_ISSUE_NO_HEADER
+    if any(year is None for (year, _month) in yms):
+        return None, _WINDOW_ISSUE_NO_YEAR
+    if len(set(yms)) != len(yms):
+        return None, _WINDOW_ISSUE_DUPLICATE
+    return frozenset(yms), ''
+
+
+def _resolve_window_votes(votes) -> tuple[list[tuple[int, int]] | None, str]:
+    """従業員が載っていた全ての表の票から、連続した12か月の対象年月を確定する。
+
+    賞与だけの表など一部の月しかない表は、他の表の12か月に含まれていればよい。
+    2年度分の台帳が混在した（12か月を超える）場合や、年のない表が混ざる場合は確定しない。
+    """
+    votes = list(votes or [])
+    if not votes:
+        return None, _WINDOW_ISSUE_NO_HEADER
+    for yms, issue in votes:
+        if yms is None:
+            return None, issue or _WINDOW_ISSUE_NO_HEADER
+    union = sorted(set().union(*(yms for yms, _issue in votes)))
+    if len(union) != FISCAL_WINDOW_MONTHS:
+        return None, (f'月見出しの年月が{len(union)}か月分あります（{_window_span_label(union)}）。'
+                      f'1つの事業年度の{FISCAL_WINDOW_MONTHS}か月分だけの台帳が必要です')
+    if any(_next_ym(prev) != cur for prev, cur in zip(union, union[1:])):
+        return None, _WINDOW_ISSUE_NOT_CONSECUTIVE
+    return union, ''
+
+
+def _add_window_vote(rec: dict, vote: tuple[frozenset | None, str]) -> None:
+    rec.setdefault('window_votes', []).append(vote)
+
+
+def _row_year_month(month_val, paid_val, month_idx: int) -> tuple[int, int] | None:
+    """月別行型の1行の (西暦年, 月)。月を決めたのと同じセルから年を取る。
+
+    月セルに月があれば年も月セルから取る（'4月' なら年不明＝None。支給日から年を推測しない）。
+    月セルで月が決まらない賞与コード行などは、月を決めた支給日から年月を取る。
+    """
+    own = _ym_with_year_from_cell(month_val)
+    source = own if own is not None else _ym_with_year_from_cell(paid_val)
+    if source is None or source[0] is None or source[1] != month_idx + 1:
+        return None
+    return source[0], source[1]
+
+
 # ============================================================
 # データ構造
 # ============================================================
@@ -229,14 +314,18 @@ class WageEmployee:
     # 賞与の支給月は R216 では不問（年間合計に算入されれば月は問わない）。年度の
     # 帰属判定（対象事業年度内か）だけが効くため、ウィンドウ外賞与は算入しない。
     annual_bonus: float = 0.0
-    # 事業年度ウィンドウ（[(西暦年, 月)] 12件、決算期首→期末順）。AI抽出時に決算月から
-    # 決定論で確定する。writer が和暦年月ヘッダーを事業年度順に並べるために使う。
-    # None の場合（決算月不明・暦年運用）は暦年 1〜12月でフォールバックする。
+    # 事業年度ウィンドウ（[(西暦年, 月)] 12件、決算期首→期末順）。AI抽出時は決算月から
+    # 決定論で確定し、決定論リーダーは年付きの月見出しから確定する。writer が和暦年月ヘッダーを
+    # 事業年度順に並べるため、第7次通常枠の生産性で前事業年度の台帳かを照合するために使う。
+    # None の場合（決算月不明・年のない見出し）は暦年 1〜12月でフォールバックする。
     fiscal_window: list[tuple[int, int]] | None = None
     # 事業年度ウィンドウ選択時の注意書き（年の自動補正・低カバレッジ等）。空なら問題なし。
     # per-ledger の情報を全従業員に同値で載せ、賃金台帳作成タスクが変換メモ／ステータスに
     # surfacing する用途に使う（R216 期間ズレのサイレント過少計上を可視化するため）。
     fiscal_window_note: str = ''
+    # 決定論リーダーが fiscal_window を確定できなかった理由（年のない月見出し・2年度分の混在等）。
+    # 停止メッセージで具体的な理由を示すために使う。確定できたとき・AI抽出経路では空。
+    fiscal_window_issue: str = ''
     # 支給日（支給年月）が読めず、事業年度ウィンドウで絞り込めないまま年間賞与に算入した
     # 賞与額の合計（円）。年間集計表など支給日のない台帳で > 0 になる。非暦年決算では
     # 暦年集計とのズレで R216 がズレ得るため、賃金台帳作成タスクが警告 surfacing に使う。
@@ -283,8 +372,12 @@ class BonusWageEmployee:
     """加点判定用賃金台帳から読み取った従業員（(年,月)キーの基本給ベース）。
 
     R215/R216 用の WageEmployee（暦月12スロット）とは別物。加点判定は暦月固定で
-    令和6年10月〜令和7年9月＋申請直近月をまたいで見るため、(西暦年,月)→基本給 の
-    辞書で保持する。時間換算給与 = 基本給 ÷ 所定労働時間（残業・通勤・各種手当を除く）。
+    加点①の対象期間（第7次以降は令和7年10月〜令和8年9月、第1〜6次は令和6年10月〜
+    令和7年9月）＋申請直近月をまたいで見るため、(西暦年,月)→基本給 の
+    辞書で保持する。時間換算給与 = 台帳の月額 ÷ その月の労働時間。台帳の月額は、厚労省「最低賃金額以上か
+    どうかを確認する方法」で除く6種類（臨時の賃金・賞与等・割増賃金・精皆勤・通勤・家族手当）以外を含む額
+    （基本給＋職務手当などの通常の手当）。様式の【基本給】欄にも同じ月額を書くため、通常の手当がある人は
+    様式側の【基本給】欄を原本の基本給に手で直す（katen-judge SKILL §1.2）。
     """
     no: int
     name: str
@@ -313,7 +406,7 @@ class BonusWageEmployee:
         return self.monthly_base.get(ym)
 
     def hourly_for(self, ym: tuple[int, int]) -> float | None:
-        """その月の時間換算給与 = 基本給 ÷ 所定労働時間。算出不能なら None。"""
+        """その月の時間換算給与 = 台帳の月額（厚労省方式で除く6種類以外を含む）÷ その月の労働時間。算出不能なら None。"""
         base = self.monthly_base.get(ym)
         hours = self.hours_for(ym)
         if base is None or base <= 0 or hours is None or hours <= 0:
@@ -349,11 +442,12 @@ class BonusPointResult:
     bonus1_eligible: bool = False
     # 30%以上を満たした対象月（(年,月) のリスト）
     bonus1_months_met: list[tuple[int, int]] = field(default_factory=list)
-    # BONUS1_WINDOW の各月の詳細。要素: {'ym','label','total','under_r7','ratio',
+    # 加点①の対象期間（公募回で変わる）の各月の詳細。要素: {'ym','label','total','under_r7','ratio',
     #   'meets_30pct','has_data','employees':[{'name','base','hourly','is_target'}]}
     bonus1_details: list[dict] = field(default_factory=list)
 
     bonus2_eligible: bool = False
+    # 名前の july は第1〜6次の基準月（令和7年7月）由来。値は公募回の基準月（第7次以降は令和8年6月）。
     bonus2_min_wage_july: float = 0.0
     bonus2_min_wage_latest: float = 0.0
     bonus2_diff: float = 0.0
@@ -362,6 +456,8 @@ class BonusPointResult:
     bonus2_latest_detail: dict = field(default_factory=dict)
 
     prefecture: str = ''
+    # 名前の r6/r7 は第1〜6次由来。値は公募回の改定前/改定後の地域別最低賃金
+    # （第7次以降は令和7年度/令和8年度）。
     min_wage_r6: int = 0
     min_wage_r7: int = 0
     application_ym: tuple[int, int] | None = None
@@ -444,6 +540,9 @@ def _detect_field_map(ws, header_row: int) -> dict[str, int]:
     """指定行をヘッダーと見なし、各フィールドの列番号を割り出す"""
     fmap: dict[str, int] = {}
     month_cols: dict[int, int] = {}
+    # 見出しの (年 or None, 月) を全列分残す（同じ暦月の列が複数あっても上書きしない）。
+    # 決定論リーダーの対象年月（fiscal_window）の判定材料。
+    month_yms: list[tuple[int | None, int]] = []
     for c in range(1, min(ws.max_column + 1, 80)):
         val = ws.cell(header_row, c).value
         s = _norm(val)
@@ -457,6 +556,7 @@ def _detect_field_map(ws, header_row: int) -> dict[str, int]:
             idx = ym[1] - 1
             if 0 <= idx <= 11:
                 month_cols[idx] = c
+                month_yms.append(ym)
                 continue
         for key, aliases in _HEADER_ALIASES.items():
             if key in fmap:
@@ -473,6 +573,7 @@ def _detect_field_map(ws, header_row: int) -> dict[str, int]:
                 break
     if month_cols:
         fmap['_month_cols'] = month_cols  # type: ignore[assignment]
+        fmap['_month_yms'] = month_yms  # type: ignore[assignment]
     return fmap
 
 
@@ -594,6 +695,8 @@ def _new_emp_record(name: str, emp_type: str = '') -> dict:
         'annual_bonus': 0.0,
         'transport_deducted_total': 0.0,
         'transport_clamped_months': 0,
+        # 載っていた表ごとの対象年月の票（_window_vote）。_emp_dict_to_list で確定する。
+        'window_votes': [],
     }
 
 
@@ -615,6 +718,11 @@ def _parse_section_rowwise(ws, header_row: int, end_row: int,
     col_base = fmap.get('base_wage')
     col_hours = fmap.get('hours')
     col_paid = fmap.get('paid_date')
+    # 対象年月（fiscal_window）の票はこの表の全行の年月から作り、表に載った全員に配る
+    # （中途入社者は自分の行が12か月ないため、個人単位では決められない）。
+    section_names: dict[str, None] = {}  # 出現順を保つ集合
+    section_yms: set[tuple[int, int]] = set()
+    section_year_missing = False
 
     for r in range(header_row + 1, end_row):
         name_val = ws.cell(r, col_name).value
@@ -630,11 +738,14 @@ def _parse_section_rowwise(ws, header_row: int, end_row: int,
         # ボーナスコードに対しても、実支給月（paid_date）が優先される。
         paid_val = ws.cell(r, col_paid).value if col_paid else None
         month_idx = None
+        month_val = None
         if col_month:
-            month_idx = _parse_month(ws.cell(r, col_month).value, paid_val)
+            month_val = ws.cell(r, col_month).value
+            month_idx = _parse_month(month_val, paid_val)
         if month_idx is None:
             # 先頭列がYYYYMM(例: 202503)
-            month_idx = _parse_month(ws.cell(r, 1).value, paid_val)
+            month_val = ws.cell(r, 1).value
+            month_idx = _parse_month(month_val, paid_val)
         if month_idx is None:
             continue
 
@@ -645,6 +756,12 @@ def _parse_section_rowwise(ws, header_row: int, end_row: int,
             emp_data[name] = _new_emp_record(name, et)
 
         rec = emp_data[name]
+        section_names[name] = None
+        row_ym = _row_year_month(month_val, paid_val, month_idx)
+        if row_ym is None:
+            section_year_missing = True
+        else:
+            section_yms.add(row_ym)
 
         # 月の給与額（課税支給合計）を決定。優先順（公募要領 p.10「課税対象となる経費」準拠）:
         #   1) 課税支給合計/課税分合計 列をそのまま採用（最も確実）
@@ -678,6 +795,13 @@ def _parse_section_rowwise(ws, header_row: int, end_row: int,
                 rec['monthly_hours'][month_idx] = hours
                 rec['monthly_hourly_rates'][month_idx] = base / hours
 
+    if section_year_missing:
+        vote = (None, _WINDOW_ISSUE_ROW_NO_YEAR)
+    else:
+        vote = _window_vote(sorted(section_yms))
+    for name in section_names:
+        _add_window_vote(emp_data[name], vote)
+
 
 def _parse_section_summary(ws, header_row: int, fmap: dict,
                            emp_data: dict) -> None:
@@ -689,6 +813,7 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
     col_transport = fmap.get('transport_annual')
     col_bonus = fmap.get('bonus_annual')
     month_cols: dict[int, int] = fmap['_month_cols']  # type: ignore[assignment]
+    window_vote = _window_vote(fmap.get('_month_yms'))
 
     for r in range(header_row + 1, ws.max_row + 1):
         name_val = ws.cell(r, col_name).value
@@ -704,6 +829,7 @@ def _parse_section_summary(ws, header_row: int, fmap: dict,
                 et = str(ws.cell(r, col_type).value or '')
             emp_data[name] = _new_emp_record(name, et)
         rec = emp_data[name]
+        _add_window_vote(rec, window_vote)
 
         if col_hours:
             h = _to_float(ws.cell(r, col_hours).value)
@@ -869,6 +995,7 @@ def _read_csv(path: Path, emp_data: dict | None = None) -> None:
             'hourly_rate_flat': 0.0,
             'avg_hours_flat': 0.0,
             'monthly_hourly_rates': [None] * 12,
+            'window_votes': [(None, _WINDOW_ISSUE_CSV)],
         }
 
         # 給与合計を取得（最初の給与列を使用）
@@ -1030,12 +1157,17 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
 
     # 月列のマッピングを構築（ヘッダー行から）
     month_cols: dict[int, int] = {}  # month_index → column
+    # 見出しの (年 or None, 月)。「令和 7年」「1月度給与」が同じセルなら (2025, 1)、年がなければ (None, 1)。
+    header_yms: list[tuple[int | None, int]] = []
     for r in range(start_row, min(start_row + 5, end_row + 1)):
         for c in range(2, ws.max_column + 1):
             val = str(ws.cell(r, c).value or '')
             m_idx = _parse_month_from_header(val)
             if m_idx is not None:
                 month_cols[m_idx] = c
+                ym = parse_ym_header(val)
+                has_year = ym is not None and ym[0] is not None and ym[1] == m_idx + 1
+                header_yms.append(ym if has_year else (None, m_idx + 1))
 
     if not month_cols:
         return None
@@ -1118,6 +1250,8 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
         if has_hourly:
             emp_type = 'パート・アルバイト'
 
+    # 同じ見出しが複数行に繰り返されても1つに数える（別の年の同じ月は12か月超として止まる）
+    window, window_issue = _resolve_window_votes([_window_vote(list(dict.fromkeys(header_yms)))])
     return WageEmployee(
         no=0,
         name=name,
@@ -1127,6 +1261,8 @@ def _parse_individual_block(ws, start_row: int, end_row: int) -> WageEmployee | 
         monthly_wages=monthly_wages,
         monthly_hourly_rates=monthly_hourly,
         monthly_hours=monthly_hours_list,
+        fiscal_window=window,
+        fiscal_window_issue=window_issue,
     )
 
 
@@ -1159,6 +1295,7 @@ def _emp_dict_to_list(emp_data: dict) -> list[WageEmployee]:
             avg_hours = sum(hours_list) / len(hours_list)
         else:
             avg_hours = data.get('avg_hours_flat', 0.0)
+        window, window_issue = _resolve_window_votes(data.get('window_votes'))
 
         employees.append(WageEmployee(
             no=i + 1,
@@ -1172,6 +1309,8 @@ def _emp_dict_to_list(emp_data: dict) -> list[WageEmployee]:
             annual_bonus=float(data.get('annual_bonus') or 0.0),
             transport_deducted_total=float(data.get('transport_deducted_total') or 0.0),
             transport_clamped_months=int(data.get('transport_clamped_months') or 0),
+            fiscal_window=window,
+            fiscal_window_issue=window_issue,
         ))
     return employees
 
@@ -1947,7 +2086,8 @@ def read_bonus_source_employees(
     """生の賃金台帳/給与明細から加点判定用の従業員（(年,月)→基本給）を AI 抽出する。
 
     read_wage_ledgers_with_ai と同じ抽出経路を使うが、事業年度12スロットに畳まず
-    ymキーの基本給を保持する（加点①の R6/10〜R7/9 は年をまたぐため）。
+    ymキーの基本給を保持する（加点①の対象期間は年をまたぐため。第7次以降は令和7年10月〜
+    令和8年9月）。
     """
     if not file_paths:
         return []
@@ -2146,6 +2286,8 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
     valid_r = [r for r in new_rates if r is not None and r > 0]
     avg_r = sum(valid_r) / len(valid_r) if valid_r else 0.0
 
+    merged_window, merged_window_issue = _merge_fiscal_windows(a, b)
+
     # source_file の統合: 両方あれば連結（重複排除）、片方なら採用
     sa = (a.source_file or '').strip()
     sb = (b.source_file or '').strip()
@@ -2172,8 +2314,9 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
             a.annual_transport_allowance or 0.0, b.annual_transport_allowance or 0.0
         ),
         annual_bonus=max(a.annual_bonus or 0.0, b.annual_bonus or 0.0),
-        fiscal_window=a.fiscal_window or b.fiscal_window,
+        fiscal_window=merged_window,
         fiscal_window_note=a.fiscal_window_note or b.fiscal_window_note,
+        fiscal_window_issue=merged_window_issue,
         bonus_undated_total=max(
             a.bonus_undated_total or 0.0, b.bonus_undated_total or 0.0
         ),
@@ -2187,6 +2330,24 @@ def _merge_two_employees(a: WageEmployee, b: WageEmployee) -> WageEmployee:
             a.transport_clamped_months or 0, b.transport_clamped_months or 0
         ),
     )
+
+
+def _merge_fiscal_windows(
+    a: WageEmployee, b: WageEmployee,
+) -> tuple[list[tuple[int, int]] | None, str]:
+    """同一人物の2件の対象年月を統合する。一致しないときは確定しない（月の合算先が不明なため）。
+
+    AI抽出経路は1回の読取りで全員に同じ窓を付けるので、一致して従来どおりの結果になる。
+    決定論リーダーで片方だけ年が分からない・別年度の台帳だった場合は None と理由を返す。
+    """
+    window_a = list(a.fiscal_window) if a.fiscal_window else None
+    window_b = list(b.fiscal_window) if b.fiscal_window else None
+    if window_a == window_b:
+        return window_a, a.fiscal_window_issue or b.fiscal_window_issue
+    if window_a and window_b:
+        return None, (f'{_WINDOW_ISSUE_CONFLICT}（{_window_span_label(window_a)} と '
+                      f'{_window_span_label(window_b)}）')
+    return None, a.fiscal_window_issue or b.fiscal_window_issue or _WINDOW_ISSUE_NO_HEADER
 
 
 def _dedupe_employees_by_normalized_name(
@@ -3110,6 +3271,42 @@ def _parse_app_month(v) -> tuple[int, int] | None:
     return None
 
 
+def _parse_stamped_round(value) -> int | None:
+    """台帳AG3の公募回（7 / 7.0 / '7' / '第7次' / '第７次'）を整数にする。読めなければ None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, int):
+        return value if value >= 1 else None
+    text = re.sub(r'[\s　]+', '', unicodedata.normalize('NFKC', str(value)))
+    m = re.fullmatch(r'第?(\d+)次?', text)
+    if not m or int(m.group(1)) < 1:
+        return None
+    return int(m.group(1))
+
+
+def _check_stamped_round(stamped_value, call_round: int, rules) -> str:
+    """台帳AG3の公募回を指定回と照合する。
+
+    公募回が違っても加点の判定ルール（制度版）が同じなら受け付け、注意書きを返す
+    （例：第7次以降用テンプレートはAG3=7のまま第8次でも同じルールで使える）。
+    制度版が違う・読めない場合は停止する。空欄なら照合しない（空文字を返す）。
+    """
+    if stamped_value is None or not str(stamped_value).strip():
+        return ''
+    stamped = _parse_stamped_round(stamped_value)
+    if stamped is None:
+        raise ValueError(f'台帳AG3の公募回を読み取れません（{stamped_value!r}）。'
+                         f'公募回を数字（例：{call_round}）で入力してください。')
+    if stamped == call_round:
+        return ''
+    if rules_for_round(stamped).rule_id != rules.rule_id:
+        raise ValueError('台帳に保存された公募回と指定公募回が一致しません。')
+    return (f'台帳AG3の公募回（第{stamped}次）と指定した公募回（第{call_round}次）は異なりますが、'
+            f'加点の判定ルールが同じため、そのまま読み込みました。')
+
+
 def read_bonus_wage_ledger(
     path: Path,
     application_ym_fallback: tuple[int, int] | None = None,
@@ -3132,11 +3329,10 @@ def read_bonus_wage_ledger(
         stamp = ws.cell(*BWL_RULE_CELL).value
         if stamp and str(stamp).strip() != rules.rule_id:
             raise ValueError('台帳の制度版と指定公募回が一致しません。')
-        stamped_round = ws.cell(*BWL_ROUND_CELL).value
-        if stamped_round is not None and str(stamped_round).strip():
-            if int(stamped_round) != call_round:
-                raise ValueError('台帳に保存された公募回と指定公募回が一致しません。')
+        round_note = _check_stamped_round(ws.cell(*BWL_ROUND_CELL).value, call_round, rules)
         ledger = BonusWageLedger(call_round=call_round)
+        if round_note:
+            ledger.notes.append(round_note)
         pref = ws.cell(*BWL_PREF_CELL).value
         ledger.prefecture = str(pref).strip() if pref else ''
         entered_month = ws.cell(*BWL_APPYM_CELL).value
@@ -3430,7 +3626,8 @@ def fill_bonus_sheet_2(
 ) -> Path:
     """加点措置②用シートに従業員データを入力。
 
-    シート構成: 期間①（令和7年7月・F14固定）と期間②（交付申請直近月・N14=EDATE(D5,-1)）を
+    シート構成: 期間①（基準月・F14固定。第7次以降=令和8年6月、第1〜6次=令和7年7月）と
+    期間②（交付申請直近月・N14=EDATE(D5,-1)）を
     横並び。F/N=基本給, G/O=時間換算給与 を書く。事業場内最低賃金 D7/D8 は時間換算給与列の
     MIN 配列式・D10 の判定式で自動算出されるため温存。
     交付申請月を D5 に日付で書き込み、N14=EDATE(D5,-1) の直近月ラベルを駆動する。

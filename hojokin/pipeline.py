@@ -751,9 +751,6 @@ def run_application_transfer(
         verify_template_labels(template_path, mapping, template_type,
                                call_round=application_context.call_round)
 
-        if extractor is None:
-            extractor = create_extractor(CLAUDE_API_KEY)
-
         # ファイル検出
         detector = FileDetector(resource_folder, selection_override=selection_override)
         logger.info(detector.summary())
@@ -809,6 +806,23 @@ def run_application_transfer(
             else:
                 # PDF は Phase 2 で処理
                 estimate_pdf_path = estimate_path
+
+        # 第7次: 台帳だけで判定できる停止（役員のみ等・生産性の前事業年度の総労働時間）を、
+        # 登記・決算書・納税・見積の抽出と事業内容の生成（API課金）より前に出す。
+        # 台帳は API を使わない決定論パーサーで読むので、決算書の抽出結果を待つ必要がない。
+        early_ledger = None
+        early_productivity_hours = None
+        if application_context.is_round7:
+            early_ledger = _read_application_ledger(
+                detector, extraction.financial, fiscal_month_override,
+                float(requirements.required_rate),
+            )
+            early_productivity_hours = _preflight_round7_ledger(
+                application_context, template_type, requirements, early_ledger,
+            )
+
+        if extractor is None:
+            extractor = create_extractor(CLAUDE_API_KEY)
 
         # ===== Phase 2: API使用（残高切れなら部分スキップ。Phase 1 結果は維持）=====
         # 製造原価報告書の自動検出フラグは Phase 2 内で例外発生しても参照されるため
@@ -910,29 +924,22 @@ def run_application_transfer(
         # 非標準フォーマットの Excel が渡されて決定論で読めない場合は
         # wage_status='no_data' で警告し、R215/R216 等は空欄で続行する。
         wage_extraction_method = '決定論パーサー（賃金台帳Excel直読）'
-        try:
-            wage_plan, ledger_employees, wage_status = _calc_wage_plan_from_ledger(
-                detector, extraction.financial, extractor=None,
-                fiscal_month_override=fiscal_month_override,
-                growth_rate=float(requirements.required_rate),
+        if early_ledger is not None:
+            # 第7次は Phase 2 の前に読んで検査済み（同じ決定論パーサーの結果を使う）
+            wage_plan, ledger_employees, wage_status = early_ledger
+        else:
+            wage_plan, ledger_employees, wage_status = _read_application_ledger(
+                detector, extraction.financial, fiscal_month_override,
+                float(requirements.required_rate),
             )
-        except Exception as e:
-            logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}', exc_info=True)
-            wage_plan, ledger_employees, wage_status = None, [], 'error'
 
         # 台帳の実績は生産性の前事業年度用。0年度目見込みへ流用しない。
         historical_wage_plan = wage_plan
         productivity_total_annual_hours = (historical_wage_plan or {}).get('total_annual_hours')
-        if application_context.is_round7 and requirements.selected and wage_status in {'officer_only', 'no_full_year_target'}:
-            raise ApplicationValidationError([
-                '役員のみ、または全月給与支給対象者なしのため個別確認が必要です。'
-                '通常の従業員FTEとして自動処理しません'
-            ])
-        if application_context.is_round7 and template_type.startswith('通常枠'):
-            # raw給与集計の互換処理では時間欠損が0時間になるため、提出用の
-            # 生産性だけは全従業員・全対象月の時間根拠を別途検査する。
-            productivity_total_annual_hours = _validated_productivity_annual_hours(
-                ledger_employees, application_context.productivity_period)
+        if early_productivity_hours is not None:
+            # 前事業年度の総労働時間は Phase 2 の前に全従業員・全対象月を検査済み。
+            # 決算書側（営業利益・人件費・償却）は抽出後のここで照合する。
+            productivity_total_annual_hours = early_productivity_hours
             validate_productivity_inputs(application_context, extraction.financial,
                                          productivity_total_annual_hours)
         if application_context.is_round7 or application_context.forecast_years:
@@ -1326,6 +1333,103 @@ def run_application_transfer(
     return status
 
 
+# 第7次通常枠で、台帳が読めないときの停止理由（_calc_wage_plan_from_ledger の status 別）
+_UNREADABLE_LEDGER_REASONS = {
+    'no_ledger': '賃金台帳が見つかりません',
+    'no_data': '賃金台帳から従業員を読み取れませんでした',
+    'error': '賃金台帳の読み取り中にエラーが発生しました',
+}
+# 停止メッセージに並べる氏名の上限（残りは「ほかN名」）
+_ISSUE_NAME_PREVIEW_LIMIT = 3
+
+
+def _read_application_ledger(
+    detector: 'FileDetector',
+    financial,
+    fiscal_month_override: int | None,
+    growth_rate: float,
+) -> tuple[dict[str, float] | None, list, str]:
+    """申請書作成用に賃金台帳を決定論パーサーで読む（API不使用）。例外は 'error' で返す。"""
+    try:
+        return _calc_wage_plan_from_ledger(
+            detector, financial, extractor=None,
+            fiscal_month_override=fiscal_month_override,
+            growth_rate=growth_rate,
+        )
+    except Exception as e:
+        logger.warning(f'賃金台帳処理エラー（申請書作成は続行）: {e}', exc_info=True)
+        return None, [], 'error'
+
+
+def _preflight_round7_ledger(context, template_type: str, requirements,
+                             ledger: tuple[dict | None, list, str]) -> float | None:
+    """第7次で台帳だけから決まる停止を、API抽出の前に出す。
+
+    通常枠は前事業年度の総労働時間を検査して返す（決算書との照合は抽出後）。
+    インボイス枠は生産性の要件がないため None を返す。
+    """
+    _plan, employees, wage_status = ledger
+    if requirements.selected and wage_status in {'officer_only', 'no_full_year_target'}:
+        raise ApplicationValidationError([
+            '役員のみ、または全月給与支給対象者なしのため個別確認が必要です。'
+            '通常の従業員FTEとして自動処理しません'
+        ])
+    if not template_type.startswith('通常枠'):
+        return None
+    reason = _UNREADABLE_LEDGER_REASONS.get(wage_status)
+    if reason:
+        raise ApplicationValidationError([
+            f'{reason}。通常枠の第7次は、生産性の基準にする前事業年度の総労働時間を'
+            '賃金台帳で確認してから申請書を作ります。前事業年度の賃金台帳（標準テンプレート形式のExcel）を'
+            '用意して、もう一度実行してください'
+        ])
+    # raw給与集計の互換処理では時間欠損が0時間になるため、提出用の
+    # 生産性だけは全従業員・全対象月の時間根拠を別途検査する。
+    return _validated_productivity_annual_hours(employees, context.productivity_period)
+
+
+def _names_preview(names: list[str]) -> str:
+    shown = '、'.join(names[:_ISSUE_NAME_PREVIEW_LIMIT])
+    rest = len(names) - _ISSUE_NAME_PREVIEW_LIMIT
+    return f'{shown} ほか{rest}名' if rest > 0 else shown
+
+
+def _ym_span_label(window) -> str:
+    from .wage_reader import wareki_label
+    return f'{wareki_label(*window[0])}〜{wareki_label(*window[-1])}'
+
+
+def _productivity_window_issues(missing: dict[str, list[str]],
+                                mismatched: dict[tuple, list[str]],
+                                expected: list[tuple[int, int]]) -> list[str]:
+    """対象年月を確認できない・前事業年度と違う従業員を、理由ごとにまとめた停止理由にする。"""
+    from .wage_reader import YEARLESS_WINDOW_ISSUES, wareki_label
+    example = wareki_label(*expected[0])
+    period = _ym_span_label(expected)
+    issues = []
+    for reason, names in missing.items():
+        head = f'{_names_preview(names)}：労働時間の対象年度を確認できません'
+        if reason in YEARLESS_WINDOW_ISSUES:
+            issues.append(
+                f'{head}。理由：{reason}。どの年度の労働時間か確かめられないため、生産性の総労働時間に使えません。'
+                f'月見出し（標準テンプレートでは5行目のG〜R列）を「{example}」のような年付きにして'
+                f'前事業年度（{period}）の12か月を示し、もう一度実行してください')
+        elif reason:
+            issues.append(
+                f'{head}。理由：{reason}。前事業年度（{period}）の12か月分だけを年付きの月見出しで示した'
+                '賃金台帳にして、もう一度実行するか、個別確認してください')
+        else:
+            issues.append(
+                f'{head}。前事業年度（{period}）の台帳か確かめられないため、'
+                '12か月の時間があっても前事業年度と推測しません。個別確認してください')
+    for window, names in mismatched.items():
+        issues.append(
+            f'{_names_preview(names)}：労働時間の対象年月が前事業年度と一致しません'
+            f'（台帳：{_ym_span_label(window)}／前事業年度：{_ym_span_label(expected)}）。'
+            '前事業年度の賃金台帳に差し替えてください')
+    return issues
+
+
 def _validated_productivity_annual_hours(employees: list, expected_period) -> float:
     """申請用の前期総時間。欠損を0時間・非在籍に読み替えない。raw計算とは独立。"""
     if not expected_period:
@@ -1337,6 +1441,8 @@ def _validated_productivity_annual_hours(employees: list, expected_period) -> fl
         expected.append((year, month))
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
     issues = []
+    missing_window: dict[str, list[str]] = {}
+    mismatched_window: dict[tuple, list[str]] = {}
     total = Decimal('0')
     active_count = 0
 
@@ -1359,11 +1465,11 @@ def _validated_productivity_annual_hours(employees: list, expected_period) -> fl
             continue
         fiscal_window = getattr(emp, 'fiscal_window', None)
         if not fiscal_window:
-            issues.append(f'{name}：労働時間の対象年度を確認できません。'
-                          '12か月の時間があっても前事業年度と推測せず、個別確認してください')
+            reason = str(getattr(emp, 'fiscal_window_issue', '') or '').strip()
+            missing_window.setdefault(reason, []).append(name)
             continue
-        if list(fiscal_window) != expected:
-            issues.append(f'{name}：労働時間の対象年月が前事業年度と一致しません')
+        if [tuple(ym) for ym in fiscal_window] != expected:
+            mismatched_window.setdefault(tuple(tuple(ym) for ym in fiscal_window), []).append(name)
             continue
         # 今の標準 raw 台帳は非在籍状態を保持しない。将来/独自の明示データが
         # あっても、None・0円から非在籍を推測せず、False の明示だけを除外する。
@@ -1392,6 +1498,7 @@ def _validated_productivity_annual_hours(employees: list, expected_period) -> fl
                 total += Decimal(str(average))
             else:
                 issues.append(f'{name} {month_label}：所定・実労働時間または在籍状態が未確認です')
+    issues = _productivity_window_issues(missing_window, mismatched_window, expected) + issues
     if not active_count:
         issues.append('生産性の前事業年度に用いる従業員の労働時間がありません（役員のみ等は個別確認）')
     if issues:

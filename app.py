@@ -88,7 +88,7 @@ from hojokin.config import CLAUDE_API_KEY, detect_prefecture
 from hojokin.application_context import validate_application_context
 from hojokin.application_ui import render_application_context
 from hojokin.subsidy_rules import rules_for_round
-from hojokin.template_versions import select_application_template
+from hojokin.template_versions import find_application_template, select_application_template
 from hojokin.result_identity import processing_identity
 from hojokin.warnings_catalog import tag as warn_tag
 from hojokin.pipeline import (
@@ -607,9 +607,19 @@ def run_processing(
             template_path = find_template(work_dir, template_type, call_round)
 
         if template_path is None:
+            message = 'テンプレートファイルが見つかりません。原本Excelもアップロードしてください。'
+            if call_round >= 7:
+                reasons: list[str] = []
+                for base in (template_dir, work_dir):
+                    for reason in find_application_template(base, template_type, call_round).rejected:
+                        if reason not in reasons:
+                            reasons.append(reason)
+                if reasons:
+                    message = ('アップロードした申請フォーマットを使えませんでした。\n'
+                               + '\n'.join(f'・{reason}' for reason in reasons))
             results['application'] = {
                 'status': 'エラー',
-                'message': 'テンプレートファイルが見つかりません。原本Excelもアップロードしてください。',
+                'message': message,
             }
         else:
             output_path = work_dir / f'{company_name}_{template_type}_AI版.xlsx'
@@ -967,7 +977,7 @@ with st.sidebar:
     # 決算月（必須）— ユーザー指定で賃金台帳の対象期間を確定 + AI推定誤りを照合
     # 2026-05 方針: AI 推定に任せず、ユーザーが明示的に指定する運用に変更
     # 加点系タスク（加点判定用賃金台帳の作成・加点判定）は暦月固定
-    # （令和6年10月〜令和7年9月＋交付申請直近月）で判定するため決算月を一切使わない。
+    # （公募回ごとの固定窓。第7次以降は令和7年10月〜令和8年9月＋交付申請直近月）で判定するため決算月を一切使わない。
     # 「（必須）」表示のまま残すと未選択でよいのか迷わせるため、非表示にする。
     _FISCAL_MONTH_OPTIONS = ['（選択してください）'] + [f'{i}月' for i in range(1, 13)]
     fiscal_month_override: int | None = None
@@ -2175,7 +2185,9 @@ if data_source == 'Google Drive':
             accept_multiple_files=False,
             type=['xlsx'],
             key='template_uploader_drive',
-            help='ツール名を選択済みの原本をアップロードするとそのファイルを使用します。未アップロード時はツール同梱の原本を使用します。',
+            help='ツール名を選択済みの原本をアップロードするとそのファイルを使用します。Driveから書き出した原本や名前を変えた原本も使えます'
+                 '（第7次以降は、第7次以降用の項目名が入り、旧回の基準（63円・令和7年7月など）の表記が残っていない原本に限る）。'
+                 '使えない場合は理由を表示します。未アップロード時はツール同梱の原本を使用します。',
         )
         if template_file is not None:
             st.caption(f'申請フォーマット: `{template_file.name}`')
@@ -2291,7 +2303,9 @@ else:
             accept_multiple_files=False,
             type=['xlsx'],
             key='template_uploader',
-            help='ツール名を選択済みの原本をアップロードするとそのファイルを使用します。未アップロード時はツール同梱の原本を使用します。',
+            help='ツール名を選択済みの原本をアップロードするとそのファイルを使用します。Driveから書き出した原本や名前を変えた原本も使えます'
+                 '（第7次以降は、第7次以降用の項目名が入り、旧回の基準（63円・令和7年7月など）の表記が残っていない原本に限る）。'
+                 '使えない場合は理由を表示します。未アップロード時はツール同梱の原本を使用します。',
         )
         if template_file is not None:
             st.caption(f'申請フォーマット: `{template_file.name}`')
@@ -2905,4 +2919,4 @@ if ('last_results' in st.session_state
 
 # ── フッター ──
 st.markdown('---')
-st.caption(f'補助金書類自動作成ツール v0.2.98 | カラフルボックス株式会社')
+st.caption(f'補助金書類自動作成ツール v0.2.99 | カラフルボックス株式会社')

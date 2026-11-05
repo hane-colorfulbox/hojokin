@@ -6,11 +6,13 @@
 生成する。判定エンジンはスキルに同梱した hojokin モジュール
 （ツール本番と同一コード）を使う。依存: Python3 + openpyxl のみ。
 
-使い方:
-  python run_katen_judge.py 台帳.xlsx
-  python run_katen_judge.py 台帳.xlsx --app-month 2026/08
-  python run_katen_judge.py 台帳.xlsx --fill 通常 --company 株式会社サンプル
-  python run_katen_judge.py 台帳.xlsx --fill インボイス --outdir 出力先
+使い方（--call-round で実際の公募回を必ず指定する。判定だけの実行でも必須）:
+  python run_katen_judge.py 台帳.xlsx --call-round 7
+  python run_katen_judge.py 台帳.xlsx --call-round 7 --app-month 2026/11
+  python run_katen_judge.py 台帳.xlsx --call-round 7 --fill 通常 --company 株式会社サンプル
+  python run_katen_judge.py 台帳.xlsx --call-round 7 --fill インボイス --outdir 出力先
+  第1〜6次（旧回）の訂正だけは --call-round 6 と旧版の台帳を使う。
+  交付申請月が2026年11月以降なのに公募回が6以下のときは、旧ルールで判定せずに止める。
 
 終了コード: 0=確定 / 2=入力・版・環境エラー / 3=未確定（該当様式は生成しない）
 """
@@ -32,17 +34,20 @@ if ROOT is None:
     sys.exit(2)
 sys.path.insert(0, str(ROOT))
 
-from hojokin.subsidy_rules import rules_for_round
+from hojokin.subsidy_rules import rules_for_round  # noqa: E402
 
 from hojokin.wage_reader import (  # noqa: E402
-    BONUS2_BASE_YM,
-    BONUS_THRESHOLD_YEN,
     fill_bonus_sheet_1,
     fill_bonus_sheet_2,
     judge_bonus_points,
     read_bonus_wage_ledger,
     ym_label,
 )
+
+# 第6次は2026年10月30日の締切で終了した（制度リファレンスの記録。第7次の締切は2026年12月1日）。
+# 2026年11月以降に交付申請する案件は第7次以降のルール（加点②は令和8年6月比55円等）で判定する。
+ROUND7_FIRST_CALL = 7
+ROUND7_FIRST_APPLICATION_YM = (2026, 11)
 
 # 公式様式（申請枠で①のテンプレが変わる。②は全枠共通）。値は公式のファイル名。
 KATEN_DIR = ROOT / '補助金加点'
@@ -63,7 +68,7 @@ def _dist_name(name: str) -> str:
     return name
 
 
-def form_path(name: str, call_round: int = 6) -> Path:
+def form_path(name: str, call_round: int) -> Path:
     """公式様式の実際の置き場所。開発リポジトリでは公式の名前、配布版では置き換えた名前。"""
     directory = ROOT / rules_for_round(call_round).forms_dir
     official = directory / name
@@ -129,7 +134,8 @@ def _print_report(res) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description='加点措置①②のローカル判定と公式様式生成')
     ap.add_argument('ledger', type=Path, help='記入済みの加点判定用賃金台帳 .xlsx')
-    ap.add_argument('--call-round', type=int, default=None, help='公募回（提出用様式生成には必須。7以降は新版）')
+    ap.add_argument('--call-round', type=int, default=None,
+                    help='実際の公募回（必須。7次は7。第1〜6次の訂正だけ6以下）')
     ap.add_argument('--app-month', type=_parse_app_month, default=None,
                     help='交付申請月（台帳C3が未入力の場合のフォールバック。例: 2026/08）')
     ap.add_argument('--fill', choices=sorted(FORM_S1), default=None,
@@ -142,14 +148,22 @@ def main(argv=None) -> int:
         print(f'❌ 台帳が見つかりません: {args.ledger}', file=sys.stderr)
         return 2
 
-    if args.fill and args.call_round is None:
-        print('❌ 提出用様式の生成には --call-round で公募回を指定してください。', file=sys.stderr)
+    if args.call_round is None:
+        print('❌ --call-round で実際の公募回を指定してください（7次は --call-round 7）。'
+              '判定だけの実行でも必須です。公募回によって判定期間・基準月・金額が変わるため、'
+              '指定がないまま旧ルールで判定しません。', file=sys.stderr)
         return 2
-    call_round = args.call_round if args.call_round is not None else 6
+    call_round = args.call_round
     try:
         ledger = read_bonus_wage_ledger(args.ledger, application_ym_fallback=args.app_month, call_round=call_round)
     except (ValueError, TypeError) as exc:
         print(f'❌ 台帳を確認してください: {exc}', file=sys.stderr)
+        return 2
+    if (call_round < ROUND7_FIRST_CALL and ledger.application_ym
+            and tuple(ledger.application_ym) >= ROUND7_FIRST_APPLICATION_YM):
+        print(f'❌ 交付申請月が{ym_label(ledger.application_ym)}なのに、公募回が{call_round}です。'
+              f'{ym_label(ROUND7_FIRST_APPLICATION_YM)}以降の申請は第7次以降のルールで判定します。'
+              f'--call-round 7 等の実際の公募回と、第7次以降用の加点判定用台帳を使ってください。', file=sys.stderr)
         return 2
     res = judge_bonus_points(ledger)
     print(f'台帳: {args.ledger.name}（従業員 {len(ledger.employees)}名・役員は台帳に含めない運用）')

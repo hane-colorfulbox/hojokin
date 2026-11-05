@@ -1,10 +1,32 @@
 """申請者・担当者が確認した前提を入力するStreamlit画面。予測・外部通信は行わない。"""
 from __future__ import annotations
 
+import numbers
+
+from .application_context import IT_SUBSIDY_LAST_NAME_YEAR, WAGE_PAST_GRANT_FIRST_YEAR
+
+PAST_GRANT_YEAR_LABEL = f'IT導入補助金の年度名（{WAGE_PAST_GRANT_FIRST_YEAR}〜{IT_SUBSIDY_LAST_NAME_YEAR}など）'
+PAST_GRANT_YEAR_HELP = (f'「IT導入補助金2024」なら2024と入力します。交付決定日の暦年ではありません'
+                        f'（IT導入補助金{IT_SUBSIDY_LAST_NAME_YEAR}の交付決定が翌年にあっても'
+                        f'{IT_SUBSIDY_LAST_NAME_YEAR}）。')
+
+
+def _whole_year(value):
+    """表の数値欄は小数や数値型で返ることがあるため、整数の年だけを int に直す。それ以外はそのまま検査へ回す。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    if isinstance(value, numbers.Real) and float(value).is_integer():
+        return int(value)
+    return value
+
 
 def render_application_context(template_type: str, call_round: int | None):
     import streamlit as st
-    from .application_context import ApplicationContext, validate_application_context
+    from .application_context import (
+        IT_SUBSIDY_FIRST_NAME_YEAR, ApplicationContext, validate_application_context,
+    )
 
     st.subheader('申請の前提と確認済みの給与計画')
     st.caption('確認が取れた内容を入力してください。未確認の項目は推測で補いません。'
@@ -32,11 +54,17 @@ def render_application_context(template_type: str, call_round: int | None):
         past_grants = []
     elif past_state == '確認済み・交付決定あり':
         st.caption('採択予定や入金の有無ではなく、年度・枠ごとの交付決定を記録してください。')
+        st.caption(f'年度は「IT導入補助金2024」なら2024のような補助金名の年度です。交付決定日の暦年ではありません。'
+                   f'賃上げ要件の判定に使うのはIT導入補助金{WAGE_PAST_GRANT_FIRST_YEAR}〜{IT_SUBSIDY_LAST_NAME_YEAR}です。'
+                   f'それより前の交付決定も記録します。デジタル化・AI導入補助金2026の交付決定は入れません。')
         st.caption('枠・類型の例：通常枠、インボイス枠（インボイス対応類型）、'
                    'デジタル化基盤導入枠（複数社連携IT導入類型）。類型が不明なら確定しません。')
-        records = st.data_editor([{'year': 2024, 'frame': '', 'decided': False}],
+        records = st.data_editor([{'year': None, 'frame': '', 'decided': False}],
                                  num_rows='dynamic', hide_index=True, key='ctx_past_grants',
-                                 column_config={'year': '交付年度',
+                                 column_config={'year': st.column_config.NumberColumn(
+                                                    PAST_GRANT_YEAR_LABEL, help=PAST_GRANT_YEAR_HELP,
+                                                    min_value=IT_SUBSIDY_FIRST_NAME_YEAR,
+                                                    max_value=IT_SUBSIDY_LAST_NAME_YEAR, step=1, format='%d'),
                                                 'frame': st.column_config.SelectboxColumn('交付決定の枠・類型', options=[
                                                     '通常枠', '通常枠A類型', '通常枠B類型',
                                                     '複数社連携IT導入枠',
@@ -46,7 +74,7 @@ def render_application_context(template_type: str, call_round: int | None):
                                                     'インボイス枠（電子取引類型）', 'セキュリティ対策推進枠']),
                                                 'decided': '交付決定を確認済み'})
         # An incomplete record must not disappear and make the remaining records look complete.
-        past_grants = [dict(row) for row in records
+        past_grants = [dict(dict(row), year=_whole_year(dict(row).get('year'))) for row in records
                        if any(value is not None and value is not False and str(value).strip()
                               for value in dict(row).values())]
         if not past_grants or not all(row.get('decided') is True
@@ -100,8 +128,11 @@ def render_application_context(template_type: str, call_round: int | None):
                                      ['未確認', '未実施', '実施済み・確認済み'], key='ctx_declaration')
     declaration_confirmed = None if declaration_state == '未確認' else declaration_state == '実施済み・確認済み'
     dc1, dc2 = st.columns(2)
-    declaration_method = dc1.text_input('実際の表明方法', key='ctx_declaration_method')
-    declaration_date = dc2.text_input('表明実施日（YYYY-MM-DD）', key='ctx_declaration_date')
+    declaration_method = dc1.text_input('実際の表明方法', key='ctx_declaration_method',
+                                        help='顧客に確認した方法だけを入力します（推測で「口頭」にしない）。')
+    declaration_date = dc2.text_input('表明実施日（YYYY-MM-DD）', key='ctx_declaration_date',
+                                      help='顧客に確認した実際の日付を入力すると、申請内容の「表明を行った日付」に出力します。'
+                                           '未確認なら空欄のままにします（シート作成日などの仮の日付は入れない）。')
     st.info('効果報告での0年度目の比較基準は未確定です。申請時の見込み値・根拠・版を保存してください。')
     payload = {
         'call_round': call_round, 'application_date': application_date,

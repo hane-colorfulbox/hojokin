@@ -1,22 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-補助金書類自動作成 CLI
+補助金書類自動作成 CLI（ローカル実行）
 
-使い方:
-  # 申請書 + 給与計算を一括実行
-  python run.py --company "顧客企業名" --template "通常枠_2026" --folder "./顧客資料/"
+使い方（どれも local サブコマンドで実行します）:
+  # 申請書 + 給与計算を一括実行（申請書には確認済みの案件設定JSONが必須）
+  python -B run.py local --company "顧客企業A" --template 通常枠_2026 --folder "./顧客資料/" --application-context "./案件設定.json"
 
   # 申請書のみ
-  python run.py --task application --company "顧客企業名" --template "通常枠_2026" --folder "./顧客資料/"
+  python -B run.py local --task application --company "顧客企業A" --template インボイス枠_2026 --folder "./顧客資料/" --application-context "./案件設定.json"
 
-  # 給与計算のみ
-  python run.py --task wage --company "顧客企業名" --folder "./顧客資料/"
+  # 原本を直接指定する（Driveから書き出した原本など。案件設定の公募回に合った版の原本を指定）
+  python -B run.py local --task application --company "顧客企業A" --template 通常枠_2026 --folder "./顧客資料/" --application-context "./案件設定.json" --template-path "./原本.xlsx"
 
-  # Google Drive連携（管理シートから実行）
-  python run.py --drive --sheet-id "1ABC..."
+  # 給与計算のみ（案件設定JSONは不要）
+  python -B run.py local --task wage --company "顧客企業A" --folder "./顧客資料/"
 
-  # ドライラン（APIなしでテスト）
-  python run.py --dry-run --company "テスト" --template "通常枠_2026" --folder "./テスト資料/"
+  # APIを使わない動作確認
+  python -B run.py local --dry-run --task application --company "テスト" --template 通常枠_2026 --folder "./テスト資料/" --application-context "./案件設定.json"
+
+案件設定JSONの書き方（公募回・申請日・交付決定歴・表明・給与0〜3年度目の見込み等）は
+docs/第7次申請_ツール入力手順.md を参照してください。
+Google Drive の一括実行（drive サブコマンド）は、案件ごとの確認済み申請前提に未対応のため停止しています。
 """
 from __future__ import annotations
 
@@ -119,8 +123,18 @@ def cmd_local(args):
 
     if args.task in ('all', 'application'):
         template_path = None
+        rejected: list[str] = []
         if args.template_path:
             template_path = Path(args.template_path)
+        elif application_context.call_round >= 7:
+            from hojokin.template_versions import find_application_template
+            for search_dir in (base_dir, Path(__file__).parent):
+                selection = find_application_template(search_dir, args.template,
+                                                       application_context.call_round)
+                rejected.extend(selection.rejected)
+                if selection.path is not None:
+                    template_path = selection.path
+                    break
         else:
             template_path = find_template(base_dir, args.template, application_context.call_round)
             if template_path is None:
@@ -129,6 +143,8 @@ def cmd_local(args):
 
         if template_path is None or not template_path.exists():
             print(f'エラー: テンプレートが見つかりません。--template-path で直接指定してください。')
+            for reason in dict.fromkeys(rejected):
+                print(f'  ・{reason}')
             sys.exit(1)
 
         print(f'テンプレート: {template_path.name}')
@@ -207,7 +223,8 @@ def main():
     sub = parser.add_subparsers(dest='mode')
 
     # ローカル実行
-    local = sub.add_parser('local', help='ローカルフォルダから実行')
+    local = sub.add_parser('local', help='ローカルフォルダから実行',
+                           formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     local.add_argument('--company', required=True, help='顧客名')
     local.add_argument('--folder', required=True, help='資料フォルダパス')
     local.add_argument('--template', default='通常枠_2026',
@@ -221,8 +238,8 @@ def main():
                        help='実行タスク（per_employee_wage は賃金台帳のみで一人当たり給与支給総額を算定）')
     local.add_argument('--dry-run', action='store_true', help='APIなしでテスト実行')
 
-    # Drive連携
-    drv = sub.add_parser('drive', help='Google Drive連携で実行')
+    # Drive連携（案件別の確認済み申請前提に未対応のため停止中。cmd_drive は案内だけ出して終了する）
+    drv = sub.add_parser('drive', help='Google Drive一括実行（停止中。local を使ってください）')
     drv.add_argument('--sheet-id', help='管理用SpreadsheetのID')
     drv.add_argument('--credentials', help='サービスアカウントJSONパス')
 
