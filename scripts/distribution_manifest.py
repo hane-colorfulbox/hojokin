@@ -49,6 +49,7 @@ ENGINE_FILES = (
 )
 
 ROUND7_GUIDES = (
+    'docs/第7次申請_担当者向け要点.md',
     'docs/第7次申請_変更点と使い方.md',
     'docs/第7次申請_確認待ち事項.md',
     'docs/第7次原本_改訂内容と再取込手順.md',

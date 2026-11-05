@@ -9,8 +9,8 @@
 ## 更新する場合
 
 1. 正本を修正して検証し、ソースをコミットします。
-2. PDF・HTMLは `python -B scripts/build_official_guide.py --source-ref <元コミット> --out-dir <未使用の出力先>` で再生成します。Markdown、BeautifulSoup、ReportLab、pypdfと日本語TrueTypeフォントが必要です。Windows以外では `--font` でフォントを指定します。
-3. プラグインは既存の `scripts/build_plugin.py` で生成し、private側で管理します。
+2. PDF・HTML・README・担当者向けZIPは `python -B scripts/build_official_guide.py --source-ref <元コミット> --edition-date <YYYY-MM-DD> --out-dir <未使用の出力先>` で生成します。その日時点の状況（本番反映やプラグイン配信の有無）は `--status-note` で1ページ目とREADMEに載せます。見た目の確認だけなら `--from-worktree` で作業ツリーから作業フォルダへ出力します。Markdown、BeautifulSoup、ReportLab、pypdfと日本語TrueTypeフォントが必要です。Windows以外では `--font` でフォントを指定します。
+3. プラグインは既存の `scripts/build_plugin.py` で生成し、private側で管理します。版はビルド元コミットの日付とSHAで決まるので、修正のコミットをすべて終えてから最後のコミットで1回だけ生成します（途中のコミットから作った版を配ると、担当者向けの「版の日付が○○以降」という見分け方をすり抜けます）。
 4. 担当者向けの内容を確認し、個人情報・内部参照・旧版・同梱漏れを点検して、新しいリリースのフォルダへ保存します。元コミット、ファイル別のSHA-256、検証結果を `manifest.json` に記録します。
 5. 配布物と管理記録をコミットします。配信・pushは別の実行段階です。
 

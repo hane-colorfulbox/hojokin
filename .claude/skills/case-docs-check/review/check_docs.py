@@ -21,11 +21,16 @@
      app.py からの独立コピー。scripts/check_docscheck_sync.py が AST 突合し、
      不一致ならプラグインのビルドを中止する（原本を変えたらここも直す）。
 
+賃金状況報告シート（公式様式）は B2・B4 の文言で版（第7回以降用か第1〜6次用か）と種類を
+判定する。ファイル名に「賃金状況報告」が無いもの（katen-judge の出力名・公式のダウンロード名）も、
+未分類のExcelのシート名から見つけて同じ判定をする（分類そのものは FileDetector のミラーのまま）。
+
 使い方:
   python check_docs.py --local <案件フォルダ>
   python check_docs.py --manifest manifest.json [--files-dir <DL済みフォルダ>]
   共通: --task both|application|katen  --entity 法人|個人|不明
-        --frame 通常枠|インボイス枠|不明  --json <出力パス>
+        --frame 通常枠|インボイス枠|不明  --call-round <公募回>  --app-month <YYYY/MM>
+        --json <出力パス>
 終了コード: 0=FAILなし / 1=FAILあり / 2=スクリプトエラー
 """
 import argparse
@@ -33,6 +38,7 @@ import json
 import re
 import sys
 import unicodedata
+import warnings
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -128,11 +134,14 @@ WAGE_HEADERS = [  # B5〜T5（プレーン月名。注記混入はツールの�
     '年間通勤手当', '年間賞与',
 ]
 
-# 加点判定用台帳テンプレ規格（原本: ツール/加点判定用賃金台帳テンプレート.xlsx 実測。
-# 列定数の単一の真実は hojokin/wage_reader.py の BWL_*）
+# 加点判定用台帳テンプレ規格（列定数の単一の真実は hojokin/wage_reader.py の BWL_*）。
+# 第1〜6次（旧回）用の原本: ツール/加点判定用賃金台帳テンプレート.xlsx 実測。
+# 第7次以降用の原本: ツール/第7次以降/加点判定用賃金台帳テンプレート.xlsx（年月見出しは bonus_headers(7)）。
 BWL_SHEET = '加点判定用明細'
 BWL_HEADER_ROW = 6
-BWL_HEADERS = [  # B6〜R6（暦月固定: 令和6年10月〜令和7年9月＋交付申請直近月）
+# 第1〜6次（旧回）用の見出し。第7次の現役値ではない。bonus_headers() が公募回に応じて
+# 年月部分（第7次以降は令和7年10月〜令和8年9月）を差し替え、No〜時間列と直近月列だけを共用する。
+BWL_HEADERS = [  # B6〜R6（第1〜6次: 令和6年10月〜令和7年9月＋交付申請直近月）
     'No', '氏名', '雇用形態', '月間所定\n労働時間',
     '令和6年10月\n基本給', '令和6年11月\n基本給', '令和6年12月\n基本給',
     '令和7年1月\n基本給', '令和7年2月\n基本給', '令和7年3月\n基本給',
@@ -143,7 +152,10 @@ BWL_HEADERS = [  # B6〜R6（暦月固定: 令和6年10月〜令和7年9月＋�
 
 
 def bonus_headers(call_round: int = 6) -> list[str]:
-    """公募回ごとの専用台帳見出し。旧列を新年度として読み替えない。"""
+    """公募回ごとの専用台帳見出し。旧列を新年度として読み替えない。
+
+    既定値6は旧来の呼び出しとの互換のため。第7次以降の確認では必ず実際の公募回を渡す。
+    """
     if call_round < 1:
         raise ValueError('公募回は1以上で指定してください')
     start_year = 2025 if call_round >= 7 else 2024
@@ -249,6 +261,40 @@ HEARING_FORMS = {
     },
 }
 
+# 賃金状況報告シート（公式様式）の版と種類（原本: 補助金加点/第7次以降/*.xlsx＝第7回以降用
+# 2026-11-02 公開版、補助金加点/*.xlsx＝第1〜6回用 を 2026-11-05 に実測）。
+# B2・B4 は NFKC 正規化と空白除去のあとで照合する（全角数字・全角＋・改行の揺れを吸収）。
+WAGE_REPORT_SHEET_PREFIX = '賃金状況報告シート'
+WAGE_REPORT_TITLE_CELL = 'B2'
+WAGE_REPORT_RULE_CELL = 'B4'
+WAGE_REPORT_ROUND7_FIRST = 7
+WAGE_REPORT_ROUND7_TITLE_MARK = '第7次公募回以降用'
+WAGE_REPORT_ROUND7_RULE_MARKS = ('令和7年10月から令和8年9月', '令和8年6月の事業場内最低賃金+55円')
+WAGE_REPORT_OLD_RULE_MARKS = ('令和6年10月から令和7年9月', '令和7年7月の事業場内最低賃金+63円')
+WAGE_REPORT_ROUND7 = 'round7_plus'
+WAGE_REPORT_ROUNDS_1_6 = 'rounds_1_6'
+WAGE_REPORT_VERSION_LABELS = {
+    WAGE_REPORT_ROUND7: '第7回以降用',
+    WAGE_REPORT_ROUNDS_1_6: '第1〜6次（旧回）用',
+}
+# 様式の種類: (B2 の正規化後に含まれる目印, 表示名, 使う枠)。上から順に照合する
+# （「加点措置1用」は「補助率引上げ・加点措置1用」にも含まれるため、補助率引上げを先に見る）。
+# 使う枠は交付申請マニュアル 11/2改訂版 p.18。None は全枠共通。加点措置①用は通常枠以外
+# （インボイス対応類型・電子取引類型・セキュリティ対策推進枠）用で、--frame の値ではインボイス枠に当たる。
+WAGE_REPORT_KINDS = (
+    ('補助率引上げ', '補助率引上げ・加点措置①用', '通常枠'),
+    ('加点措置2用', '加点措置②用', None),
+    ('加点措置1用', '加点措置①用', 'インボイス枠'),
+)
+# ファイル名で分類されなかった Excel のうち、シート名で賃金状況報告シートを探す対象
+WAGE_REPORT_SNIFF_EXTS = {'.xlsx', '.xlsm'}
+# Drive 経路でまだ DL していないときに、中身チェック対象（DL対象）へ載せる名前の手がかり
+# （katen-judge・ツールの出力名＝「加点措置」、公式のダウンロード名＝「chingin_houkoku」）
+WAGE_REPORT_NAME_HINTS = ('加点措置', 'chingin_houkoku', '賃金状況')
+# 中身チェック（CC の Read）で見る観点
+WAGE_REPORT_CONTENT_VIEW = ('様式の種類（補助率引上げ・加点措置①用／加点措置①用／加点措置②用）と枠の対応／'
+                            '版（B2【第7次公募回以降用】・B4の基準）と公募回の対応／記入状況')
+
 # 決算書ファイル名の期情報トークン（無いと mtime ガチャで前期誤選択のリスク）
 PL_PERIOD_RES = [
     re.compile(r'第\s*\d+\s*期'),
@@ -263,6 +309,34 @@ def norm(s) -> str:
     if s is None:
         return ''
     return unicodedata.normalize('NFC', str(s)).strip()
+
+
+def flat_text(s) -> str:
+    """様式の文言照合用。NFKC（全角数字・記号を半角へ）にしてから空白・改行を除く。"""
+    return re.sub(r'\s+', '', unicodedata.normalize('NFKC', str(s or '')))
+
+
+def wage_report_version(title, rule) -> str | None:
+    """賃金状況報告シートの B2（表題）・B4（説明文）から版を返す。
+
+    新旧の目印が両方ある・どちらも無いときは None（推測しない）。
+    """
+    title, rule = flat_text(title), flat_text(rule)
+    is_new = (WAGE_REPORT_ROUND7_TITLE_MARK in title
+              or any(m in rule for m in WAGE_REPORT_ROUND7_RULE_MARKS))
+    is_old = any(m in rule for m in WAGE_REPORT_OLD_RULE_MARKS)
+    if is_new == is_old:
+        return None
+    return WAGE_REPORT_ROUND7 if is_new else WAGE_REPORT_ROUNDS_1_6
+
+
+def wage_report_kind(title) -> tuple[str | None, str | None]:
+    """B2（表題）から (様式の表示名, 使う枠) を返す。判別できなければ (None, None)。"""
+    flat = flat_text(title)
+    for mark, label, frame in WAGE_REPORT_KINDS:
+        if mark in flat:
+            return label, frame
+    return None, None
 
 
 # ══════════════ 列挙（ローカル / manifest）══════════════
@@ -425,7 +499,8 @@ def check_presence(rep: Report, detected, skipped, task: str, entity: str):
             if not names.get(cat):
                 extra = ''
                 if cat == 'wage_ledger':
-                    extra = '（R215/R216 算定に実質必須。直近事業年度12ヶ月分を回収）'
+                    extra = ('（給与支給総額・従業員数（FTE）の算定に実質必須。実績台帳は指定した'
+                             '事業年度の12ヶ月分、給与0年度目の見込みの根拠と加点用は用途ごとの対象年月で回収）')
                 elif cat == 'tax':
                     extra = '（提出必須書類。法人=法人税「その1/その2」直近分、個人=所得税）'
                 elif cat == 'estimate':
@@ -500,19 +575,35 @@ def _header_diffs(ws, header_row, expected, start_col=2):
     return diffs
 
 
+
+def _bonus_round_number(value):
+    """台帳AG3の公募回を整数で返す（7, 7.0, '7', '第７次' に対応）。読めなければ None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) if float(value).is_integer() else None
+    text = unicodedata.normalize('NFKC', str(value)).strip().removeprefix('第').removesuffix('次')
+    return int(text) if text.isdigit() else None
+
 def check_excel_structures(rep: Report, detected, task: str, frame: str, entity: str,
-                           call_round: int | None = 6, application_ym=None):
-    """層2-3: Excel 構造チェック（ローカル取得済みの xlsx のみ。openpyxl 必要）"""
+                           call_round: int | None = 6, application_ym=None,
+                           sniff_entries=None):
+    """層2-3: Excel 構造チェック（ローカル取得済みの xlsx のみ。openpyxl 必要）
+
+    sniff_entries: ファイル名で分類されなかった Excel（未分類・過去の出力物）。
+    賃金状況報告シートの版チェックのためだけにシート名を見る。
+    """
     xlsx_wage = [e for e in detected.get('wage_ledger', [])
                  if e['ext'] in ('.xlsx', '.xlsm')]
     hearings = [e for e in detected.get('hearing', [])]
+    wage_reports = list(detected.get('wage_report', []))
 
     if not _try_openpyxl():
-        if xlsx_wage or hearings:
+        if xlsx_wage or hearings or wage_reports:
             rep.warn('NO-OPENPYXL',
-                     'openpyxl が無いため Excel 構造チェック（テンプレ規格・ヒアリング様式判定）'
-                     'をスキップしました。中身は目視確認してください')
-        return {'bonus_ledgers': [], 'hearing_form': None}
+                     'openpyxl が無いため Excel 構造チェック（テンプレ規格・ヒアリング様式判定・'
+                     '賃金状況報告シートの版）をスキップしました。中身は目視確認してください')
+        return {'bonus_ledgers': [], 'hearing_form': None, 'wage_reports': []}
 
     from openpyxl import load_workbook
 
@@ -551,12 +642,20 @@ def check_excel_structures(rep: Report, detected, task: str, frame: str, entity:
                     rep.fail('TPL-BONUS-RULE',
                              f'{e["name"]}: AG2の制度版が公募回と一致しません', [e['name']])
                 if call_round >= 7 or stored_round is not None:
-                    valid_round = (not isinstance(stored_round, bool)
-                                   and str(stored_round).strip() == str(call_round))
-                    if not valid_round:
+                    stored_num = _bonus_round_number(stored_round)
+                    if stored_num == call_round:
+                        pass
+                    elif (stored_num is not None and stored_num >= 7 and call_round >= 7
+                          and stored_rule == expected_rule):
+                        # 台帳リーダー（read_bonus_wage_ledger）と同じ扱い：制度版が同じなら読み込める
+                        rep.warn('BONUS-ROUND-MISMATCH',
+                                 f'{e["name"]}: AG3の公募回（第{stored_num}次）と指定回（第{call_round}次）が'
+                                 '異なります。判定ルールは同じなので読み込めますが、AG3を実際の回に直してください',
+                                 [e['name']])
+                    else:
                         rep.fail('BONUS-ROUND-MISMATCH',
-                                 f'{e["name"]}: AG3の公募回と指定回が一致しません。'
-                                 '第7次原本を8次で使う場合も実回を確認してください', [e['name']])
+                                 f'{e["name"]}: AG3の公募回と指定回が一致しません（制度版が異なるか、'
+                                 'AG3を読み取れません）。実際に申請する公募回を確認してください', [e['name']])
             # 月別時間列は旧台帳では全体が任意。存在するなら旧新混在を検出する。
             if any(ws.cell(BWL_HEADER_ROW, col).value is not None for col in range(19, 31)):
                 year_headers = bonus_headers(call_round or 6)[4:-1]
@@ -607,8 +706,105 @@ def check_excel_structures(rep: Report, detected, task: str, frame: str, entity:
                   '冊数は固定しません。3事業年度にまたがる場合もあります）')
 
     hearing_form = _check_hearing(rep, hearings, frame, entity)
+    reports = _check_wage_reports(rep, wage_reports, sniff_entries or [], frame, call_round)
     return {'bonus_ledgers': [e['name'] for e in bonus_ledgers],
-            'hearing_form': hearing_form}
+            'hearing_form': hearing_form,
+            'wage_reports': reports}
+
+
+def _read_wage_report(path: str):
+    """賃金状況報告シートの (シート名, B2, B4) を返す。該当シートが無ければ None。"""
+    from openpyxl import load_workbook
+
+    with warnings.catch_warnings():
+        # 公式様式の拡張データ検証・図形は openpyxl が読めず警告を出すが、B2/B4 の読取には無関係
+        warnings.simplefilter('ignore')
+        wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        for ws in wb.worksheets:
+            if flat_text(ws.title).startswith(WAGE_REPORT_SHEET_PREFIX):
+                return (ws.title, ws[WAGE_REPORT_TITLE_CELL].value,
+                        ws[WAGE_REPORT_RULE_CELL].value)
+        return None
+    finally:
+        wb.close()
+
+
+def _wage_report_round_findings(rep: Report, name: str, version, call_round):
+    """版と公募回の突合。旧版を第7次以降に使う・新版を旧回に使うのは FAIL。"""
+    label = WAGE_REPORT_VERSION_LABELS.get(version, '版を判別できない様式')
+    if call_round is None:
+        rep.info('WAGE-REPORT-VERSION',
+                 f'{name}: 賃金状況報告シートは{label}です（公募回が未指定のため適否は未判定）', [name])
+        return
+    if version is None:
+        rep.warn('WAGE-REPORT-VERSION-UNKNOWN',
+                 f'{name}: 賃金状況報告シートの版を B2・B4 から判別できません。'
+                 f'第{call_round}次用の公式様式か目視で確認してください', [name])
+        return
+    expected = WAGE_REPORT_ROUND7 if call_round >= WAGE_REPORT_ROUND7_FIRST else WAGE_REPORT_ROUNDS_1_6
+    if version == expected:
+        return
+    if expected == WAGE_REPORT_ROUND7:
+        rep.fail('WAGE-REPORT-OLD-VERSION',
+                 f'{name}: 賃金状況報告シートが第1〜6次（旧回）用の様式です（B2に【第７次公募回以降用】が無く、'
+                 'B4が令和6年10月〜令和7年9月／令和7年7月比+63円の基準）。'
+                 f'第{call_round}次では公式サイトの第7回以降用の様式で作り直してください', [name])
+    else:
+        rep.fail('WAGE-REPORT-ROUND-MISMATCH',
+                 f'{name}: 賃金状況報告シートが第7回以降用ですが、指定の公募回は第{call_round}次です。'
+                 '旧回の訂正なら旧回用の様式を使ってください', [name])
+
+
+def _check_wage_reports(rep: Report, wage_reports, sniff_entries, frame: str, call_round):
+    """層3: 賃金状況報告シート（公式様式）の版と種類。
+
+    ファイル名で分類されたものに加え、ファイル名に「賃金状況報告」が無い Excel もシート名で
+    見つけて判定する（katen-judge の出力名「会社名_加点措置②用.xlsx」や公式のダウンロード名など）。
+    """
+    candidates = [(e, False) for e in wage_reports]
+    candidates += [(e, True) for e in sniff_entries
+                   if e.get('ext') in WAGE_REPORT_SNIFF_EXTS and e.get('local_path')]
+    found = []
+    for e, by_sheet in candidates:
+        name = e['name']
+        if not e.get('local_path'):
+            rep.info('NOT-LOCAL',
+                     f'{name} はローカル未取得のため賃金状況報告シートの版チェックをスキップ'
+                     '（ダウンロード後に再実行可）', [name])
+            continue
+        try:
+            sheet = _read_wage_report(e['local_path'])
+        except Exception as ex:
+            if not by_sheet:
+                rep.warn('XLSX-OPEN-ERROR', f'{name} を開けません: {ex}', [name])
+            continue
+        if sheet is None:
+            if not by_sheet:
+                rep.warn('WAGE-REPORT-NO-SHEET',
+                         f'{name}: 「{WAGE_REPORT_SHEET_PREFIX}」で始まるシートがありません。'
+                         '公式様式か確認してください', [name])
+            continue
+        _sheet_title, title_cell, rule_cell = sheet
+        version = wage_report_version(title_cell, rule_cell)
+        kind, kind_frame = wage_report_kind(title_cell)
+        found.append({'name': name, 'kind': kind, 'version': version,
+                      'found_by_sheet': by_sheet, 'local_path': e.get('local_path'),
+                      'id': e.get('id')})
+        if by_sheet:
+            rep.info('WAGE-REPORT-BY-SHEET',
+                     f'{name}: ファイル名に「賃金状況報告」がありませんが、シート名から'
+                     f'賃金状況報告シート（{kind or "種類不明"}）と判断しました', [name])
+        _wage_report_round_findings(rep, name, version, call_round)
+        if kind is None:
+            rep.warn('WAGE-REPORT-KIND-UNKNOWN',
+                     f'{name}: 様式の種類（補助率引上げ・加点措置①用／加点措置①用／加点措置②用）を'
+                     'B2 から判別できません。目視で確認してください', [name])
+        elif frame != '不明' and kind_frame is not None and kind_frame != frame:
+            rep.fail('WAGE-REPORT-FRAME-MISMATCH',
+                     f'{name}: 「{kind}」は{kind_frame}用の様式ですが、案件は{frame}です。'
+                     '補助率引上げ・加点措置①用は通常枠だけ、加点措置①用は通常枠以外で使います', [name])
+    return found
 
 
 def _sa_id_row_by_label(ws):
@@ -706,8 +902,11 @@ def _check_hearing(rep: Report, hearings, frame: str, entity: str):
     return form_found
 
 
-def build_content_targets(detected):
-    """CC が中身を Read で確認すべきファイルと観点（SKILL.md §5 が消費）"""
+def build_content_targets(detected, wage_reports_by_sheet=None):
+    """CC が中身を Read で確認すべきファイルと観点（SKILL.md §5 が消費）
+
+    wage_reports_by_sheet: ファイル名ではなくシート名で見つけた賃金状況報告シート。
+    """
     plan = {
         'registry': '種別（履歴事項全部証明書か）／証明日が3ヶ月以内か／全ページ（証明文・登記官押印）',
         'tax': '種別（その1/その2・税目）／対象事業年度が直近決算期と一致するか／税務署発行か',
@@ -717,7 +916,7 @@ def build_content_targets(detected):
         'wage_ledger': '用途別の対象年月（給与0年度目見込み／生産性前事業年度実績／加点固定窓・申請前月）'
                        'を区別／対象者とFTEの確認／賞与・通勤手当の算入根拠／未回収と0円を区別',
         'hearing': '確認事項シートの「確認済」欄／未記入項目の妥当性',
-        'wage_report': '様式（加点①/②）と記入状況',
+        'wage_report': WAGE_REPORT_CONTENT_VIEW,
     }
     targets = []
     for cat, view in plan.items():
@@ -726,6 +925,10 @@ def build_content_targets(detected):
                             'name': e['name'], 'check': view,
                             'local_path': e.get('local_path'),
                             'id': e.get('id')})
+    for r in wage_reports_by_sheet or []:
+        targets.append({'category': 'wage_report', 'label': CAT_LABELS['wage_report'],
+                        'name': r['name'], 'check': WAGE_REPORT_CONTENT_VIEW,
+                        'local_path': r.get('local_path'), 'id': r.get('id')})
     return targets
 
 
@@ -783,8 +986,10 @@ def main() -> int:
                      '実際の申請月が未指定です。加点②の直近月は台帳C3と照合し、申請延期時は再確認します')
     check_presence(rep, detected, skipped, args.task, args.entity)
     check_submissions(rep, entries)
+    output_names = set(excluded_outputs)
+    sniff_entries = unmatched + [e for e in entries if e['name'] in output_names]
     extra = check_excel_structures(rep, detected, args.task, args.frame, args.entity,
-                                   args.call_round, application_ym)
+                                   args.call_round, application_ym, sniff_entries)
 
     for name in shortcuts:
         rep.warn('SHORTCUT', 'Driveショートカットのため実体を解決できません。'
@@ -808,7 +1013,17 @@ def main() -> int:
                  '未分類の書類らしきファイルがあります。必要書類が非標準名で紛れて'
                  'いないか名前と中身を確認してください', doc_unmatched)
 
-    targets = build_content_targets(detected)
+    wage_reports = extra.get('wage_reports') or []
+    report_names = {r['name'] for r in wage_reports}
+    # まだ中身を開けていない（Drive 未DL）が、名前から賃金状況報告シートらしいもの。
+    # DL 後の2回目の実行でシート名から版を判定できるよう、DL 対象に載せる。
+    hinted = [{'name': e['name'], 'local_path': e.get('local_path'), 'id': e.get('id')}
+              for e in sniff_entries
+              if e['ext'] in WAGE_REPORT_SNIFF_EXTS and not e.get('local_path')
+              and e['name'] not in report_names
+              and any(h in norm(e['name']) for h in WAGE_REPORT_NAME_HINTS)]
+    targets = build_content_targets(
+        detected, [r for r in wage_reports if r['found_by_sheet']] + hinted)
 
     # ---- 人間可読出力 ----
     print(f'対象: {args.local or args.manifest} ／ タスク: {args.task} ／ '
@@ -835,6 +1050,8 @@ def main() -> int:
             'context': {'task': args.task, 'entity': args.entity, 'frame': args.frame,
                         'hearing_form': extra.get('hearing_form'),
                          'bonus_ledgers': extra.get('bonus_ledgers'),
+                         'wage_reports': [{k: r[k] for k in ('name', 'kind', 'version', 'found_by_sheet')}
+                                          for r in wage_reports],
                          'call_round': args.call_round,
                          'application_ym': application_ym,
                          'bonus_required_months': required_wage_months(args.call_round, application_ym)
