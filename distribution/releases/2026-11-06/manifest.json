@@ -1,0 +1,74 @@
+{
+  "release": "2026-11-06",
+  "edition": "第7次対応版（非在籍の月・加点台帳の時間換算の対象月額に対応）",
+  "source_commit": "3fd28f72a5d477994a16a0e97ac5ccd0fcffd89b",
+  "version": "2026.11.06-3fd28f72a5d4",
+  "supersedes": "2026-11-05（未配信のまま差し替え。v0.2.99・2026.11.05 は加点台帳のAH〜AT列を読まないため配らない）",
+  "files": {
+    "README.txt": {
+      "sha256": "5be0ed00b456fa8442029bd93d9130ed14a8c1a23bad162a21a1cb8442b64bcc",
+      "bytes": 1667
+    },
+    "第7次申請_担当者向け要点と公式資料の確認範囲_2026-11-06.pdf": {
+      "sha256": "5757d5391ebbb7d54b95392aa019bb5523bd8e91e169628529c68dc26afc56d9",
+      "bytes": 269950
+    },
+    "第7次申請_配布資料_2026-11-06.zip": {
+      "sha256": "48f5cfcb517af7c7343b45e7ff39995348f531c0b111cafd73101949cb4c18aa",
+      "bytes": 295260
+    },
+    "案内HTML/第7次申請_ツール入力手順.html": {
+      "sha256": "7154a3f724590186c987bff33dcf49da8cbba517aa35d5ff432428846c8f6b69",
+      "bytes": 12781
+    },
+    "案内HTML/第7次申請_公式資料で判断できることと確認の範囲.html": {
+      "sha256": "09b938c8aa1a91762e06b1a574d4fc223cebe954578ba9af4b2fc8cb7f2887c3",
+      "bytes": 22717
+    },
+    "案内HTML/第7次申請_変更点と使い方.html": {
+      "sha256": "db9a425687c30c1980175409135fd4a5f9726a570e15548f47885371e7506c3e",
+      "bytes": 33244
+    },
+    "案内HTML/第7次申請_担当者向け要点.html": {
+      "sha256": "adac5962dce43e8682001a18fdcd29d5cf16bfa39b1e698317766e8ad387282a",
+      "bytes": 11477
+    },
+    "案内HTML/第7次申請_確認待ち事項.html": {
+      "sha256": "fad666170e43fc5aaea61d8615f0278c585ff4e470adcd2ccf6eecf77e2da4f5",
+      "bytes": 11425
+    },
+    "案内HTML/管理者・開発者向け/第7次原本_改訂内容と再取込手順.html": {
+      "sha256": "6cbf511347bfbe2be285550f2133ec404e3697a262651397ca62b9fb4ce39c5c",
+      "bytes": 12149
+    }
+  },
+  "source_inputs_sha256": {
+    "docs/第7次申請_担当者向け要点.md": "77ae5b9df7bffd4b2d6cab570fd6b275b1c46178e6f9e62e745624279d5e2da7",
+    "docs/第7次申請_変更点と使い方.md": "f716707bee18979fff45a417bc66a24a2f792e48640bc9f61c6b209b96b7c9d0",
+    "docs/第7次申請_確認待ち事項.md": "2d7d46601ab0440b95354fcd692d52a8dce6aa96152cf517b241c9de8caac160",
+    "docs/第7次申請_公式資料で判断できることと確認の範囲.md": "ac31bfba50ee1a1b1f11278ffaf678b13514bc577d1c754a3a0880691bdc7e8b",
+    "docs/第7次申請_ツール入力手順.md": "29e0cc8943960294153860b42854f8ff3d0b87245f4563e4a748bcfdbf53cf49",
+    "docs/第7次原本_改訂内容と再取込手順.md": "20ddaee497dc0503ae7c5fb99e0307772c3fbc5ba6dc35ede479501b6680c70a"
+  },
+  "plugin": {
+    "managed_in": "private hojokin-plugins repository",
+    "commit": "6f4e599",
+    "version": "2026.11.06-3fd28f72a5d4",
+    "zip_sha256": "8f8a567cb553efc3de30b30e78a55b3fdcc6815bca49a4518eb3da68679232e9",
+    "zip_archived_here": false
+  },
+  "tool": {
+    "app_footer_version": "v0.2.100",
+    "source_commit": "3fd28f72a5d4"
+  },
+  "verification": {
+    "pytest_tests": "193 passed, 171 subtests passed（python -B -m pytest -q tests）",
+    "plugin_tests": "9/9 passed",
+    "plugin_gates": "全ゲート合格（同期・frontmatter・構成・相対リンク・古い語・共通ブロック・xlsxメタデータ・PII・claude plugin validate）",
+    "debug_scripts": "82本すべて終了コード0。実APIを呼ぶ test_v0_2_24_real_api_minimal は方針により未実行。test_ai_midyear_position_reconcile は顧客データがない作業コピーのためスキップ",
+    "pdf_pages": 9,
+    "review": "別セッションの2コミット（1bb9e1f・27096bf）を6観点で独立レビューし、反証を通った11件と再レビューの指摘（月給制の分母・画面文言・旧形式台帳の移し替え条件など）を直した",
+    "pii_scan": "origin/main..main の追加行で顧客名簿のヒットなし（社員名・合成データの誤検知のみ）"
+  },
+  "delivery_status": "書類作成ツールは 2026-11-06 に本番反映済み（hojokin main を push）。プラグイン配信（hojokin-plugins の push）・Drive原本更新・担当者への周知は管理者が行う"
+}

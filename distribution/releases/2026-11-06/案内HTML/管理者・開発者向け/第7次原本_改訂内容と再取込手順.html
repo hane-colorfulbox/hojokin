@@ -1,0 +1,64 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>第7次原本：改訂内容と再取込手順</title><style>*{box-sizing:border-box}body{margin:0;background:#f3f6fa;color:#183146;font:15px/1.85 "Yu Gothic UI",Meiryo,sans-serif}main{max-width:1120px;margin:auto;padding:30px 26px 70px}header{background:#163c59;color:#fff;padding:26px 30px;border-radius:12px}header p{color:#dae8f4;margin-bottom:0}h1{font-size:26px;line-height:1.5;margin:0 0 12px}h2{font-size:21px;margin:30px 0 14px}h3{font-size:17px}article{background:#fff;padding:26px 30px;border:1px solid #d9e2ea;border-radius:10px;margin-top:22px}a{color:#145bb4;text-underline-offset:3px}li{margin:7px 0}.scroll{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;vertical-align:top;padding:11px;border:1px solid #d9e2ea}th{background:#edf3f9}pre{padding:15px;background:#f1f5f9;overflow:auto}code{font-size:13px;overflow-wrap:anywhere}@media(max-width:650px){main{padding:16px 10px}header,article{padding:20px 15px}h1{font-size:23px}table{font-size:13px}th,td{padding:8px}}</style></head><body><main><header><h1>第7次原本：改訂内容と再取込手順</h1><p>2026年11月6日版　第7次対応版　社内配布用</p></header><article><p>対象読者：管理者・開発者と原本管理担当。申請担当者は読まなくてかまいません（申請担当者向けの入口は <a href="../第7次申請_担当者向け要点.html">担当者向け要点</a>）。</p>
+<p>更新日：2026-11-06。ここにあるのは、ローカルに保有している原本から作った第7回公募（以下「7次」）用の改訂候補です。会社Driveの最新版との照合と書き込みは、この手順の外で原本管理担当が行います。</p>
+<h2>1. 用意したもの</h2>
+<ul>
+<li><code>ツール/第7次以降/</code>：申請書4種類、ヒアリング4種類、加点専用台帳。第1〜6次用は元の場所に保存しています。</li>
+<li><code>補助金加点/第7次以降/</code>：公式の7次用3様式。取得した公式ファイルをそのまま保持しています。</li>
+<li><code>scripts/build_round7_templates.py</code>：旧原本からの改訂を再現する処理。入力セルの表示、関連リンク、最賃候補、版マーカーだけを更新します。加点専用台帳だけは、右端に時間換算の対象月額の列（AH〜AT列）を足します。既存の行・列は動かさず、足したセルには原本にある書式番号を使うので、<code>xl/styles.xml</code>・<code>xl/workbook.xml</code> は旧回の台帳と同じバイトのままです。専用台帳だけを作り直すときは <code>--ledger-only</code>（<code>--log</code> は必須、公式原本のフォルダは不要）を付けます。</li>
+</ul>
+<p>社内原本の行・シート構成・図形などは維持しています。給与は0〜3年度目、FTEは確認済みの入力とし、固定された過去の年月を計画の年度表示に使いません。通常枠の生産性シートは、計画列（C〜E列）の自動予測式をやめて確認済みの値を入れる欄にし、42行目は1年後と年平均の率を表示します（未入力なら空欄）。申請書の生成時に確認済み計画を検算します。表示の文字だけでなく、クリック先も7次の公式様式に変えています。</p>
+<h2>2. 原本管理担当へ渡す改訂内容</h2>
+<ol>
+<li>加点①の期間と上限（令和8年度改定の地域別最賃未満）、加点②の基準月（2026年6月）と55円、公式様式へのリンク、地域別最賃の候補を変えます。</li>
+<li>給与0年度目を当期の見込みと明示し、対象人数・根拠・確認状況を集めます。年度別のFTEと詳細は、生成物の「申請前提・給与見込」シートに保存します。</li>
+<li>生産性の前事業年度の実績と、申請翌事業年度から3年の計画を分けます。給与と生産性の計画1〜3年度目は同じ期間です。</li>
+<li>過去の交付歴（補助金名の年度と枠）・表明の方法と実施日・任意加点などは、確認済みの事実だけを記録します。</li>
+<li>回収資料は用途別の指定年月とし、「2冊」などの固定の冊数で依頼しません。</li>
+<li>原本・ヒアリングの文言を直します。通常枠ヒアリングの補助率引上げの条件（確認事項C33。旧原本から条件が逆に書かれていた）、加点②の基準月の略記（R7.7→2026年6月）、表明の方法・実施日の初期値をなくし「顧客に確認した事実を入力」にする、賃上げ要件の確認文を1年後と年平均・3%／3.5%に分ける、IT戦略ナビwithの行にIT経営サポートセンターを併記する、最低賃金欄の注記を「主たる事業場」にする、シート上に「第7次以降用」の版表示を入れる、加点判定用台帳の記入ルール（母数は各月の常時使用する従業員、F〜R列は基本給だけ、AH〜AT列は厚労省方式の時間換算の対象月額＝その月の賃金から6種類を除いた額（基本給に含まれる固定残業代は除く。歩合給・出来高給がある人は総労働時間で換算した額）、非在籍の月は「非在籍」と記入）。</li>
+<li>ビルド（scripts/build_round7_templates.py）は、第1〜6次（旧回）の表記（63円、R7.7、シート作成日 など）が残っていると止まります。</li>
+</ol>
+<p>回収項目の案は、公式の入力に必要な情報から作っています。調整済みの票があれば共有してもらい、整合させます。これは社内運用の調整で、事務局の定義が未公表という意味ではありません。</p>
+<h2>3. Driveへ反映する段階</h2>
+<p>会社アカウントと対象原本を確認し、既存の原本をエクスポートしてバックアップします。今回の候補と最新版の差分を比べ、他の担当者の変更を消さないようにします。</p>
+<p>反映先と内容を確認してから、原本管理担当が新しい7次版として反映します。旧版は、第1〜6次の申請の訂正と効果報告のために残します。開発リポジトリの作業だけでは、Driveへの反映は完了しません。</p>
+<h2>4. 更新後の再取込</h2>
+<p>この節のコマンドは、管理者が開発リポジトリで実行します。プラグインだけを受け取った利用者に、原本の上書きやパッチの実行を求めるものではありません。</p>
+<p>ツールは、7次の申請原本を次のように選びます。正式名のファイル（<code>【原本_法人】企業名_通常枠_法人2026_v2.xlsx</code>、<code>【原本_個人】企業名_通常枠_個人2026.xlsx</code>、<code>【原本_法人】企業名_インボイス枠_法人2026_v2.xlsx</code>、<code>【原本_個人】企業名_インボイス枠_個人2026.xlsx</code>）を優先し、使える原本が同じ場所に2つ以上あると止まります。</p>
+<div class="scroll"><table>
+<thead>
+<tr>
+<th>原本の状態</th>
+<th>ツールの扱い</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>版マーカーがある（ファイル情報 <code>docProps/core.xml</code> の件名が <code>hojokin:2026_7_plus</code>）</td>
+<td>7次以降用として使う</td>
+</tr>
+<tr>
+<td>版マーカーがない（Driveから書き出した原本、名前を変えた原本など）</td>
+<td>「申請内容」シートの項目の位置がツールの転記対応表と一致し（W-TPL-001と同じ照合）、7次以降用の項目名があり、第1〜6次の基準の表記（63円、令和7年7月、令和7年度改定など）が残っていないときだけ使う</td>
+</tr>
+</tbody>
+</table></div>
+<p>Driveから書き出したxlsxには、ファイル情報（<code>docProps/core.xml</code>）そのものが入っていません。そのため、書き出した原本は中身の確認で選ばれます。行の増減などで中身の確認に通らないと選ばれないので、下の手順4・7で確かめます。第1〜6次の案件では、<code>ツール\</code> 直下の正式名の旧原本を使い、7次以降用の原本は使いません。</p>
+<ol>
+<li>Driveの更新済み原本を新しい作業フォルダへエクスポートし、取得日・対象版・ファイルのハッシュを記録します。既存のローカル原本に直接上書きしません。</li>
+<li>通常枠個人で既存の機械修正が必要な場合は、未使用の出力先を指定して実行します。<code>--allow-new-input</code> は内容確認を省く指定ではありません。想定セルが変わっていれば処理は停止します。</li>
+</ol>
+<p><code>powershell
+   python scripts/patch_genpon_tsujo_kojin_from_drive.py --input &lt;新エクスポート.xlsx&gt; --output &lt;未使用の修正候補.xlsx&gt; --allow-new-input</code></p>
+<ol>
+<li>原本管理側で同じ修正がすでに入っている場合は、旧パッチを無理に当てません。停止理由と差分を確認し、変更不要なセルを二重に直さないようにします。</li>
+<li>行・設問に変更があれば、固定セルのマッピングとヒアリング様式の判別を測り直します。旧版のマッピングを上書きして旧案件を壊さないよう、版別に検証します。</li>
+<li>候補のファイル名を正式名にそろえます。版マーカーは付けなくても中身の確認で選ばれますが、付ける場合は <code>scripts/build_round7_templates.py</code> と同じ方法で、ZIP内の <code>docProps/core.xml</code> の件名だけを書き換え、他の部品はバイト単位で変えません。Driveの書き出しには <code>docProps/core.xml</code> がないため、このファイルの追加と、<code>[Content_Types].xml</code>・<code>_rels/.rels</code> への登録も必要です。openpyxlで読み込んで保存し直す方法は、図形・入力規則などが失われるので使いません。マーカーを付けるだけの専用コマンドはまだありません。</li>
+<li>原本の版マーカー・4種類のラベル、給与と生産性の年度、リンク先、プルダウン、数式、画像・保護を読み直して確認します。通常枠個人の既存の構造検証と、新旧4原本の統合テストを行います。</li>
+<li>ツールに選ばれることを確認します。開発リポジトリの直下で次を実行し、4種類すべてで <code>ツール\第7次以降\</code> の正式名のパスが表示されることを確かめます。<code>None</code> と表示された種類は、ファイル名・版マーカー・項目の位置・旧回の表記のどれかが合っていません。</li>
+</ol>
+<p><code>powershell
+   python -X utf8 -B -c "from pathlib import Path; from hojokin.template_versions import APPLICATION_FILENAMES as F, select_application_template as s; [print(k, s(Path('.'), k, 7)) for k in F]"</code></p>
+<p>公募回を6にして同じコマンドを実行し、第1〜6次では <code>ツール\</code> 直下の旧原本が選ばれることも確かめます。
+8. 配布元へ反映してコミットした後、プラグインを作り直して検証します。Drive原本の更新・本番への反映・全員への配信は、それぞれの完了状態を分けて記録します。</p>
+<h2>5. 採用を止める条件</h2>
+<p>対象回が分からない、旧版のリンクが残っている、ラベル・行が合わない、ツールに選ばれない（手順7で <code>None</code>）、表明・交付歴が未確認、見込みの根拠が足りない、賃金・人数が未確定、意図しない数式や画像の欠落がある。これらのどれかがあれば、その候補を提出や配布に使いません。</p></article></main></body></html>
