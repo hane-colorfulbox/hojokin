@@ -53,6 +53,9 @@ SUMMARY_NAME = 'guide_artifact_summary.json'
 DEFAULT_LABEL = '第7次対応版'
 DEFAULT_TOOL_MIN = 'v0.2.100'
 DEFAULT_PLUGIN_MIN = '2026.11.06'
+# 正本に「vX 以上」「YYYY.MM.DD 以降」と書いた版の基準（旧版を「使わない版」として挙げる文は対象外）
+MIN_VERSION_RES = (re.compile(r'(?<![A-Za-z])v(\d+(?:\.\d+)+)\s*(?:以上|以降)'),
+                   re.compile(r'(?<![\d.])(\d{4}\.\d{2}\.\d{2})\s*(?:以上|以降)'))
 PDF_PAGE_RANGE = (4, 12)
 FIRST_PAGE_MARK = '第7次申請：担当者向け要点'
 PDF_REQUIRED_TERMS = ('担当者向け要点', '17:00', '55円', '令和8年度改定', '常時使用する従業員',
@@ -100,6 +103,21 @@ def load_sources(source_ref, from_worktree):
             raise GuideBuildError(f'コミット {head[:12]} に正本がそろっていません。正本をコミットしてから生成してください') from e
         meta = {'mode': 'git', 'commit': head, 'commit_date': git('show', '-s', '--format=%cI', head).strip()}
     return {n: t.replace('\r\n', '\n') for n, t in texts.items()}, meta
+
+
+def version_key(version):
+    try:
+        return tuple(int(part) for part in version.removeprefix('v').split('.'))
+    except ValueError as e:
+        raise GuideBuildError(f'版の書き方が読めません: {version}') from e
+
+
+def stale_minimum_versions(texts, versions):
+    """正本に書いた版の基準（〜以上・〜以降）のうち、配布物の基準 versions（ツール, プラグイン）より古いもの。"""
+    floors = [version_key(v) for v in versions]
+    return [f'{name}: {m.group(0)}' for name, text in texts.items()
+            for pattern, floor in zip(MIN_VERSION_RES, floors)
+            for m in pattern.finditer(text) if version_key(m.group(1)) < floor]
 
 
 def split_title(name, text):
@@ -339,6 +357,9 @@ def main(argv=None):
     versions = (args.tool_min_version, args.plugin_min_version)
     if not all(v in texts[YOTEN] for v in versions):
         raise GuideBuildError(f'担当者向け要点に版の基準 {versions} が書かれていません（READMEと食い違うため停止）')
+    stale = stale_minimum_versions(texts, versions)
+    if stale:
+        raise GuideBuildError(f'版の基準 {versions} より古い版を対応版として書いた正本があります（使えない版を案内するため停止）: {stale}')
     edition = {'jp': jp_date(args.edition_date), 'label': args.edition_label}
     out = args.out_dir.resolve()
     out.mkdir(parents=True, exist_ok=True)

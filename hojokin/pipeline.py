@@ -1430,9 +1430,13 @@ def _productivity_window_issues(missing: dict[str, list[str]],
     return issues
 
 
-# 生産性の総労働時間が在籍状態の未確認で止まったときの案内（標準台帳の書き方）
+# 生産性の総労働時間が在籍状態の未確認で止まったときの案内（標準台帳の書き方）。
+# 「非在籍」を読むのは標準テンプレート（年付きの月見出し・G〜R列）だけ。
 ABSENT_MONTH_GUIDE = (
-    '在籍していない月（前事業年度の途中の入社前・退職後）は、賃金台帳の月の欄に「非在籍」と書いてください。'
+    '在籍していない月（前事業年度の途中の入社前・退職後）は、標準テンプレート（賃金台帳テンプレート.xlsx。'
+    '月見出しは「令和7年4月」のように年付き）の月の欄（G〜R列）に「非在籍」と書いてください。'
+    '給与ソフトから出した個人別の台帳（「N月度給与」の見出しが並ぶもの）や、月ごとに行が並ぶ台帳では'
+    '「非在籍」を読まないので、先に標準テンプレートへ移してから書いてください。'
     '名簿・入退社日などで確認できた月だけに書きます。在籍している月は、月間平均時間（E列）を入れて'
     '給与のある月にしてください（休職など在籍していて給与のない月は個別確認）')
 
@@ -2870,59 +2874,134 @@ def _read_wage_report(path: Path) -> tuple[list[dict], int, int, int]:
     return employees, len(seishain), len(part), yakuin_hoshu_3m
 
 
-def _bonus_basis_coverage_messages(employees: list, target_yms: list,
-                                   has_basis_block: bool = True) -> list[str]:
-    """加点台帳作成で、時間換算の対象月額・非在籍の取得状況を知らせる文を作る。"""
-    def head(names):
-        return '、'.join(names[:5]) + ('…' if len(names) > 5 else '')
+# 加点台帳作成の完了メッセージに氏名を並べる上限
+_COVERAGE_NAME_PREVIEW_LIMIT = 5
+# 時間換算の対象月額（AH〜AT列）の中身。厚労省「最低賃金額以上かどうかを確認する方法」で除く6種類を除く。
+_HOURLY_BASIS_DEFINITION = (
+    '時間換算の対象月額は、その月に支払われた賃金から、臨時の賃金、賞与など1か月を超える期間ごとの賃金、'
+    '時間外・休日・深夜の割増賃金、精皆勤手当、通勤手当、家族手当を除いた額です。'
+    '基本給と職務手当・役職手当・資格手当などの手当を含み、基本給に固定残業代（みなし残業代）が'
+    '含まれるときはその分を除きます。')
+# 歩合給・出来高給がある月の入れ方（AI は推測せず空欄にする）
+_PIECE_RATE_GUIDE = (
+    '歩合給・出来高給がある月は読み取らず空欄にしています。歩合・出来高以外の対象額に、'
+    '歩合・出来高分×（その月の台帳の労働時間÷その月の総労働時間）を足した額を入れてください'
+    '（総労働時間を確かめられない月は空欄のまま）。')
 
+
+def _coverage_names_head(names: list[str]) -> str:
+    shown = '、'.join(names[:_COVERAGE_NAME_PREVIEW_LIMIT])
+    return shown + ('…' if len(names) > _COVERAGE_NAME_PREVIEW_LIMIT else '')
+
+
+def _bonus_open_months(emp, target_yms: list) -> list:
+    """加点の対象月のうち「非在籍」にしていない月。"""
+    return [ym for ym in target_yms if emp.monthly_presence.get(ym) is not False]
+
+
+def _bonus_month_unread(emp, ym, has_basis_block: bool) -> bool:
+    """台帳のその月の F〜R列が空欄になる（基本給が読めていない。旧回用の台帳で対象月額を F〜R列に
+    書く人は、基本給も対象月額も読めていない）。基本給だけ読めた月は対象月額の未読み取りとして別に知らせる。"""
+    if ym in emp.monthly_base:
+        return False
+    return has_basis_block or not emp.hourly_basis_separate or ym not in emp.monthly_hourly_basis
+
+
+def _bonus_base_coverage_messages(employees: list, target_yms: list,
+                                  has_basis_block: bool = True) -> list[str]:
+    """加点台帳作成で、基本給（と時間換算の対象月額）が読めなかった月の対象者を知らせる文を作る。"""
+    no_base, unread = [], []
+    for e in employees:
+        months = _bonus_open_months(e, target_yms)
+        if not months:
+            continue
+        if not any(ym in e.monthly_base for ym in months):
+            no_base.append(e.name)
+        elif not e.is_officer and any(_bonus_month_unread(e, ym, has_basis_block) for ym in months):
+            unread.append(e.name)
     msgs = []
-    workers = [e for e in employees if not e.is_officer]
+    if no_base:
+        fill = ('各月の基本給（F〜R列）と、空欄なら時間換算の対象月額（AH〜AT列）' if has_basis_block
+                else '各月の基本給（F〜R列）')
+        msgs.append(
+            f'⚠️ 加点対象月の基本給が取得できなかった従業員: {len(no_base)}名（{_coverage_names_head(no_base)}）。'
+            f'原本を確認し、{fill}を手入力してください。')
+    if unread:
+        head, fill = (('基本給を読み取れなかった月がある従業員',
+                       'その月の基本給（F〜R列）と、空欄なら時間換算の対象月額（AH〜AT列）')
+                      if has_basis_block else
+                      ('基本給も時間換算の対象月額も読み取れなかった月がある従業員', 'その月のF〜R列'))
+        msgs.append(
+            f'⚠️ {head}: {len(unread)}名（{_coverage_names_head(unread)}）。原本を確認し、{fill}を入力してください'
+            '（在籍していない月は「非在籍」と書く。空欄の月は判定が未確定）。')
+    return msgs
+
+
+def _bonus_basis_block_messages(workers: list, missing: list[str], allowance: list[str],
+                                has_basis_block: bool) -> list[str]:
+    """時間換算の対象月額の取得状況を、台帳の列の形（AH〜AT列の有無）に合わせて知らせる文。"""
     no_basis_output = bool(workers) and not any(e.hourly_basis_separate for e in workers)
-    missing = [e.name for e in workers if e.hourly_basis_separate and any(
-        ym in e.monthly_base and ym not in e.monthly_hourly_basis for ym in target_yms)]
-    allowance = [e.name for e in workers
-                 if any(e.monthly_hourly_basis.get(ym, 0) > e.monthly_base.get(ym, 0) > 0 for ym in target_yms)]
+    missing_head = (f'⚠️ 時間換算の対象月額が読み取れなかった月がある従業員: {len(missing)}名'
+                    f'（{_coverage_names_head(missing)}）。')
+    msgs = []
     if not has_basis_block:
         if no_basis_output:
             msgs.append(
-                '⚠️ 時間換算の対象月額（基本給＋通常の手当）を読み取れなかったため、F〜R列は読み取った基本給です。'
-                '職務手当などの通常の手当がある人は、F〜R列を基本給＋通常の手当に直してください。')
+                '⚠️ 時間換算の対象月額を読み取れなかったため、F〜R列は読み取った基本給です。'
+                + _HOURLY_BASIS_DEFINITION
+                + '手当・歩合給・出来高給がある人や、基本給に固定残業代を含む人は、F〜R列をこの額に直してください。')
         else:
             msgs.append(
                 'ℹ️ 旧回用の台帳（時間換算の対象月額の列なし）なので、F〜R列には時間換算の対象月額'
-                '（基本給＋職務手当などの通常の手当）を書きました。公式様式の【基本給】欄は原本の基本給に直してください。')
+                '（基本給と職務手当などの手当。厚労省方式で除く6種類は含めない）を書きました。'
+                '公式様式の【基本給】欄は原本の基本給に直してください。')
         if missing:
             msgs.append(
-                f'⚠️ 時間換算の対象月額が読み取れなかった月がある従業員: {len(missing)}名（{head(missing)}）。'
-                'その月のF〜R列は空欄です。基本給＋通常の手当を入力してください（空欄の月は判定が未確定）。')
+                missing_head + 'その月のF〜R列は空欄です。時間換算の対象月額を入力してください。'
+                + _HOURLY_BASIS_DEFINITION + _PIECE_RATE_GUIDE + '空欄の月は判定が未確定です。')
     elif no_basis_output:
         msgs.append(
-            '⚠️ 時間換算の対象月額（基本給＋通常の手当）を読み取れませんでした。AH〜AT列は空欄です。'
-            '原本の給与明細で各月の基本給と職務手当などの通常の手当を確かめ、AH〜AT列に入力してください'
-            '（空欄の月は判定が未確定になります）。')
+            '⚠️ 時間換算の対象月額を読み取れませんでした。AH〜AT列は空欄です。'
+            + _HOURLY_BASIS_DEFINITION
+            + '原本の給与明細で各月の額を確かめ、AH〜AT列に入力してください（空欄の月は判定が未確定になります）。')
     else:
         if missing:
             msgs.append(
-                f'⚠️ 時間換算の対象月額が読み取れなかった月がある従業員: {len(missing)}名（{head(missing)}）。'
-                'AH〜AT列に、その月の基本給＋職務手当などの通常の手当（厚労省方式で除く6種類は含めない）を'
-                '入力してください。通常の手当がない人は基本給と同じ額を入れます（空欄の月は判定が未確定）。')
+                missing_head + 'AH〜AT列に、その月の時間換算の対象月額を入力してください。'
+                + _HOURLY_BASIS_DEFINITION + '手当も固定残業代もない人は基本給と同じ額です。'
+                + _PIECE_RATE_GUIDE + '空欄の月は判定が未確定です。')
         if allowance:
             msgs.append(
-                f'ℹ️ 通常の手当を時間換算に含めた従業員: {len(allowance)}名（{head(allowance)}）。'
+                f'ℹ️ 基本給のほかに職務手当などの通常の手当を時間換算に含めた従業員: {len(allowance)}名'
+                f'（{_coverage_names_head(allowance)}）。'
                 '公式様式の【基本給】欄は基本給（F〜R列）、【時間換算給与】欄は対象月額（AH〜AT列）÷労働時間で作ります。'
                 '含めた手当の名目を原本で確認してください。')
+    return msgs
+
+
+def _bonus_basis_coverage_messages(employees: list, target_yms: list,
+                                   has_basis_block: bool = True) -> list[str]:
+    """加点台帳作成で、時間換算の対象月額・非在籍の取得状況を知らせる文を作る。"""
+    from .wage_ledger_writer import is_unresolved_presence_note
+
+    workers = [e for e in employees if not e.is_officer]
+    missing = [e.name for e in workers if e.hourly_basis_separate and any(
+        ym in e.monthly_base and ym not in e.monthly_hourly_basis
+        for ym in _bonus_open_months(e, target_yms))]
+    allowance = [e.name for e in workers
+                 if any(e.monthly_hourly_basis.get(ym, 0) > e.monthly_base.get(ym, 0) > 0 for ym in target_yms)]
+    msgs = _bonus_basis_block_messages(workers, missing, allowance, has_basis_block)
     absent = [e.name for e in employees if any(v is False for v in e.monthly_presence.values())]
     if absent:
         msgs.append(
             f'ℹ️ 台帳に印字された入社日・退職日から「非在籍」と書いた月がある従業員: {len(absent)}名'
-            f'（{head(absent)}）。入社日・退職日を原本で確認してください。')
+            f'（{_coverage_names_head(absent)}）。入社日・退職日を原本で確認してください。')
     unresolved = [f'{e.name}（{e.presence_note}）' for e in employees
-                  if 'しなかった' in (e.presence_note or '') or '決めていません' in (e.presence_note or '')]
+                  if is_unresolved_presence_note(e.presence_note)]
     if unresolved:
         msgs.append(
             f'⚠️ 入社日・退職日と給与の記載が食い違う、または日付を読めなかった従業員: {len(unresolved)}名'
-            f'（{head(unresolved)}）。その月は「非在籍」にしていません。原本で在籍を確かめてください。')
+            f'（{_coverage_names_head(unresolved)}）。その月は「非在籍」にしていません。原本で在籍を確かめてください。')
     return msgs
 
 
@@ -2939,8 +3018,8 @@ def run_bonus_wage_ledger_creation(
 ) -> ProcessingStatus:
     """タスク「加点判定用賃金台帳の作成」: 生の賃金台帳/給与明細 → 加点判定用 Excel。
 
-    基本給・時間換算の対象月額（基本給＋通常の手当）・労働時間を AI 抽出し、公募回の加点①の
-    対象期間（第7次以降は令和7年10月〜令和8年9月）＋交付申請直近月の専用台帳に変換する。
+    基本給・時間換算の対象月額（厚労省方式で除く6種類を除いた月の賃金）・労働時間を AI 抽出し、
+    公募回の加点①の対象期間（第7次以降は令和7年10月〜令和8年9月）＋交付申請直近月の専用台帳に変換する。
     時間換算給与＝時間換算の対象月額÷労働時間（厚労省「最低賃金額以上かどうかを確認する方法」）。
     台帳に印字された入社日・退職日の外の月は「非在籍」と書く（空欄の月からは推測しない）。
     Document AI 一本（Sonnet 画像経路フォールバックは無効）。
@@ -3015,25 +3094,15 @@ def run_bonus_wage_ledger_creation(
         )
 
         # カバレッジ警告（加点に必要な月の基本給・所定労働時間がどれだけ埋まったか）
-        no_base = [
-            e.name for e in employees
-            if not any(ym in e.monthly_base for ym in target_yms)
-        ]
         no_hours = [e.name for e in employees if e.scheduled_hours is None]
+        has_basis_block = template_has_hourly_basis(template_path, call_round)
 
         msgs = [f'{len(employees)}名の加点判定用賃金台帳を作成しました。']
-        if no_base:
-            head = '、'.join(no_base[:5]) + ('…' if len(no_base) > 5 else '')
-            msgs.append(
-                f'⚠️ 加点対象月の基本給が取得できなかった従業員: {len(no_base)}名（{head}）。'
-                '原本を確認し、各月の基本給（F〜R列）を手入力してください。'
-            )
-        msgs.extend(_bonus_basis_coverage_messages(
-            employees, target_yms, template_has_hourly_basis(template_path, call_round)))
+        msgs.extend(_bonus_base_coverage_messages(employees, target_yms, has_basis_block))
+        msgs.extend(_bonus_basis_coverage_messages(employees, target_yms, has_basis_block))
         if no_hours:
-            head = '、'.join(no_hours[:5]) + ('…' if len(no_hours) > 5 else '')
             msgs.append(
-                f'⚠️ 月間所定労働時間が取得できなかった従業員: {len(no_hours)}名（{head}）。'
+                f'⚠️ 月間所定労働時間が取得できなかった従業員: {len(no_hours)}名（{_coverage_names_head(no_hours)}）。'
                 'E列に会社の所定労働時間（例: 160）を手入力してください（最低賃金比較の分母）。'
             )
         # 月別労働時間（S〜AE列）のカバレッジ。時給制は月により労働時間が変動するため、
@@ -3058,10 +3127,10 @@ def run_bonus_wage_ledger_creation(
                 '（時給制等で月により労働時間が変動する従業員。空欄の月は E列で換算されます）。'
             )
         if partial_hours:
-            head = '、'.join(partial_hours[:5]) + ('…' if len(partial_hours) > 5 else '')
             msgs.append(
                 f'⚠️ 時給制とみられるのに月別労働時間が取得できなかった月がある従業員: '
-                f'{len(partial_hours)}名（{head}）。原本を確認し S〜AE列 に補入力してください'
+                f'{len(partial_hours)}名（{_coverage_names_head(partial_hours)}）。原本を確認し S〜AE列 に'
+                '所定内の実労働時間（時間外・休日労働の時間は含めない）を補入力してください'
                 '（未入力の月は E列で換算され、時間換算給与が歪む可能性があります）。'
             )
         if application_ym is None:
@@ -3577,6 +3646,12 @@ def run_wage_ledger_conversion(
         if write_result.presence_conflicts:
             msg_parts.append(
                 f'⚠ 非在籍と給与が重なる月 {len(write_result.presence_conflicts)}名 — 変換メモシートで原本照合')
+        if write_result.presence_unresolved:
+            unresolved_names = [name for name, _note in write_result.presence_unresolved]
+            msg_parts.append(
+                f'⚠️ 入社日・退職日と給与の記載が食い違う、または日付を読めなかった従業員 '
+                f'{len(unresolved_names)}名（{_coverage_names_head(unresolved_names)}）— '
+                'その月は非在籍にしていません。変換メモシートで原本と照合')
         if handwritten_files:
             msg_parts.append(
                 f'⚠ 手書きPDF {len(handwritten_files)}件 — 精度低下の可能性あり、原本照合必須'

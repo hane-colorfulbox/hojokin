@@ -98,6 +98,20 @@ SUSPECT_HIGH_WAGE_YEN = 700_000             # 月平均が 70万円以上
 SUSPECT_HIGH_WAGE_MULTIPLIER = 2.0          # 全社員平均の 2倍以上
 SUSPECT_MIN_FULL_MONTHS = 6                 # 判定に最低必要な「給与あり」月数
 
+# 在籍の注意文のうち原本での確認が残るものの目印（wage_reader._date_bounded_absent_months・
+# _adopt_explicit_absence の文言）。入退社日の外に給与がある月を非在籍にしなかった／日付から決めていない。
+UNRESOLVED_PRESENCE_NOTE_KEYS = ('しなかった', '決めていません')
+
+
+def is_unresolved_presence_note(note: str | None) -> bool:
+    """在籍の注意文に、原本での確認が残る内容（非在籍にしなかった月・日付から決めていない）があるか。
+
+    「台帳の入社日 …から判定」だけの文は、確認が残らないので False。
+    標準台帳の作成と加点台帳の作成が同じ条件で知らせるための共通の判定。
+    """
+    text = note or ''
+    return any(key in text for key in UNRESOLVED_PRESENCE_NOTE_KEYS)
+
 
 # ─────────────────────────────────────────────────────────────
 # 雇用形態の正規化
@@ -491,12 +505,16 @@ class WriteResult:
     absent_rows: list[tuple[str, list[str], str]] = None
     # 非在籍の明示と給与が重なり、給与を書いた月がある従業員（氏名, 月のラベル）
     presence_conflicts: list[tuple[str, list[str]]] = None
+    # 入退社日の外に給与がある月を非在籍にしなかった・日付を読めず決めなかった従業員（氏名, 注意文）
+    presence_unresolved: list[tuple[str, str]] = None
 
     def __post_init__(self):
         if self.absent_rows is None:
             self.absent_rows = []
         if self.presence_conflicts is None:
             self.presence_conflicts = []
+        if self.presence_unresolved is None:
+            self.presence_unresolved = []
         if self.officer_matches is None:
             self.officer_matches = []
         if self.officer_suspects is None:
@@ -773,7 +791,8 @@ def _write_memo_sheet(
     for name, labels, basis in (absent_rows or []):
         _set(r, 1, name)
         _set(r, 2, '非在籍：' + '、'.join(labels))
-        _set(r, 3, basis or '', font=note_font)
+        mark = '⚠ ' if is_unresolved_presence_note(basis) else ''
+        _set(r, 3, mark + (basis or ''), font=note_font)
         r += 1
     for name, labels in (presence_conflicts or []):
         _set(r, 1, name, font=Font(bold=True, color='C00000'))
@@ -782,7 +801,7 @@ def _write_memo_sheet(
         r += 1
     for name, note in (presence_notes or []):
         _set(r, 1, name)
-        _set(r, 2, '⚠ ' + note, font=note_font)
+        _set(r, 2, ('⚠ ' if is_unresolved_presence_note(note) else '') + note, font=note_font)
         r += 1
     if not absent_rows and not presence_conflicts and not presence_notes:
         _set(r, 1, '非在籍の月: なし（入社日・退職日の印字がない台帳では判定しません）', font=note_font)
@@ -1109,6 +1128,7 @@ def write_wage_ledger_to_template(
     absent_rows: list[tuple[str, list[str], str]] = []
     presence_conflicts: list[tuple[str, list[str]]] = []
     presence_notes: list[tuple[str, str]] = []
+    presence_unresolved: list[tuple[str, str]] = []
     for i, emp in enumerate(employees_list):
         row = FIRST_DATA_ROW + i
         absent, conflicts = _write_employee_row(
@@ -1119,6 +1139,8 @@ def write_wage_ledger_to_template(
             absent_rows.append((emp.name, absent, note))
         elif note:
             presence_notes.append((emp.name, note))
+        if is_unresolved_presence_note(note):
+            presence_unresolved.append((emp.name, note))
         if conflicts:
             presence_conflicts.append((emp.name, conflicts))
         norm_type = normalize_employment_type(emp.employment_type, is_kojin=is_kojin)
@@ -1139,6 +1161,10 @@ def write_wage_ledger_to_template(
         meta_warnings.append(f'パート時間欠落 {len(part_time_missing)}名 → 変換メモシート参照')
     if presence_conflicts:
         meta_warnings.append(f'非在籍と給与が重なる月 {len(presence_conflicts)}名 → 変換メモシート参照')
+    if presence_unresolved:
+        meta_warnings.append(
+            f'入社日・退職日と給与が食い違う／日付を読めない {len(presence_unresolved)}名 → '
+            '非在籍にしていない月あり。変換メモシートで原本と照合')
     if absent_rows:
         meta_warnings.append(f'非在籍の月 {len(absent_rows)}名 → 変換メモシートで入社日・退職日を原本と照合')
 
@@ -1198,4 +1224,5 @@ def write_wage_ledger_to_template(
         part_time_missing=part_time_missing,
         absent_rows=absent_rows,
         presence_conflicts=presence_conflicts,
+        presence_unresolved=presence_unresolved,
     )

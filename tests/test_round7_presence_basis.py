@@ -369,20 +369,30 @@ class HourlyBasisTests(unittest.TestCase):
         with_allowance = judge_bonus_points(bonus_ledger([bonus_employee(1, BASE, BASE + ALLOWANCE)]))
         self.assertFalse(with_allowance.bonus1_details[5]['employees'][0]['is_target'])
 
-    def test_missing_basis_or_base_or_reversed_amounts_stay_unconfirmed(self):
+    def test_missing_basis_or_base_stay_unconfirmed(self):
         missing = bonus_employee(1, BASE, BASE)
         missing.monthly_hourly_basis.clear()
         no_base = bonus_employee(2, BASE, BASE + ALLOWANCE)
         no_base.monthly_base.clear()
-        reversed_ = bonus_employee(3, BASE + ALLOWANCE, BASE)
-        result = judge_bonus_points(bonus_ledger([missing, no_base, reversed_]))
+        result = judge_bonus_points(bonus_ledger([missing, no_base]))
         self.assertEqual(result.bonus1_status, '未確定')
         issues = ' '.join(result.bonus1_details[5]['issues'])
-        self.assertIn('合成従業員1: 時間換算の対象月額（基本給＋通常の手当）が未確認', issues)
+        self.assertIn('合成従業員1: 時間換算の対象月額が未確認', issues)
         self.assertIn('合成従業員2: 基本給（様式の【基本給】欄）が未確認', issues)
-        self.assertIn('合成従業員3: 時間換算の対象月額が基本給より少ない', issues)
         with self.assertRaises(ValueError):
             fill_bonus_sheet_2(FORMS7 / '加点措置②用.xlsx', self.path / 'f2.xlsx', result)
+
+    def test_basis_below_base_warns_but_does_not_block(self):
+        # 基本給140,000円（固定残業代を含む）・対象月額130,000円・100時間 → 1,300円（最賃以上）。
+        reversed_ = bonus_employee(3, BASE + 2 * ALLOWANCE, BASE + ALLOWANCE)
+        result = judge_bonus_points(bonus_ledger([reversed_]))
+        self.assertNotEqual(result.bonus1_status, '未確定')
+        self.assertNotEqual(result.bonus2_status, '未確定')
+        self.assertTrue(all(d['complete'] for d in result.bonus1_details))
+        warnings_ = [n for n in result.notes if '合成従業員3: 時間換算の対象月額が基本給より少ない月があります' in n]
+        self.assertEqual(len(warnings_), 1, result.notes)
+        self.assertIn('対象月額を基本給に合わせて引き上げない', warnings_[0])
+        fill_bonus_sheet_2(FORMS7 / '加点措置②用.xlsx', self.path / 'f2.xlsx', result)
 
     def test_legacy_single_amount_still_drives_both_columns(self):
         legacy = BonusWageEmployee(1, '合成従業員1', '正社員', BONUS_HOURS,
@@ -416,7 +426,7 @@ class HourlyBasisTests(unittest.TestCase):
                                       application_ym=APPLICATION_YM, call_round=7)
         result = judge_bonus_points(read_bonus_wage_ledger(out, call_round=7))
         self.assertEqual(result.bonus1_status, '未確定')
-        self.assertIn('時間換算の対象月額（基本給＋通常の手当）が未確認', ' '.join(result.bonus1_issues))
+        self.assertIn('時間換算の対象月額が未確認', ' '.join(result.bonus1_issues))
 
     def test_marker_conflict_and_partial_headers_are_rejected(self):
         out = write_bonus_wage_ledger([bonus_employee(1, BASE, BASE + ALLOWANCE)], LEDGER7, self.path / 'l.xlsx',

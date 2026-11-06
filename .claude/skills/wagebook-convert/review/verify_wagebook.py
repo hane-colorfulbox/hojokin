@@ -39,6 +39,8 @@ COL_MONTH_LAST = 18   # R (12月)
 COL_TRANSPORT = 19    # S 年間通勤手当
 COL_BONUS = 20        # T 年間賞与
 MONTH_LABELS = [f'{m}月' for m in range(1, 13)]
+ERA_BASE_YEARS = {'令和': 2018, '平成': 1988}
+ERA_NAMES = {'R': '令和', 'H': '平成'}
 
 # 役員ラベル未正規化の検知トリガ（職位名「現場代理人/主任/営業」等は含めない＝誤検知回避）
 OFFICER_TRIGGERS = ('代表取締役', '取締役', '監査役', '監事', '理事長', '理事')
@@ -79,24 +81,42 @@ def _month_state(v):
     return 'invalid', v
 
 
-def _month_order(ws, fiscal_month):
+def _year_month_key(text):
+    """年付きの月見出しを ((西暦年, 月), 表示名) にする。年のない見出しは None。"""
+    s = re.sub(r'[\s　]+', '', unicodedata.normalize('NFKC', str(text or '')))
+    era = (re.match(r'(令和|平成)(\d+|元)年(\d{1,2})月', s)
+           or re.match(r'([RH])(\d+)[./-](\d{1,2})', s, re.IGNORECASE))
+    west = re.match(r'(\d{4})[年/\-.](\d{1,2})', s)
+    if era:
+        name = ERA_NAMES.get(era.group(1).upper(), era.group(1))
+        number = 1 if era.group(2) == '元' else int(era.group(2))
+        year, month = ERA_BASE_YEARS[name] + number, int(era.group(3))
+        label = f'{name}{number}年{month}月'
+    elif west:
+        year, month = int(west.group(1)), int(west.group(2))
+        label = f'{year}年{month}月'
+    else:
+        return None
+    return ((year, month), label) if 1 <= month <= 12 else None
+
+
+def _month_keys(ws):
+    """月の列（0〜11）ごとの ((西暦年, 月), 表示名)。年付きの見出しで重複なく12か月そろわなければ None。"""
+    keys = [_year_month_key(ws.cell(HEADER_ROW, COL_MONTH_FIRST + m).value) for m in range(12)]
+    if all(keys) and len({ym for ym, _label in keys}) == 12:
+        return keys
+    return None
+
+
+def _month_labels(keys):
+    """月の列ごとの表示名。年付きの見出しがそろっていればその年月、無ければ列の位置（G=1月…R=12月）。"""
+    return [label for _ym, label in keys] if keys else list(MONTH_LABELS)
+
+
+def _month_order(keys, fiscal_month):
     """月の列（0〜11）を時系列の順に並べる。年付きの見出しがあれば年月、無ければ決算月の翌月から。"""
-    keys = []
-    for m in range(12):
-        text = unicodedata.normalize('NFKC', str(ws.cell(HEADER_ROW, COL_MONTH_FIRST + m).value or ''))
-        text = re.sub(r'[\s　]+', '', text)
-        era = re.match(r'(令和|平成)(\d+|元)年(\d{1,2})月', text)
-        west = re.match(r'(\d{4})[年/\-.](\d{1,2})', text)
-        if era:
-            year = (2018 if era.group(1) == '令和' else 1988) + (1 if era.group(2) == '元' else int(era.group(2)))
-            keys.append((year, int(era.group(3))))
-        elif west:
-            keys.append((int(west.group(1)), int(west.group(2))))
-        else:
-            keys = None
-            break
-    if keys and len(set(keys)) == 12:
-        return sorted(range(12), key=lambda m: keys[m])
+    if keys:
+        return sorted(range(12), key=lambda m: keys[m][0])
     start = fiscal_month % 12 if fiscal_month else 0
     return [(start + i) % 12 for i in range(12)]
 
@@ -236,26 +256,27 @@ def main(argv):
 
     fail = []       # 修正必須（PASSをブロック）
     confirm = []    # 要確認（PDFで素性確認し報告に解決を明記してから進む）
+    month_keys = _month_keys(ws)
+    labels = _month_labels(month_keys)
 
     # --- 月の欄の不正な文字列（FAIL: ツールは数値・空欄・「非在籍」以外を空欄として読み、給与が落ちる） ---
     invalid_rows = [e for e in rows if e['invalid']]
     if invalid_rows:
         print('[FAIL 月の欄に数値でも「非在籍」でもない値]（ツールは空欄として読み、その月の給与が消える）')
         for e in invalid_rows:
-            detail = ', '.join(f'{MONTH_LABELS[m]}={v!r}' for m, v in e['invalid'])
+            detail = ', '.join(f'{labels[m]}={v!r}' for m, v in e['invalid'])
             print(f"  行{e['row']} {e['name']}: {detail} → 金額は数値（カンマ・円なし）、在籍していない月は「非在籍」")
         fail.append(f'月の欄の不正な値 {len(invalid_rows)}名')
         print()
 
     # --- 非在籍（在籍していない月の印）の並び（§1 月の欄） ---
-    order = _month_order(ws, _extract_fiscal_month(ws))
+    order = _month_order(month_keys, _extract_fiscal_month(ws))
     absent_rows = [e for e in rows if e['absent']]
     if absent_rows:
         print(f'[非在籍の月]（{len(absent_rows)}名。入社日・退職日・名簿で確認できた月だけに書く。根拠を§9報告に）')
         all_absent, sandwiched = [], []
         for e in absent_rows:
-            labels = [MONTH_LABELS[m] for m in order if m in e['absent']]
-            print(f"  行{e['row']} {e['name']}: {','.join(labels)}")
+            print(f"  行{e['row']} {e['name']}: {','.join(labels[m] for m in order if m in e['absent'])}")
             if len(e['absent']) == 12:
                 all_absent.append(e)
                 continue
@@ -343,7 +364,7 @@ def main(argv):
         for m in range(12)
     ]
     print('[月別縦計]（全員の各月合計。バグ②月配置ズレ検出の“材料”）')
-    print('  ' + ' / '.join(f'{lab}={tot:,.0f}' for lab, tot in zip(MONTH_LABELS, monthly_totals)))
+    print('  ' + ' / '.join(f'{lab}={tot:,.0f}' for lab, tot in zip(labels, monthly_totals)))
     gap_rows = [
         e for e in rows
         if any(e['months'][m] is None for m in range(12))
@@ -363,7 +384,7 @@ def main(argv):
         print(f'  ⚠ 途中に空欄月のある社員 {len(gap_rows)}名 → §5.5-3 でこの全員＋無作為3名を'
               'PDFと1セル突合（縦計が出た≠OK。左詰めズレは年間合計検算を素通りする §1.1.0）:')
         for e in gap_rows:
-            present = [MONTH_LABELS[m] for m in range(12) if e['months'][m] is not None]
+            present = [labels[m] for m in range(12) if e['months'][m] is not None]
             print(f"    行{e['row']} {e['name']}: 在={','.join(present)}")
         confirm.append(f'月配置: 空欄月あり{len(gap_rows)}名＋無作為3名をPDF1セル突合')
     print()
@@ -375,7 +396,7 @@ def main(argv):
         vals = [v for v in e['months'] if v is not None]
         med = _median(vals)
         if med and med > 0:
-            spikes = [(MONTH_LABELS[m], e['months'][m]) for m in range(12)
+            spikes = [(labels[m], e['months'][m]) for m in range(12)
                       if e['months'][m] is not None and e['months'][m] > med * BONUS_SPIKE_RATIO]
             if spikes:
                 spike_found = True
@@ -480,7 +501,7 @@ def main(argv):
         print()
 
     # --- 0混入（要確認: 空欄であるべき箇所の0） ---
-    zero_rows = [(e, [MONTH_LABELS[m] for m in range(12) if e['months'][m] == 0])
+    zero_rows = [(e, [labels[m] for m in range(12) if e['months'][m] == 0])
                  for e in rows]
     zero_rows = [(e, zs) for e, zs in zero_rows if zs]
     if zero_rows:

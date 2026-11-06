@@ -119,13 +119,23 @@ BWL_COL_LATEST = 18       # R: 交付申請直近月の基本給
 # 空欄の月は E列（月間所定労働時間）で換算する（v0.2.72〜。旧形式＝列なし台帳も読める）。
 BWL_COL_HOURS_WINDOW_START = 19  # S〜AD: 加点①の対象期間12か月の月別労働時間
 BWL_COL_HOURS_LATEST = 31        # AE: 交付申請直近月の月別労働時間
-# AH〜AS / AT: 時間換算の対象月額（厚労省「最低賃金額以上かどうかを確認する方法」の月額＝基本給＋
-# 職務手当など通常の手当。除く6種類は含めない）。第7次以降の台帳テンプレートだけが持つ列。
+# AH〜AS / AT: 時間換算の対象月額（その月に支払われた賃金から、厚労省「最低賃金額以上かどうかを確認する
+# 方法」で除く6種類を除いた額。基本給と職務手当などの手当を含み、基本給に含まれる固定残業代は除く）。
+# 第7次以降の台帳テンプレートだけが持つ列。
 # この列がある台帳は、F〜R列（基本給）を様式の【基本給】欄に、AH〜AT列を時間換算給与の分子に使う。
 # 列がない台帳（旧回の台帳・第7次の旧テンプレート）は、F〜R列の1つの月額で両方を作る。
 BWL_COL_BASIS_WINDOW_START = 34  # AH〜AS: 加点①の対象期間12か月の時間換算の対象月額
 BWL_COL_BASIS_LATEST = 46        # AT: 交付申請直近月の時間換算の対象月額
 BWL_BASIS_HEADER_KEYWORD = '時間換算の対象月額'
+# 対象月額が基本給より少ない月の注意。固定残業代込みの基本給では正しい入力なので、判定は止めない。
+BASIS_BELOW_BASE_NOTE = (
+    '{name}: 時間換算の対象月額が基本給より少ない月があります（{months}）。'
+    '基本給に固定残業代（みなし残業代）が含まれる、欠勤控除がある、列の取り違えのどれに当たるかを'
+    '雇用契約・賃金規程・原本で確かめてください。取り違えなら直し、固定残業代などなら理由を報告に残してください'
+    '（対象月額を基本給に合わせて引き上げない）。')
+# AI 出力の加点用の労働時間（時間換算の対象月額に対応する所定内の時間）。この項目がある出力では、
+# 時間外・休日労働を含むことがある hours（標準台帳の FTE・総労働時間用）を加点に使わない。
+AI_BASIS_HOURS_KEY = 'basis_hours'
 BWL_PREF_CELL = (2, 3)    # C2: 事業場所在地（都道府県）
 BWL_APPYM_CELL = (3, 3)   # C3: 交付申請月（yyyy/mm）
 BWL_RULE_CELL = (2, 33)   # AG2: 制度版（入力欄・年月列を動かさず保持）
@@ -411,8 +421,9 @@ class BonusWageEmployee:
     加点①の対象期間（第7次以降は令和7年10月〜令和8年9月、第1〜6次は令和6年10月〜
     令和7年9月）＋申請直近月をまたいで見るため、(西暦年,月)→基本給 の
     辞書で保持する。時間換算給与 = 時間換算の対象月額 ÷ その月の労働時間。時間換算の対象月額は、
-    厚労省「最低賃金額以上かどうかを確認する方法」で除く6種類（臨時の賃金・賞与等・割増賃金・精皆勤・
-    通勤・家族手当）以外を含む額（基本給＋職務手当などの通常の手当）。
+    その月に支払われた賃金から厚労省「最低賃金額以上かどうかを確認する方法」で除く6種類（臨時の賃金・
+    賞与等・割増賃金・精皆勤・通勤・家族手当）を除いた額。基本給と職務手当などの手当を含み、基本給に
+    含まれる固定残業代は除く（そのため基本給より少ないことがある）。
 
     hourly_basis_separate=True（第7次以降の台帳の AH〜AT列、または AI 抽出で hourly_basis が返った場合）:
       monthly_base＝基本給（様式の【基本給】欄）、monthly_hourly_basis＝時間換算の対象月額。
@@ -432,7 +443,7 @@ class BonusWageEmployee:
     source_file: str = ''
     # 明示された非在籍と欠損を区別する。未指定を非在籍として扱わない。
     monthly_presence: dict[tuple[int, int], bool] = field(default_factory=dict)
-    # (西暦年, 月) → 時間換算の対象月額（基本給＋通常の手当。厚労省方式で除く6種類は含めない）
+    # (西暦年, 月) → 時間換算の対象月額（その月の賃金から厚労省方式で除く6種類を除いた額）
     monthly_hourly_basis: dict[tuple[int, int], float] = field(default_factory=dict)
     # 基本給と時間換算の対象月額を別に持つか（上の docstring）。位置引数で作る既存呼び出しのため末尾に置く。
     hourly_basis_separate: bool = False
@@ -473,7 +484,7 @@ class BonusWageEmployee:
             return '基本給・所定労働時間・在籍のいずれかが未確認'
         parts = []
         if (self.monthly_hourly_basis.get(ym) or 0) <= 0:
-            parts.append('時間換算の対象月額（基本給＋通常の手当）')
+            parts.append('時間換算の対象月額')
         if (self.monthly_base.get(ym) or 0) <= 0:
             parts.append('基本給')
         if self.hours_for(ym) is None:
@@ -2201,17 +2212,22 @@ def _load_wage_ai_payload(
     return tsv_blocks, pdf_files
 
 
+def _ai_output_has_monthly_key(ai_data: list, key: str) -> bool:
+    """AI の出力の月次要素が key の項目を持つ新しい形か（1つでもあれば新しい形）。"""
+    return any(
+        isinstance(m, dict) and key in m
+        for emp in (ai_data or []) if isinstance(emp, dict)
+        for m in (emp.get('monthly') or [])
+    )
+
+
 def _ai_output_has_hourly_basis(ai_data: list) -> bool:
     """AI の出力が hourly_basis（時間換算の対象月額）の項目を持つ新しい形か。
 
     項目そのものが無い出力（旧い指示文・録画済みの応答）は旧形式として扱い、基本給の1つの月額で
     時間換算する（従来どおり）。項目があって値が null の月は「読めなかった月」＝未確認のまま。
     """
-    return any(
-        isinstance(m, dict) and 'hourly_basis' in m
-        for emp in (ai_data or []) if isinstance(emp, dict)
-        for m in (emp.get('monthly') or [])
-    )
+    return _ai_output_has_monthly_key(ai_data, 'hourly_basis')
 
 
 def _ai_data_to_bonus_employees(
@@ -2221,14 +2237,18 @@ def _ai_data_to_bonus_employees(
     """AI抽出データ（ymキーの monthly[{ym,base,hourly_basis,hours,...}]）を BonusWageEmployee に変換。
 
     12スロットには畳まず (年,月)→金額 を保持する。base＝基本給（様式の【基本給】欄）、
-    hourly_basis＝時間換算の対象月額（基本給＋通常の手当）。hourly_basis の項目がある出力は
-    hourly_basis_separate=True にし、対象月額が読めなかった月を基本給で代用しない。
-    AI抽出の月次hoursは当該月だけに使う。他月の中央値等を固定所定時間へ推定せず、
+    hourly_basis＝時間換算の対象月額（その月の賃金から厚労省方式で除く6種類を除いた額）。
+    hourly_basis の項目がある出力は hourly_basis_separate=True にし、対象月額が読めなかった月を
+    基本給で代用しない。
+    労働時間は basis_hours（対象月額に対応する所定内の時間）の項目がある出力ではそれだけを使い、
+    時間外・休日労働を含むことがある hours は使わない（basis_hours が null の月は未確認）。項目が無い
+    旧い出力は従来どおり hours を使う。どちらも当該月だけに使い、他月の中央値等を固定所定時間へ推定せず、
     scheduled_hoursはNoneにする。確認済みの固定所定時間は、別途人が台帳E列へ入力する。
     target_yms（加点の対象月）を渡すと、台帳に印字された入社日・退職日の外の月を非在籍にする
     （_date_bounded_absent_months。空欄の月から非在籍を推測しない）。
     """
     separate = _ai_output_has_hourly_basis(ai_data)
+    hours_key = AI_BASIS_HOURS_KEY if _ai_output_has_monthly_key(ai_data, AI_BASIS_HOURS_KEY) else 'hours'
     out: list[BonusWageEmployee] = []
     for i, emp in enumerate(ai_data):
         if not isinstance(emp, dict):
@@ -2249,7 +2269,8 @@ def _ai_data_to_bonus_employees(
                 continue
             parsed = parse_ym_header(m.get('ym'))
             has_amount = any((_to_float(m.get(key)) or 0) > 0
-                             for key in ('taxable', 'base', 'hourly_basis', 'hours', 'work_days'))
+                             for key in ('taxable', 'base', 'hourly_basis', 'hours', AI_BASIS_HOURS_KEY,
+                                         'work_days'))
             if parsed and parsed[0] is None and has_amount:
                 paid_months_without_year.add(parsed[1])
             if not parsed or parsed[0] is None:
@@ -2263,7 +2284,7 @@ def _ai_data_to_bonus_employees(
             basis = _to_float(m.get('hourly_basis'))
             if basis is not None and basis > 0:
                 basis_by_ym[ym] = basis
-            h = _to_float(m.get('hours'))
+            h = _to_float(m.get(hours_key))
             if h is not None and h > 0:
                 hours_by_ym[ym] = h
         presence: dict[tuple[int, int], bool] = {}
@@ -3567,9 +3588,9 @@ def _legacy_single_amount_note(call_round: int) -> str:
     head = ('時間換算の対象月額（AH〜AT列）がない形式の台帳です。基本給の欄（F〜R列）の1つの月額で'
             '時間換算し、様式の【基本給】欄にも同じ額を書きます。')
     if call_round >= 7:
-        return head + ('職務手当など通常の手当がある人がいる場合は、第7次以降の最新の台帳テンプレートに移し、'
+        return head + ('手当・歩合給・出来高給がある人、または基本給に固定残業代（みなし残業代）が含まれる人がいる場合は、第7次以降の最新の台帳テンプレートに移し、'
                        '基本給と時間換算の対象月額を分けて入力してください。')
-    return head + ('職務手当など通常の手当がある人は、台帳の月額を基本給＋通常の手当にして時間換算給与を確かめ、'
+    return head + ('職務手当などの手当がある人は、旧回の記入ルール（所定内賃金）どおりの月額で時間換算給与を確かめ、'
                    '様式の【基本給】欄を原本の基本給に直してください。')
 
 
@@ -3727,6 +3748,8 @@ def judge_bonus_points(ledger: BonusWageLedger) -> BonusPointResult:
         result.notes.extend(result.blocking_issues)
         return result
 
+    below_base: dict[int, set[tuple[int, int]]] = {}
+
     def detail_for(ym):
         employees, issues = [], []
         total = under = 0
@@ -3746,12 +3769,12 @@ def judge_bonus_points(ledger: BonusWageLedger) -> BonusPointResult:
                                   'hourly': None, 'is_target': None})
                 continue
             if emp.hourly_basis_separate:
-                # 様式の【基本給】欄は対象月額で代用しない。対象月額は基本給を必ず含む。
+                # 様式の【基本給】欄は対象月額で代用しない。対象月額は基本給に含まれる固定残業代を除くので
+                # 基本給より少ないことがあり、その月は止めずに注意だけ出す（BASIS_BELOW_BASE_NOTE）。
                 if base is None or base <= 0:
                     issues.append(f'{emp.name}: 基本給（様式の【基本給】欄）が未確認')
                 elif basis < base:
-                    issues.append(f'{emp.name}: 時間換算の対象月額が基本給より少ない'
-                                  '（列の取り違え・欠勤控除の扱いを原本で確認）')
+                    below_base.setdefault(id(emp), set()).add(ym)
             hourly = round(hourly)
             low, high, ambiguous = legal_minimum_bounds(ledger.prefecture, ym)
             if not high:
@@ -3761,7 +3784,7 @@ def judge_bonus_points(ledger: BonusWageLedger) -> BonusPointResult:
                 if ambiguous:
                     issues.append(f'{emp.name}: 最賃の発効日・賃金計算期間を確認（{low}〜{high}円、換算{hourly}円）')
                 elif emp.hourly_basis_separate:
-                    issues.append(f'{emp.name}: 法定最低賃金を下回る換算です。時間換算の対象月額（通常の手当の入れ漏れ）'
+                    issues.append(f'{emp.name}: 法定最低賃金を下回る換算です。時間換算の対象月額（手当・歩合給の入れ漏れ）'
                                   f'と労働時間を原本で確認（参照{high}円、換算{hourly}円）')
                 else:
                     issues.append(f'{emp.name}: 法定最低賃金との比較・通常手当を含む入力定義を確認（参照{high}円、換算{hourly}円）')
@@ -3815,8 +3838,17 @@ def judge_bonus_points(ledger: BonusWageLedger) -> BonusPointResult:
         result.bonus2_diff = result.bonus2_min_wage_latest - result.bonus2_min_wage_july
         result.bonus2_eligible = result.bonus2_diff >= rules.bonus2_threshold_yen
         result.bonus2_status = '対象' if result.bonus2_eligible else '対象外'
+    result.notes.extend(_basis_below_base_notes(workers, below_base))
     result.notes.extend(result.bonus2_issues)
     return result
+
+
+def _basis_below_base_notes(workers: list[BonusWageEmployee],
+                            months_by_emp: dict[int, set[tuple[int, int]]]) -> list[str]:
+    """対象月額が基本給より少ない月の注意（1人1件・月を列挙）。判定は止めない。"""
+    return [BASIS_BELOW_BASE_NOTE.format(
+                name=emp.name, months='、'.join(ym_label(ym) for ym in sorted(months_by_emp[id(emp)])))
+            for emp in workers if id(emp) in months_by_emp]
 
 
 # ============================================================

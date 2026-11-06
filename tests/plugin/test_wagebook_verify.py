@@ -5,6 +5,7 @@ verify_transcript.py（原本転記シートの受入検査）:
 verify_wagebook.py（従業員別明細の検算）:
   通勤手当欄は常に「要確認」になる設計なので正常でも 1。FAIL（役員ラベル未正規化）が出るかで見分ける。
   シートが無ければ 2。月の欄の「非在籍」は正常、数値でも「非在籍」でもない文字列は FAIL。
+  非在籍の月の一覧は、年付きの見出しがあればその年月で示す（期首月から並ぶツールの台帳でも列の位置で月名を付けない）。
 """
 import shutil
 import tempfile
@@ -22,9 +23,15 @@ TEMPLATE = SKILL / 'templates' / '賃金台帳テンプレート.xlsx'
 VERIFY_BOOK = SKILL / 'review' / 'verify_wagebook.py'
 VERIFY_TRANSCRIPT = SKILL / 'review' / 'verify_transcript.py'
 LEDGER_SHEET = '従業員別明細'
-DATA_START_ROW, COL_NO, COL_NAME, COL_TYPE, COL_HOURS, COL_HOURLY = 6, 2, 3, 4, 5, 6
+HEADER_ROW, DATA_START_ROW, COL_NO, COL_NAME, COL_TYPE, COL_HOURS, COL_HOURLY = 5, 6, 2, 3, 4, 5, 6
 COL_MONTH_FIRST, COL_S = 7, 19
 MONTHLY_COMMUTE = 10000
+# 3月決算・前事業年度（令和7年4月〜令和8年3月）の年付き見出し
+FISCAL_HEADERS = [f'令和7年{m}月' for m in range(4, 13)] + [f'令和8年{m}月' for m in range(1, 4)]
+# ツールの台帳作成は G列から期首月の順。wagebook-convert は列の位置を暦月のまま（G=1月）にする
+TOOL_HEADERS = FISCAL_HEADERS
+SKILL_HEADERS = FISCAL_HEADERS[9:] + FISCAL_HEADERS[:9]
+HIRED_IN_JUNE = '令和7年4月,令和7年5月'
 # (氏名, 雇用形態, 月平均時間, 時給, 月額, S列=年間通勤手当)
 EMPLOYEES = [
     ('甲野花子', '正社員', 173.33, None, 210000, MONTHLY_COMMUTE * 12),
@@ -40,10 +47,13 @@ TRANSCRIPT_ROWS = [
 ]
 
 
-def make_book(path: Path, *, s_col=True, transcript=True, officer_label=None, second_months=None) -> None:
+def make_book(path: Path, *, s_col=True, transcript=True, officer_label=None, second_months=None,
+              headers=None) -> None:
     shutil.copy(TEMPLATE, path)
     wb = openpyxl.load_workbook(path)
     ws = wb[LEDGER_SHEET]
+    for m, text in enumerate(headers or []):
+        ws.cell(HEADER_ROW, COL_MONTH_FIRST + m, text)
     for i, (name, kind, hours, hourly, monthly, s) in enumerate(EMPLOYEES):
         r = DATA_START_ROW + i
         ws.cell(r, COL_NO, i + 1)
@@ -100,6 +110,19 @@ def main() -> int:
         r = run_py(VERIFY_BOOK, absent, cwd=work)
         c.check('明細: 入社前の月の「非在籍」は FAIL にせず一覧に出す',
                 r.returncode == 1 and '修正必須 FAIL' not in r.stdout and '[非在籍の月]（1名' in r.stdout,
+                r.stdout[-900:])
+        tool_style = work / 'tool_style.xlsx'
+        make_book(tool_style, headers=TOOL_HEADERS, second_months=['非在籍'] * 2 + [88000] * 10)
+        r = run_py(VERIFY_BOOK, tool_style, cwd=work)
+        c.check('明細: 期首月から並ぶ台帳でも、非在籍の月を見出しの年月で示す',
+                f'{EMPLOYEES[1][0]}: {HIRED_IN_JUNE}\n' in r.stdout and ': 1月,2月' not in r.stdout,
+                r.stdout[-900:])
+        skill_style = work / 'skill_style.xlsx'
+        make_book(skill_style, headers=SKILL_HEADERS,
+                  second_months=[88000] * 3 + ['非在籍'] * 2 + [88000] * 7)
+        r = run_py(VERIFY_BOOK, skill_style, cwd=work)
+        c.check('明細: 列の位置が暦月の台帳でも、非在籍の月を見出しの年月で示す',
+                f'{EMPLOYEES[1][0]}: {HIRED_IN_JUNE}\n' in r.stdout and ': 4月,5月' not in r.stdout,
                 r.stdout[-900:])
         invalid = work / 'invalid.xlsx'
         make_book(invalid, second_months=['退職'] * 3 + [88000] * 9)

@@ -1,7 +1,7 @@
 """第7次の資料一式を合成データ・作業ツリーで確認する。API・通信は使わない。
 
 1. 必要書類チェックの新旧台帳・実申請月・3期またぎ（case-docs-check）
-2. 第7次の正本Markdown（対象読者・題名・リンク・確定事実・禁止表現）
+2. 第7次の正本Markdown（対象読者・題名・リンク・確定事実・禁止表現・版の基準）
 3. 配布物の生成（PDF・案内HTML・README・ZIP。作業ツリーから一時フォルダへ）
 """
 import importlib.util
@@ -167,6 +167,40 @@ def check_round7_guides():
     return 0
 
 
+def check_minimum_versions():
+    """正本に書いた版の基準（〜以上・〜以降）が配布物の基準と一致し、古い基準なら生成が止まること。"""
+    versions = (guide.DEFAULT_TOOL_MIN, guide.DEFAULT_PLUGIN_MIN)
+    texts = {n: (DOCS / n).read_text(encoding='utf-8') for n in guide.STAFF_GUIDES + guide.ADMIN_GUIDES}
+    stated = {m.group(1) for text in texts.values() for pattern in guide.MIN_VERSION_RES
+              for m in pattern.finditer(text)}
+    assert stated == {versions[0].removeprefix('v'), versions[1]}, stated
+    for name in (guide.YOTEN, '第7次申請_変更点と使い方.md'):
+        assert all(v in texts[name] for v in versions), name
+    stale = {'合成.md': '対応版のツール（フッター v0.2.99 以上）とプラグイン（版 2026.11.05 以降）で作ります。'}
+    assert len(guide.stale_minimum_versions(stale, versions)) == 2
+    ok = {'合成.md': ('これより前の版（ツール v0.2.97・v0.2.99 など、プラグイン 2026.11.05 版など）は使いません。'
+                    'ツール v0.2.100 以上・v0.2.101以上、プラグイン 2026.11.06 以降。')}
+    assert guide.stale_minimum_versions(ok, versions) == []
+    if not JP_FONT.is_file():
+        print(f'SKIP: 日本語フォントがないため生成停止の確認はしない（{JP_FONT}）')
+        return 0
+    original = guide.load_sources
+    guide.load_sources = lambda *_: ({**texts, '第7次申請_変更点と使い方.md': stale['合成.md']}, {'mode': 'worktree'})
+    try:
+        with tempfile.TemporaryDirectory(prefix='official-guide-stale-') as tmp:
+            out = Path(tmp) / 'out'
+            try:
+                guide.main(['--from-worktree', '--edition-date', EDITION_DATE, '--out-dir', str(out)])
+                raise AssertionError('古い版の基準を書いた正本で配布物が生成されました')
+            except guide.GuideBuildError as e:
+                assert 'v0.2.99 以上' in str(e) and '2026.11.05 以降' in str(e), e
+            assert not out.exists(), '停止したのに出力先が作られました'
+    finally:
+        guide.load_sources = original
+    print('PASS: 正本の版の基準（以上・以降）が配布物の基準と一致し、古い基準では生成が止まる')
+    return 0
+
+
 def check_template_command():
     """原本再取込手順に書いた確認コマンドが、そのまま動いて4種類とも第7次版を選ぶこと。"""
     text = (DOCS / '第7次原本_改訂内容と再取込手順.md').read_text(encoding='utf-8')
@@ -240,6 +274,10 @@ def test_round7_guides():
     assert check_round7_guides() == 0
 
 
+def test_minimum_versions():
+    assert check_minimum_versions() == 0
+
+
 def test_template_command():
     assert check_template_command() == 0
 
@@ -253,7 +291,7 @@ def test_guide_build():
 
 
 def main():
-    for check in (check_case_docs_rounds, check_round7_guides, check_template_command,
+    for check in (check_case_docs_rounds, check_round7_guides, check_minimum_versions, check_template_command,
                   check_unsupported_markdown, check_guide_build):
         assert check() == 0
     return 0
