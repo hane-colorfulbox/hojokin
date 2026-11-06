@@ -133,6 +133,15 @@ WAGE_HEADERS = [  # B5〜T5（プレーン月名。注記混入はツールの�
     '7月', '8月', '9月', '10月', '11月', '12月',
     '年間通勤手当', '年間賞与',
 ]
+# G5〜R5（月の列）は、プレーンの「1月」〜「12月」か、年付きの見出し（「令和7年1月」「2025年1月」）の
+# どちらかに統一する。第7次以降の通常枠は年付きが必須（前事業年度の総労働時間を年月で確かめるため）。
+# 年付きは12か月が重複なく連続していること。並びは問わない（ツールの台帳作成は期首月から、
+# wagebook-convert は暦月の位置で書く）。注記入り（「1月\n(R7.1)」等）は従来どおり不一致。
+# 年月の読み方は hojokin/wage_reader.py の parse_ym_header・_window_vote に合わせた独立の写し。
+WAGE_MONTH_SLICE = slice(5, 17)
+_ERA_MONTH_RE = re.compile(r'(令和|平成)(\d+|元)年(\d{1,2})月')
+_WEST_MONTH_RE = re.compile(r'(\d{4})年(\d{1,2})月')
+_ERA_BASE = {'令和': 2018, '平成': 1988}
 
 # 加点判定用台帳テンプレ規格（列定数の単一の真実は hojokin/wage_reader.py の BWL_*）。
 # 第1〜6次（旧回）用の原本: ツール/加点判定用賃金台帳テンプレート.xlsx 実測。
@@ -570,6 +579,51 @@ def check_submissions(rep: Report, entries):
                      f'{label} らしきファイルが見当たりません（提出物。回収状況を確認）')
 
 
+def _year_month_of(text):
+    """年付きの月見出しを (西暦年, 月) にする。注記・付記があれば None。"""
+    text = norm(text)
+    era = _ERA_MONTH_RE.fullmatch(text)
+    if era:
+        year = _ERA_BASE[era.group(1)] + (1 if era.group(2) == '元' else int(era.group(2)))
+        month = int(era.group(3))
+    else:
+        west = _WEST_MONTH_RE.fullmatch(text)
+        if not west:
+            return None
+        year, month = int(west.group(1)), int(west.group(2))
+    return (year, month) if 1 <= month <= 12 else None
+
+
+def _wage_header_diffs(ws):
+    """標準台帳 B5:T5 の不一致。月の列はプレーン12か月か、連続する年付き12か月を受け入れる。
+
+    戻り値: (不一致の説明のリスト, 月の列がプレーンか)
+    """
+    diffs = []
+    for i, exp in enumerate(WAGE_HEADERS):
+        if WAGE_MONTH_SLICE.start <= i < WAGE_MONTH_SLICE.stop:
+            continue
+        cell = ws.cell(row=WAGE_HEADER_ROW, column=2 + i)
+        if norm(cell.value) != norm(exp):
+            diffs.append(f'{cell.column_letter}{WAGE_HEADER_ROW}: 期待「{exp}」/ 実際「{cell.value}」')
+    month_cols = range(2 + WAGE_MONTH_SLICE.start, 2 + WAGE_MONTH_SLICE.stop)
+    texts = [ws.cell(row=WAGE_HEADER_ROW, column=c).value for c in month_cols]
+    plain = [norm(t) for t in texts] == WAGE_HEADERS[WAGE_MONTH_SLICE]
+    if plain:
+        return diffs, True
+    yms = [_year_month_of(t) for t in texts]
+    if all(yms) and len(set(yms)) == 12:
+        ordered = sorted(yms)
+        start = ordered[0][0] * 12 + ordered[0][1] - 1
+        if all(y * 12 + m - 1 == start + i for i, (y, m) in enumerate(ordered)):
+            return diffs, False
+    letters = [ws.cell(row=WAGE_HEADER_ROW, column=c).column_letter for c in month_cols]
+    diffs.append(f'{letters[0]}{WAGE_HEADER_ROW}:{letters[-1]}{WAGE_HEADER_ROW}: 月の見出しは「1月」〜「12月」か、'
+                 '連続する12か月の年付き（「令和7年1月」「2025年1月」。注記なし）にそろえてください'
+                 f'（実際: {" / ".join(repr(t) for t in texts[:3])} …）')
+    return diffs, False
+
+
 def _header_diffs(ws, header_row, expected, start_col=2):
     diffs = []
     for i, exp in enumerate(expected):
@@ -712,12 +766,17 @@ def check_excel_structures(rep: Report, detected, task: str, frame: str, entity:
         elif WAGE_SHEET in sheet_names:
             std_ledgers.append(e)
             ws = wb[wb.sheetnames[sheet_names.index(WAGE_SHEET)]]
-            diffs = _header_diffs(ws, WAGE_HEADER_ROW, WAGE_HEADERS)
+            diffs, plain_months = _wage_header_diffs(ws)
             if diffs:
                 rep.fail('TPL-WAGE-HEADER',
                          f'{e["name"]}: 賃金台帳テンプレのB5:T5ヘッダーが規格と不一致です'
                          '（月見出しへの注記混入はツールが0名と誤読する実事故あり）: '
                          + ' / '.join(diffs[:5]), [e['name']])
+            elif plain_months and (call_round or 0) >= 7 and '通常' in (frame or ''):
+                rep.warn('WAGE-HEADER-NO-YEAR',
+                         f'{e["name"]}: 月の見出しに年がありません（「1月」〜「12月」）。第7次以降の通常枠は、'
+                         '前事業年度の総労働時間を年月で確かめるため、見出しを「令和7年1月」のような年付きにしないと'
+                         'ツールが止まります', [e['name']])
         else:
             rep.info('WAGE-RAW',
                      f'{e["name"]}: テンプレ規格外の賃金台帳（給与ソフト出力等）。'

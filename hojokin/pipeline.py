@@ -2917,6 +2917,12 @@ def _bonus_basis_coverage_messages(employees: list, target_yms: list,
         msgs.append(
             f'ℹ️ 台帳に印字された入社日・退職日から「非在籍」と書いた月がある従業員: {len(absent)}名'
             f'（{head(absent)}）。入社日・退職日を原本で確認してください。')
+    unresolved = [f'{e.name}（{e.presence_note}）' for e in employees
+                  if 'しなかった' in (e.presence_note or '') or '決めていません' in (e.presence_note or '')]
+    if unresolved:
+        msgs.append(
+            f'⚠️ 入社日・退職日と給与の記載が食い違う、または日付を読めなかった従業員: {len(unresolved)}名'
+            f'（{head(unresolved)}）。その月は「非在籍」にしていません。原本で在籍を確かめてください。')
     return msgs
 
 

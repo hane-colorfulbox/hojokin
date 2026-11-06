@@ -517,5 +517,80 @@ class HourlyBasisTests(unittest.TestCase):
         self.assertEqual(blank.returncode, 3, blank.stdout + blank.stderr)
 
 
+def load_check_docs():
+    spec = importlib.util.spec_from_file_location(
+        'check_docs_for_test', ROOT / '.claude' / 'skills' / 'case-docs-check' / 'review' / 'check_docs.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ReviewFollowUpTests(unittest.TestCase):
+    """独立レビューで確かめた指摘の回帰テスト。"""
+
+    def test_bonus_month_with_taxable_pay_outside_hire_date_is_not_marked_absent(self):
+        # 入社日より前でも課税支給が読めた月は、基本給・対象月額・時間が読めなくても非在籍にしない
+        # （母数から外して加点①を「対象」に変えてしまう過大判定を防ぐ）。
+        target = list(rules_for_round(7).bonus1_window) + [LATEST_YM]
+        ai = [{'name': '合成 入社', 'employment_type': 'パート・アルバイト', 'hire_date': '2026-01-10',
+               'monthly': [{'ym': f'2025-{m}', 'taxable': 220_000, 'base': None, 'hourly_basis': None, 'hours': None}
+                           for m in (10, 11, 12)]}]
+        emp = _ai_data_to_bonus_employees(ai, target_yms=target)[0]
+        self.assertFalse(any(emp.monthly_presence.get((2025, m)) is False for m in (10, 11, 12)))
+        self.assertIn('非在籍にしなかった月：令和7年10月、令和7年11月、令和7年12月', emp.presence_note)
+        messages = pipeline._bonus_basis_coverage_messages([emp], target)
+        self.assertTrue(any('食い違う' in m and '合成 入社' in m for m in messages), messages)
+
+    def test_text_null_dates_do_not_discard_the_other_date(self):
+        for blank in ('null', 'None', ' ', '　'):
+            emp = _ai_data_to_wage_employees([ai_employee('合成 退職', months([1] * 8), hire_date=blank,
+                                                           leave_date='2025-08-31')], '2025-01〜2025-12')[0]
+            self.assertEqual(sorted(emp.monthly_presence), [(2025, m) for m in range(9, 13)], repr(blank))
+            self.assertNotIn('読めない', emp.presence_note)
+        merged = ai_extractor._merge_wage_employees_by_month([
+            [ai_employee('合成 甲', months([1]), hire_date='null')],
+            [ai_employee('合成 甲', months([1]), hire_date='2025-07-01')]])
+        self.assertEqual(merged[0]['hire_date'], '2025-07-01')
+        self.assertNotIn('_date_conflicts', merged[0])
+
+    def check_headers(self, headers, frame='通常枠', call_round=7):
+        mod = load_check_docs()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / '合成_賃金台帳一覧.xlsx'
+            shutil.copyfile(STD_TEMPLATE, path)
+            wb = openpyxl.load_workbook(path)
+            for i, text in enumerate(headers):
+                wb[SHEET].cell(HEADER_ROW, COL_MONTH + i).value = text
+            wb.save(path)
+            wb.close()
+            report = mod.Report()
+            mod.check_excel_structures(report, {'wage_ledger': [{'name': path.name, 'local_path': str(path),
+                                                                  'ext': '.xlsx'}]},
+                                       'application', frame, '法人', call_round, None)
+            return {(f['level'], f['code']) for f in report.findings if 'WAGE-HEADER' in f['code']}
+
+    def test_case_docs_check_accepts_year_stamped_month_headers(self):
+        fiscal = [f'令和7年{m}月' for m in range(4, 13)] + [f'令和8年{m}月' for m in range(1, 4)]
+        self.assertEqual(self.check_headers([wareki_label(*ym) for ym in FY2025]), set())
+        self.assertEqual(self.check_headers(fiscal), set())               # ツールの台帳作成（期首月から）
+        self.assertEqual(self.check_headers(fiscal[9:] + fiscal[:9]), set())  # スキル（暦月の位置）
+        self.assertEqual(self.check_headers([f'2025年{m}月' for m in range(1, 13)]), set())
+        plain = [f'{m}月' for m in range(1, 13)]
+        self.assertEqual(self.check_headers(plain), {('WARN', 'WAGE-HEADER-NO-YEAR')})
+        self.assertEqual(self.check_headers(plain, frame='インボイス枠'), set())
+        for bad in (['1月\n(R7.1)'] + plain[1:],
+                    plain[:6] + [f'令和7年{m}月' for m in range(7, 13)],
+                    [f'令和7年{m}月' for m in range(1, 12)] + ['令和8年1月']):
+            self.assertEqual(self.check_headers(bad), {('FAIL', 'TPL-WAGE-HEADER')}, bad)
+
+    def test_version_labels_exclude_the_build_without_basis_columns(self):
+        # v0.2.99・2026.11.05 版のエンジンは AH〜AT列を読まない。見分け方の下限はそれより後の版。
+        app = (ROOT / 'app.py').read_text(encoding='utf-8')
+        self.assertIn('補助金書類自動作成ツール v0.2.100 |', app)
+        guide = (ROOT / 'docs' / '第7次申請_担当者向け要点.md').read_text(encoding='utf-8')
+        self.assertIn('v0.2.100 以上', guide)
+        self.assertIn('2026.11.06 以降', guide)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -553,12 +553,13 @@ def _carry_employment_dates(rec: dict, emp: dict) -> None:
     片方だけにあれば採る。両方にあって違う値なら、どちらとも決めず食い違いとして残す
     （wage_reader._date_bounded_absent_months が非在籍の月を決めない）。
     """
+    from .wage_reader import is_blank_ai_date
     for key in _EMPLOYMENT_DATE_KEYS:
         value = emp.get(key)
-        if value in (None, ''):
+        if is_blank_ai_date(value):
             continue
         current = rec.get(key)
-        if current in (None, ''):
+        if is_blank_ai_date(current):
             rec[key] = value
         elif str(current).strip() != str(value).strip():
             label = '入社日' if key == 'hire_date' else '退職日'

@@ -436,6 +436,8 @@ class BonusWageEmployee:
     monthly_hourly_basis: dict[tuple[int, int], float] = field(default_factory=dict)
     # 基本給と時間換算の対象月額を別に持つか（上の docstring）。位置引数で作る既存呼び出しのため末尾に置く。
     hourly_basis_separate: bool = False
+    # 在籍状態の根拠と、非在籍にしなかった理由（AI 抽出の入社日・退職日から。作成時の報告用・算定には使わない）
+    presence_note: str = ''
 
     @property
     def is_officer(self) -> bool:
@@ -1819,13 +1821,19 @@ def _sum_window_bonuses(
     return total, undated, dropped
 
 
+def is_blank_ai_date(value) -> bool:
+    """AI の入社日・退職日の値が「日付なし」か（None・空白・文字列の 'null' / 'none'）。"""
+    if value is None or isinstance(value, bool):
+        return True
+    text = unicodedata.normalize('NFKC', str(value)).strip()
+    return not text or text.lower() in ('null', 'none')
+
+
 def _parse_ai_date_ym(value) -> tuple[int, int] | None:
     """AI が返した入社日・退職日（'2025-06-15'・'2025/6'・'令和7年6月15日' 等）を (西暦年, 月) にする。"""
-    if value is None or isinstance(value, bool):
+    if is_blank_ai_date(value):
         return None
     text = unicodedata.normalize('NFKC', str(value)).strip()
-    if not text or text.lower() in ('null', 'none'):
-        return None
     m = re.match(r'(\d{4})\s*[-/.年]\s*(\d{1,2})(?!\d)', text)
     if m:
         year, month = int(m.group(1)), int(m.group(2))
@@ -1854,7 +1862,7 @@ def _date_bounded_absent_months(emp: dict, months, has_value) -> tuple[list, lis
     hire, leave = _parse_ai_date_ym(hire_raw), _parse_ai_date_ym(leave_raw)
     unreadable = [f'{label}「{raw}」' for label, raw, parsed in
                   (('入社日', hire_raw, hire), ('退職日', leave_raw, leave))
-                  if raw not in (None, '') and parsed is None]
+                  if not is_blank_ai_date(raw) and parsed is None]
     if unreadable:
         return [], [], '読めない日付があるため非在籍の月を決めていません：' + '、'.join(unreadable)
     if not hire and not leave:
@@ -2232,13 +2240,23 @@ def _ai_data_to_bonus_employees(
         base_by_ym: dict[tuple[int, int], float] = {}
         basis_by_ym: dict[tuple[int, int], float] = {}
         hours_by_ym: dict[tuple[int, int], float] = {}
+        # 課税支給など何かの金額・時間がある月。基本給・対象月額・時間が読めない月でも、ここにあれば
+        # 入社日・退職日の外でも非在籍にしない（標準台帳の経路と同じ。食い違いは原本で確認）。
+        paid_yms: set[tuple[int, int]] = set()
+        paid_months_without_year: set[int] = set()
         for m in (emp.get('monthly') or []):
             if not isinstance(m, dict):
                 continue
             parsed = parse_ym_header(m.get('ym'))
+            has_amount = any((_to_float(m.get(key)) or 0) > 0
+                             for key in ('taxable', 'base', 'hourly_basis', 'hours', 'work_days'))
+            if parsed and parsed[0] is None and has_amount:
+                paid_months_without_year.add(parsed[1])
             if not parsed or parsed[0] is None:
                 continue
             ym = (parsed[0], parsed[1])
+            if has_amount:
+                paid_yms.add(ym)
             base = _to_float(m.get('base'))
             if base is not None and base > 0:
                 base_by_ym[ym] = base
@@ -2249,10 +2267,11 @@ def _ai_data_to_bonus_employees(
             if h is not None and h > 0:
                 hours_by_ym[ym] = h
         presence: dict[tuple[int, int], bool] = {}
+        note = ''
         if target_yms:
-            absent, _kept, _note = _date_bounded_absent_months(
+            absent, _kept, note = _date_bounded_absent_months(
                 emp, target_yms,
-                lambda ym: ym in base_by_ym or ym in basis_by_ym or ym in hours_by_ym)
+                lambda ym: ym in paid_yms or ym[1] in paid_months_without_year)
             presence = {ym: False for ym in absent}
         out.append(BonusWageEmployee(
             no=i + 1, name=name, employment_type=emp_type,
@@ -2261,6 +2280,7 @@ def _ai_data_to_bonus_employees(
             monthly_presence=presence,
             monthly_hourly_basis=basis_by_ym if separate else {},
             hourly_basis_separate=separate,
+            presence_note=note,
         ))
     return out
 
