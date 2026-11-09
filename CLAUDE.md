@@ -129,9 +129,9 @@
 ### 配布（組織プラグイン hojokin・2026-09-30〜）
 - 配布正本に加え、確定した担当者向けPDF・HTML・配布資料ZIPも `distribution/releases/` に保存してGit管理する。`_dist/` は生成・検証用のため引き続き除外する。配布した実体と元コミット・SHA-256を記録し、正本修正→再生成→確認→リリース登録・コミットまでを行う（2026-11-04 ユーザー指示）。
 - プラグイン本体は従来どおりprivateの生成リポジトリで管理する。内部参照を含むプラグインZIP・原本管理者用候補を開発リポジトリの配布書庫へ混ぜず、元コミット・生成物ハッシュ・再生成手順を記録する。顧客実データや未確認の作業出力は登録しない。
-- 補助金業務の資料（`引き継ぎ/`・配布可の docs）とスキル4本（hojokin-guide / wagebook-convert / katen-judge / case-docs-check）は、claude.ai 組織の「プラグインとスキル」で配る。同期元は private の `colorful-box/hojokin-plugins`（生成物専用・手で直さない）。チャット・Cowork・Claude Code（v2.1.273 以上・claude.ai ログイン）に届く
+- 補助金業務の資料（`引き継ぎ/`・配布可の docs）とスキル4本（hojokin-guide / wagebook-convert / katen-judge / case-docs-check）は、claude.ai 組織の「プラグインとスキル」で配る方針。生成物の置き場は private の `colorful-box/hojokin-plugins`（生成物専用・手で直さない）。チャット・Cowork・Claude Code（v2.1.273 以上・claude.ai ログイン）に届く
 - 組み立て: `python scripts/build_plugin.py --out <hojokin-plugins の作業コピー>`。HEAD にコミット済みの内容だけから作り、ゲート（PII・リンク・frontmatter・共通ブロック・同期・`claude plugin validate --strict`）が1つでも NG なら書き換えない。中身の許可リストは `scripts/distribution_manifest.py`。スキル本体の正本はこれまでどおり `.claude/skills/`、ガイドは `引き継ぎ/配布用SKILL_hojokin-guide.md`
-- hojokin-plugins の既定ブランチに push すると自動同期で全員に届く＝**push は管理者本人（羽根）**（他の人に届く操作のため。CC はコミットまで）
+- hojokin-plugins の既定ブランチへの push は管理者本人（羽根）。**ただし 2026-11-09 時点で claude.ai 組織の GitHub 同期は未接続で、push しても誰にも届かない**（管理画面の「プラグインと Skills」にある hojokin は羽根の個人アップロード 2026.09.30 版・作成者のみ）。GitHub 同期には colorful-box の GitHub 組織オーナー権限が要る。それまでは、管理画面の「追加 → プラグインをアップロード」で `build_plugin.py --zip` の ZIP を上げ、配布先を組織の全員にして配る（他の人に届く操作なので管理者本人の了承を取る）
 - 顧客データのルール・チャットでの注意・パスの書き方・旧パックの確認は、各 SKILL.md に目印コメント付きの共通ブロックで持つ。正本はガイドで、文言が1字でも違うとビルドが止まる
 - PII 名簿はリポジトリ外の `%USERPROFILE%\.hojokin_pii\roster.txt`（件数に下限あり）。誤検知の承認は `scripts/plugin_pii_scan.py --approve` で、行の sha256 だけを `scripts/plugin_pii_allowlist.json` に残す（名前は保存しない）
 - テスト: `python -B tests/plugin/run_all.py`（配布版をリポジトリ外に組み立て、合成データで各スキルのスクリプトを動かす・API 不使用）
