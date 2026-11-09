@@ -1,0 +1,74 @@
+{
+  "release": "2026-11-09",
+  "edition": "第7次対応版（ヒアリングシートの7次版の見分け方を訂正）",
+  "source_commit": "f71a94a9b92a802cc3329dbad4a9d2873c868872",
+  "version": "2026.11.09-f71a94a9b92a",
+  "supersedes": "2026-11-06（未配信のまま差し替え。ヒアリングシートにない「第7次以降用」の表示で見分けるよう書いていたため）",
+  "files": {
+    "README.txt": {
+      "sha256": "3d0074c268973c3f7503a0e546e6bd29b5fb9798a8bb54f57b7b93015d9f3fe2",
+      "bytes": 2051
+    },
+    "第7次申請_担当者向け要点と公式資料の確認範囲_2026-11-09.pdf": {
+      "sha256": "e1e1bd018132131c46abcaa751f55bc1a77525ab705e4c22b48e3a5889641a07",
+      "bytes": 271394
+    },
+    "第7次申請_配布資料_2026-11-09.zip": {
+      "sha256": "5fb14a2d55a4c6f33e5051bc835e49399301c9efbd1019304d14248c43c98049",
+      "bytes": 296871
+    },
+    "案内HTML/第7次申請_ツール入力手順.html": {
+      "sha256": "a6ffea5c200834a8cb15203e18f473128c233e53dcdb392b2b49e0312922e384",
+      "bytes": 12781
+    },
+    "案内HTML/第7次申請_公式資料で判断できることと確認の範囲.html": {
+      "sha256": "6aa11e130c53901ccc968f5dcc8c7562132a654803aab43c72e50e0203e3ba1f",
+      "bytes": 22717
+    },
+    "案内HTML/第7次申請_変更点と使い方.html": {
+      "sha256": "7cb164a699c72f1bf476b8ca81f8908b28142f532d334de7c36a41d84767852c",
+      "bytes": 33244
+    },
+    "案内HTML/第7次申請_担当者向け要点.html": {
+      "sha256": "ff5c5ce5e1d19f067d0eea9f49ff640ba35787db12684be3c2f5628e3a67343a",
+      "bytes": 11702
+    },
+    "案内HTML/第7次申請_確認待ち事項.html": {
+      "sha256": "b759b769a29ac04d0271ffe1155fa45a7c34da8795d663a9a5b1753dddc55e32",
+      "bytes": 11425
+    },
+    "案内HTML/管理者・開発者向け/第7次原本_改訂内容と再取込手順.html": {
+      "sha256": "7e3e58ad9bf0527a6b737aaf703cc1d27b1713f0f48c9f1d8dd74e25433e3d7d",
+      "bytes": 12474
+    }
+  },
+  "source_inputs_sha256": {
+    "docs/第7次申請_担当者向け要点.md": "49f41546d36fd9f37ae1fbc2e3ef45cd2cd69e79eb03caef34cae0bbf1b06e9d",
+    "docs/第7次申請_変更点と使い方.md": "f716707bee18979fff45a417bc66a24a2f792e48640bc9f61c6b209b96b7c9d0",
+    "docs/第7次申請_確認待ち事項.md": "2d7d46601ab0440b95354fcd692d52a8dce6aa96152cf517b241c9de8caac160",
+    "docs/第7次申請_公式資料で判断できることと確認の範囲.md": "ac31bfba50ee1a1b1f11278ffaf678b13514bc577d1c754a3a0880691bdc7e8b",
+    "docs/第7次申請_ツール入力手順.md": "29e0cc8943960294153860b42854f8ff3d0b87245f4563e4a748bcfdbf53cf49",
+    "docs/第7次原本_改訂内容と再取込手順.md": "5135c1e50429414312929cdf54504be52c00ba210f2cab4f824613ae0cb6f2ae"
+  },
+  "plugin": {
+    "managed_in": "private hojokin-plugins repository",
+    "commit": "1557a0f",
+    "version": "2026.11.09-f71a94a9b92a",
+    "zip_sha256": "9a2c1a735302c722ce3e8fb20681627258bc0505932f05533204bdae8a6e588d",
+    "zip_archived_here": false
+  },
+  "tool": {
+    "app_footer_version": "v0.2.100",
+    "source_commit": "3fd28f72a5d4",
+    "note": "f71a94a は資料だけの変更で、ツールのコードは 3fd28f7 と同じ"
+  },
+  "verification": {
+    "pytest_tests": "tests/test_round7_docs.py 6 passed（資料だけの変更。コードは 3fd28f7 で pytest 193 passed・_debug 82本合格）",
+    "plugin_tests": "9/9 passed（f71a94a から組み立て）",
+    "plugin_gates": "全ゲート合格（同期・frontmatter・構成・相対リンク・古い語・共通ブロック・xlsxメタデータ・PII・claude plugin validate）",
+    "pdf_pages": 9,
+    "official_sources_checked": "2026-11-09 に公式ダウンロードページ（58件・--deep）・お知らせ・事業スケジュールを確認。11/5 の後年手続きマニュアル以降の更新なし",
+    "drive_originals_checked": "2026-11-09 に読み取りで確認。申請書の原本3種は10/6、ヒアリングシートは7〜8月が最終更新で7次版前。インボイス法人の原本は「※編集中」（11/4更新）"
+  },
+  "delivery_status": "書類作成ツール v0.2.100 は 2026-11-06 に本番反映済み。プラグイン 2026.11.09 版は 2026-11-09 にhojokin-plugins へ push 済み。Drive原本の7次版への差し替えと担当者への周知は未実施"
+}
