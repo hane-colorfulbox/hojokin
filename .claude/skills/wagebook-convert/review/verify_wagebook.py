@@ -68,6 +68,11 @@ def _marker_text(v):
 _ABSENT_NORMALIZED = frozenset(_marker_text(s) for s in ABSENT_LABELS)
 
 
+def _full_year_paid(e):
+    """12か月すべて支給>0か。ツールの wage_calculator.is_full_year_paid と同じ規則（空欄・0円・非在籍は支給なし）。"""
+    return all(isinstance(v, (int, float)) and v > 0 for v in e['months'])
+
+
 def _month_state(v):
     """月の欄の値を ('num', 値) / ('absent', None) / ('blank', None) / ('invalid', 元の値) に分ける。"""
     if v is None or (isinstance(v, str) and not v.strip()):
@@ -444,16 +449,28 @@ def main(argv):
         fail.append(f'役員ラベル未正規化 {len(officer_residue)}件')
         print()
 
-    # --- ④-b パートでE列(月平均時間)空（FAIL: FTE=1.0サイレント昇格でR215過大） ---
+    # --- ④-b パートでE列(月平均時間)空 ---
+    # 12か月すべて支給がある人（R215/R216 の算定対象）は FTE=1.0 にサイレント昇格して R215 が過大になる＝FAIL。
+    # 12か月そろわない人は R215/R216 に入らないので要確認に留める（第7次以降の通常枠は生産性の総労働時間に使う）。
     part_no_hours = [
         e for e in rows
-        if any(t in e['type'] for t in PART_TRIGGERS) and e['hours'] is None
+        if any(t in e['type'] for t in PART_TRIGGERS) and '役員' not in e['type'] and e['hours'] is None
     ]
-    if part_no_hours:
-        print('[FAIL パートでE列(月平均時間)空]（FTE=1.0昇格でR215過大。§1 E列必須）')
-        for e in part_no_hours:
+    part_no_hours_full = [e for e in part_no_hours if _full_year_paid(e)]
+    part_no_hours_partial = [e for e in part_no_hours if not _full_year_paid(e)]
+    if part_no_hours_full:
+        print('[FAIL パートでE列(月平均時間)空・12か月支給あり]（FTE=1.0昇格でR215過大。§1 E列必須）')
+        for e in part_no_hours_full:
             print(f"  行{e['row']} {e['name']}: 雇用形態=「{e['type']}」だがE列空")
-        fail.append(f'パートでE列空 {len(part_no_hours)}件')
+        fail.append(f'12か月支給のあるパートでE列空 {len(part_no_hours_full)}件')
+        print()
+    if part_no_hours_partial:
+        print('[要確認 パートでE列(月平均時間)空・12か月そろわない]（空欄・0・非在籍の月があるので R215・R216 の対象外。'
+              'ただし空欄が転記漏れなら対象に戻りE列が必須になるので、空欄の月はPDFで確かめる。'
+              '第7次以降の通常枠は生産性の総労働時間に使うためE列が要る。原本に時間の印字が無ければ§9に書く）')
+        for e in part_no_hours_partial:
+            print(f"  行{e['row']} {e['name']}: 雇用形態=「{e['type']}」だがE列空")
+        confirm.append(f'12か月そろわないパートでE列空 {len(part_no_hours_partial)}件')
         print()
 
     # --- ④-c パートの時給（F列）: 要確認。FTE は E列のみに依存するので FAIL にはしない ---
