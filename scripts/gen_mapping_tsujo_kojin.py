@@ -246,6 +246,11 @@ def main() -> int:
             break
     if wage_raise_row is None:
         ng.append('hearing_wage_raise_row: 賃上げ幅選択の設問がヒアリングに見つからない')
+    # ══ 6. hearing_anchor_row（ヒアリングの版の読み替えの目印＝「◼️表明を行った従業員名」）══
+    anchors = [hr for hr, raw in hearing_labels if '表明を行った従業員名' in norm(raw)]
+    anchor_row = anchors[0] if len(anchors) == 1 else None
+    if anchor_row is None:
+        ng.append(f'hearing_anchor_row: 「表明を行った従業員名」の見出しが1つに定まらない: {anchors}')
     wb.close()
 
     # ══ レポート ══
@@ -287,6 +292,7 @@ def main() -> int:
     lines.append('    is_kojin=True,')
     lines.append('    preserve_rows=[147, 149, 153, 154, 155],')
     lines.append(f'    hearing_wage_raise_row={wage_raise_row},')
+    lines.append(f'    hearing_anchor_row={anchor_row},')
     lines.append(')')
     block = '\n'.join(lines)
 

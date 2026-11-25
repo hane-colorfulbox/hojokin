@@ -10,6 +10,10 @@ from .choice_masters import decode_choice_field
 
 logger = logging.getLogger(__name__)
 
+# 行をそろえる目印の見出しと、その下に続く表明者3人の見出し（どの版・枠でも同じ並び）
+HEARING_ANCHOR_LABEL = '表明を行った従業員名'
+HEARING_DECLARER_LABELS = ('従業員代表者', '給与担当者', '事業所内最低賃金者')
+
 # 全角→半角変換テーブル
 _ZEN2HAN = str.maketrans(
     '０１２３４５６７８９'
@@ -93,6 +97,47 @@ def read_hearing_sheet(path: Path) -> dict[int, any]:
     wb.close()
     logger.info(f'ヒアリングシート読込: {path.name}, {len(data)}行')
     return data
+
+
+def align_hearing_rows(hearing_data: dict, anchor_row: int) -> tuple[dict, str | None]:
+    """ヒアリングの行番号を、対応表が前提とする版の行番号にそろえる。
+
+    第7次の版（2026-11-09）は「◼️表明を行った従業員名」の上に昇給時期などの欄が増え、
+    それより下の行がずれた。顧客が旧版・新版のどちらに書いても正しい欄を読むため、
+    見出しの実際の行と anchor_row の差だけ、見出しから下の行を動かす。
+    - 実際の見出しが下にある（対応表が知らない欄がある）: その欄は外し、下の行を上げる
+    - 実際の見出しが上にある（対応表が前提とする欄がない）: 下の行を下げ、欠けた欄は空のまま
+    戻り値は (そろえたヒアリング, 注意の文。問題なければ None)。
+    見出しが見つからない・表明者3人の見出しが続かないときは、ずれて読むより転記しない方を選び、
+    見出しから下の行を外して注意を返す。
+    """
+    if not hearing_data or not anchor_row:
+        return hearing_data, None
+    found = [row for row, rec in hearing_data.items() if HEARING_ANCHOR_LABEL in str(rec.get('label', ''))]
+    if len(found) != 1:
+        kept = {row: rec for row, rec in hearing_data.items() if row < anchor_row}
+        note = (f'ヒアリングの「◼️表明を行った従業員名」の見出しが{"見つかりません" if not found else "複数あります"}。'
+                f'行の位置を確かめられないため、{anchor_row}行目から下（表明を行った従業員名など）は転記していません。')
+        logger.warning(note)
+        return kept, note
+    actual = found[0]
+    delta = anchor_row - actual
+    aligned = {}
+    for row, rec in hearing_data.items():
+        if row < min(actual, anchor_row):
+            aligned[row] = rec
+        elif row >= actual:
+            aligned[row + delta] = rec
+    names = [str(aligned.get(anchor_row + offset, {}).get('label', '')) for offset in (1, 2, 3)]
+    if not all(label in name for label, name in zip(HEARING_DECLARER_LABELS, names)):
+        kept = {row: rec for row, rec in aligned.items() if row < anchor_row}
+        note = ('ヒアリングの「◼️表明を行った従業員名」の下が「従業員代表者・給与担当者・事業所内最低賃金者」'
+                f'の並びになっていないため、{anchor_row}行目から下は転記していません。様式が改変されていないか確認してください。')
+        logger.warning(note)
+        return kept, note
+    if delta:
+        logger.info(f'ヒアリングの版に合わせて行をそろえました（{actual}行目の見出しを{anchor_row}行目へ）')
+    return aligned, None
 
 
 def transfer_hearing_to_tenki(hearing_data: dict, ws_tenki, mapping: list[tuple[int, int, bool]]) -> int:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 # ── 環境変数から読み込み ──
 CLAUDE_API_KEY = os.getenv('CLAUDE_API_KEY', '')
@@ -222,6 +222,11 @@ class TemplateMapping:
     # 0 = 対応するヒアリング項目なし（賃上げ幅は空欄のまま空セル警告に委ねる）
     hearing_wage_raise_row: int = 0
 
+    # ヒアリング（基本情報）で「◼️表明を行った従業員名」の見出しがある行。
+    # 第7次の版で上に欄が増えて行がずれたため、読み取ったヒアリングをこの行に合わせて
+    # 対応表の行番号へそろえる（hearing_reader.align_hearing_rows）。0 = そろえない
+    hearing_anchor_row: int = 0
+
 
 # ── 2026 通常枠テンプレート ──
 # テンプレート原本: ツール/【原本_法人】企業名_通常枠_法人2026.xlsx
@@ -390,6 +395,7 @@ MAPPING_2026_TSUJO = TemplateMapping(
     tenki_text_range=(15, 26),
     preserve_rows=[173, 175, 179, 180, 181],
     hearing_wage_raise_row=82,
+    hearing_anchor_row=83,
 )
 
 # ── 2026 インボイス枠 ──
@@ -546,6 +552,7 @@ MAPPING_2026_INVOICE = TemplateMapping(
     tenki_text_range=(16, 26),
     preserve_rows=[163, 164, 165],
     hearing_wage_raise_row=76,
+    hearing_anchor_row=78,
 )
 
 
@@ -684,6 +691,7 @@ MAPPING_2026_INVOICE_KOJIN = TemplateMapping(
     is_kojin=True,
     preserve_rows=[133, 134, 135],
     hearing_wage_raise_row=88,
+    hearing_anchor_row=90,
 )
 
 
@@ -803,19 +811,89 @@ MAPPING_2026_TSUJO_KOJIN = TemplateMapping(
     is_kojin=True,
     preserve_rows=[147, 149, 153, 154, 155],
     hearing_wage_raise_row=96,
+    hearing_anchor_row=97,
 )
 
-def get_mapping(template_type: str) -> TemplateMapping:
-    """テンプレートタイプからマッピングを取得"""
-    mappings = {
-        '通常枠_2026': MAPPING_2026_TSUJO,
-        '通常枠_個人_2026': MAPPING_2026_TSUJO_KOJIN,
-        'インボイス枠_2026': MAPPING_2026_INVOICE,
-        'インボイス枠_個人_2026': MAPPING_2026_INVOICE_KOJIN,
-    }
-    if template_type not in mappings:
-        raise ValueError(f'未対応のテンプレートタイプ: {template_type}。対応: {list(mappings.keys())}')
-    return mappings[template_type]
+
+# ── 第7次以降の対応表（2026-11-09 に原本管理担当が更新した Drive 版の原本・ヒアリング）──
+# Drive 版はヒアリングの基本情報に「昇給時期・今期中の退職予定者・今期賞与見込み」の欄が
+# 「◼️表明を行った従業員名」の上に増え、転記・申請内容にもその受け皿の行と（通常枠は）加点①の
+# 設問が足された。旧回（第1〜6次）の原本・対応表は訂正用に残し、第7次以降は旧回の対応表に
+# 下の「ずれ」を当てて作る。ずれは (旧回の行の開始, 足す行数) を昇順に並べたもの。
+# 実測は scripts/build_round7_templates.py の Drive 取り込みと tests/test_round7_drive_layout.py。
+from .template_versions import ROUND7_FIRST_CALL  # noqa: E402  （template_versions は config を関数内でだけ読む）
+
+
+@dataclass(frozen=True)
+class _Round7Layout:
+    shinsei_shifts: tuple[tuple[int, int], ...]
+    hearing_shift: tuple[int, int]
+    tenki_shift: tuple[int, int]
+    # Drive 版で増えた欄の (ヒアリング行, 転記行)。行番号は第7次の版のもの
+    added_hearing_rows: tuple[tuple[int, int], ...]
+
+
+ROUND7_LAYOUTS: dict[str, _Round7Layout] = {
+    '通常枠_2026': _Round7Layout(
+        shinsei_shifts=((221, 6), (234, 17)), hearing_shift=(83, 9), tenki_shift=(83, 9),
+        added_hearing_rows=((84, 84), (86, 86), (87, 87), (89, 89), (90, 90))),
+    '通常枠_個人_2026': _Round7Layout(
+        shinsei_shifts=((197, 6), (210, 16)), hearing_shift=(97, 9), tenki_shift=(95, 9),
+        added_hearing_rows=((98, 96), (100, 98), (101, 99), (103, 101), (104, 102))),
+    'インボイス枠_2026': _Round7Layout(
+        shinsei_shifts=((206, 7),), hearing_shift=(78, 8), tenki_shift=(75, 9),
+        added_hearing_rows=((78, 76), (80, 78), (81, 79), (83, 81), (84, 82))),
+    'インボイス枠_個人_2026': _Round7Layout(
+        shinsei_shifts=((178, 7),), hearing_shift=(90, 8), tenki_shift=(87, 9),
+        added_hearing_rows=((90, 88), (92, 90), (93, 91), (95, 93), (96, 94))),
+}
+
+
+def shift_row(row: int, shifts: tuple[tuple[int, int], ...]) -> int:
+    """旧回の行番号を第7次の版の行番号にする（開始行以上なら、当てはまる最後のずれを足す）。"""
+    delta = 0
+    for start, added in shifts:
+        if row >= start:
+            delta = added
+    return row + delta
+
+
+def _round7_mapping(base: TemplateMapping, layout: _Round7Layout) -> TemplateMapping:
+    hearing, tenki, shinsei = (layout.hearing_shift,), (layout.tenki_shift,), layout.shinsei_shifts
+    moved = [(shift_row(h, hearing), shift_row(t, tenki), phone) for h, t, phone in base.hearing_to_tenki]
+    added = [(h, t, False) for h, t in layout.added_hearing_rows]
+    clear_start, clear_end = base.shinsei_clear_range
+    return replace(
+        base,
+        hearing_to_tenki=sorted(moved + added),
+        shinsei={name: shift_row(row, shinsei) for name, row in base.shinsei.items()},
+        shinsei_clear_range=(clear_start, shift_row(clear_end, shinsei)),
+        preserve_rows=[shift_row(row, shinsei) for row in base.preserve_rows],
+        hearing_wage_raise_row=shift_row(base.hearing_wage_raise_row, hearing),
+        hearing_anchor_row=shift_row(base.hearing_anchor_row, hearing),
+    )
+
+
+_LEGACY_MAPPINGS = {
+    '通常枠_2026': MAPPING_2026_TSUJO,
+    '通常枠_個人_2026': MAPPING_2026_TSUJO_KOJIN,
+    'インボイス枠_2026': MAPPING_2026_INVOICE,
+    'インボイス枠_個人_2026': MAPPING_2026_INVOICE_KOJIN,
+}
+_ROUND7_MAPPINGS = {kind: _round7_mapping(base, ROUND7_LAYOUTS[kind]) for kind, base in _LEGACY_MAPPINGS.items()}
+
+
+def get_mapping(template_type: str, call_round: int | None = None) -> TemplateMapping:
+    """テンプレートタイプと公募回から対応表を取得する。
+
+    第7次以降は Drive 版（2026-11-09）の原本の行に合わせた対応表を返す。
+    公募回を渡さないときは第1〜6次（旧回）の原本の対応表を返す。
+    """
+    if template_type not in _LEGACY_MAPPINGS:
+        raise ValueError(f'未対応のテンプレートタイプ: {template_type}。対応: {list(_LEGACY_MAPPINGS.keys())}')
+    if call_round is not None and call_round >= ROUND7_FIRST_CALL:
+        return _ROUND7_MAPPINGS[template_type]
+    return _LEGACY_MAPPINGS[template_type]
 
 
 # ── 申請書テンプレの転記先ラベル検証（W-TPL-001 ゲート）──

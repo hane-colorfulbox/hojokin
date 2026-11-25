@@ -108,7 +108,8 @@ def _round7_layout_issue(path: Path, template_type: str | None) -> str | None:
             return f'「{APPLICATION_SHEET}」シートがありません。申請書の原本ではない可能性があります。'
         ws = wb[APPLICATION_SHEET]
         kinds = [template_type] if template_type else list(APPLICATION_FILENAMES)
-        if not any(not check_shinsei_anchor_labels(ws, get_mapping(kind), call_round=ROUND7_FIRST_CALL)
+        if not any(not check_shinsei_anchor_labels(ws, get_mapping(kind, ROUND7_FIRST_CALL),
+                                                   call_round=ROUND7_FIRST_CALL)
                    for kind in kinds):
             return ('第7次以降用の項目（「0年度目の対象従業員数」など）が、ツールの転記対応表の位置にありません。'
                     '旧版の原本、選んだ申請枠・法人／個人と違う原本、または行が増減した原本です。')

@@ -28,7 +28,7 @@ from hojokin.template_filler import (
     WAGE_RAISE_30, WAGE_RAISE_50, WAGE_RAISE_NONE, fill_shinsei_sheet, fill_template, merge_review_notes,
 )
 from hojokin.template_versions import (
-    APPLICATION_FILENAMES, application_template_issues, find_application_template,
+    APPLICATION_FILENAMES, ROUND7_FIRST_CALL as ROUND7, application_template_issues, find_application_template,
     select_application_template, template_rule_marker, validate_application_template_version,
 )
 
@@ -110,7 +110,7 @@ class Round7OutputCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def fill(self, kind: str, hearing_value: str | None = None, template: Path | None = None, **changes):
-        mapping = get_mapping(kind)
+        mapping = get_mapping(kind, ROUND7)
         self._count += 1
         out = self.tmp / f'{kind}_{self._count}.xlsx'
         hearing = ({mapping.hearing_wage_raise_row: {'label': '賃金引上げ幅', 'value': hearing_value}}
@@ -215,7 +215,7 @@ class WageRaiseChoiceTests(Round7OutputCase):
         self.assertEqual(self.amount(ws, mapping), WAGE_RAISE_30)
 
     def test_claimed_level_conflicting_with_hearing_stops_without_output(self):
-        mapping = get_mapping('通常枠_2026')
+        mapping = get_mapping('通常枠_2026', ROUND7)
         out = self.tmp / 'conflict.xlsx'
         with self.assertRaisesRegex(ApplicationValidationError, 'ヒアリングの賃金引上げ幅'):
             fill_template(ROUND7_DIR / APPLICATION_FILENAMES['通常枠_2026'], out, mapping,
@@ -315,7 +315,7 @@ class TemplateAcceptanceTests(Round7OutputCase):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = '申請内容'
-        mapping = get_mapping('通常枠_2026')
+        mapping = get_mapping('通常枠_2026', ROUND7)
         for key, expected in SHINSEI_ANCHOR_LABELS.items():
             if key in mapping.shinsei:
                 label = expected[0] if isinstance(expected, tuple) else expected

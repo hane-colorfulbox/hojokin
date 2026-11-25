@@ -734,10 +734,11 @@ def run_application_transfer(
 
     try:
         from .ai_extractor import APICreditExhaustedError
-        mapping = get_mapping(template_type)
 
         # 不明を「なし・はい」に変えず、課金・出力の前に申請前提を検査する。
         validate_application_context(application_context, template_type)
+        # 第7次以降は Drive 版（2026-11-09）の原本の行に合わせた対応表を使う
+        mapping = get_mapping(template_type, application_context.call_round)
         validate_application_template_version(template_path, application_context.call_round)
         requirements = wage_requirements(application_context)
         context_fiscal_month = application_context.fiscal_year_end.month

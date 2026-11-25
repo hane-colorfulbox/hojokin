@@ -1,13 +1,15 @@
-"""第7次以降の原本・ヒアリング・加点台帳テンプレートの文言を固定する（API不使用）。
+"""第7次以降の申請書原本・加点台帳テンプレートの文言を固定する（API不使用）。
 
 根拠: 第7回〜公募要領（通常枠 印刷p.9〜10・23〜25、インボイス枠 印刷p.8〜9・22）、
 交付申請マニュアル11/2版 p.86〜88、公式「賃金状況報告シート」第7次公募回以降用。
+2026-11-25〜: 申請書原本は原本管理担当の Drive 版（2026-11-09）が土台で、ヒアリングシートは Drive 版を
+そのまま写す（文言は原本管理担当が決める）。ヒアリングの文言はここで固定せず、行の並びだけを
+tests/test_round7_drive_layout.py で確かめる。
 """
 from __future__ import annotations
 
 import re
 import sys
-import unicodedata
 import unittest
 import zipfile
 from pathlib import Path
@@ -19,13 +21,13 @@ sys.path.insert(0, str(ROOT))
 sys.stdout.reconfigure(encoding='utf-8')
 
 from hojokin.config import get_mapping
-from hojokin.template_versions import APPLICATION_FILENAMES, ROUND7_SUBJECT
+from hojokin.template_versions import APPLICATION_FILENAMES, ROUND7_FIRST_CALL as ROUND7, ROUND7_SUBJECT
 
 ROUND7_DIR = ROOT / 'ツール' / '第7次以降'
 LEGACY_DIR = ROOT / 'ツール'
 NORMAL_KINDS = ('通常枠_2026', '通常枠_個人_2026')
 INVOICE_KINDS = ('インボイス枠_2026', 'インボイス枠_個人_2026')
-NORMAL_HEARINGS = ('ヒアリングシート2026_通常枠法人.xlsx', 'ヒアリングシート2026_通常枠個人.xlsx')
+LEDGER = '加点判定用賃金台帳テンプレート.xlsx'
 PRODUCTIVITY = '生産性指標給与支給総額計算'
 PLAN_COLUMNS = ('C', 'D', 'E')
 PLAN_INPUT_ROWS = (34, 35, 36, 38, 39)
@@ -38,12 +40,8 @@ STALE_PATTERNS = (r'R[7７][.．][7７]', r'R[7７]年度改定', r'(?<![0-9０-
 
 
 def round7_files() -> list[Path]:
-    return sorted(p for p in ROUND7_DIR.iterdir() if p.suffix == '.xlsx')
-
-
-def find(directory: Path, name: str) -> Path:
-    return next(p for p in directory.iterdir()
-                if unicodedata.normalize('NFC', p.name) == unicodedata.normalize('NFC', name))
+    """こちらで作る第7次の原本（申請書4種類と加点台帳）。ヒアリングは Drive 版の写しなので含めない。"""
+    return [ROUND7_DIR / name for name in APPLICATION_FILENAMES.values()] + [ROUND7_DIR / LEDGER]
 
 
 def load(path: Path) -> openpyxl.Workbook:
@@ -65,17 +63,6 @@ class Round7TemplateWordingTests(unittest.TestCase):
             wb.close()
             self.assertEqual(hits, [], path.name)
 
-    def test_subsidy_rate_condition_follows_official_wording(self):
-        for name in NORMAL_HEARINGS:
-            wb = load(find(ROUND7_DIR, name))
-            text = wb['確認事項']['C33'].value
-            wb.close()
-            for phrase in ('令和7年10月から令和8年9月', '「当該期間における地域別最低賃金以上～令和8年度改定の地域別最低賃金未満」',
-                           '30％以上である月が3か月以上', '連続していなくても',
-                           '「賃金状況報告シート（補助率引上げ・加点措置①用）」'):
-                self.assertIn(phrase, text, name)
-            self.assertNotIn('＋50円', text, name)
-
     def test_bonus_two_and_bonus_one_questions_use_round7_months(self):
         for kind, name in APPLICATION_FILENAMES.items():
             wb = load(ROUND7_DIR / name)
@@ -88,7 +75,7 @@ class Round7TemplateWordingTests(unittest.TestCase):
 
     def test_declaration_has_no_default_and_asks_confirmed_facts(self):
         for kind, name in APPLICATION_FILENAMES.items():
-            rows = get_mapping(kind).shinsei
+            rows = get_mapping(kind, ROUND7).shinsei
             wb = load(ROUND7_DIR / name)
             ws = wb['申請内容']
             for field in ('wage_raise_declaration', 'wage_raise_method'):
@@ -102,7 +89,7 @@ class Round7TemplateWordingTests(unittest.TestCase):
 
     def test_wage_growth_guide_covers_one_year_and_annual_by_category(self):
         for kind, name in APPLICATION_FILENAMES.items():
-            rows = get_mapping(kind).shinsei
+            rows = get_mapping(kind, ROUND7).shinsei
             wb = load(ROUND7_DIR / name)
             ws = wb['申請内容']
             guide = ws.cell(rows['wage_total_y3'] + 1, 2).value
@@ -118,22 +105,6 @@ class Round7TemplateWordingTests(unittest.TestCase):
             self.assertIn('確認済みの0年度目見込みを入力（自動リンクなし）', base_note, kind)
             self.assertIn('交付申請日の属する事業年度', base_note, kind)
 
-    def test_hearing_requirement_table_adds_one_year_rule_and_base_year(self):
-        for name in NORMAL_HEARINGS:
-            wb = load(find(ROUND7_DIR, name))
-            ws = wb['シート1']
-            cells = {ref: ws[ref].value for ref in ('C3', 'D3', 'C4', 'D4', 'C5')}
-            wb.close()
-            self.assertIn('必須ではありません', cells['C3'])
-            self.assertNotIn('1年後', cells['C3'])
-            self.assertIn('1年後に、一人当たり給与支給総額を3.0%以上', cells['D3'])
-            for ref in ('C4', 'D4'):
-                self.assertIn('1年後に、一人当たり給与支給総額を3.5%以上', cells[ref])
-                self.assertIn('年平均成長率を3.5%以上', cells[ref])
-            self.assertIn('＋30円以上', cells['D3'])
-            self.assertIn('＋50円以上', cells['D4'])
-            self.assertIn('基準年度（0年度目）は交付申請日の属する事業年度', cells['C5'])
-
     def test_it_support_center_is_written_next_to_it_navi_for_normal_frame_only(self):
         phrases = ('IT経営サポートセンター', '2026年8月1日以降', '2026年11月30日', '加点は1つ')
         for kind in NORMAL_KINDS + INVOICE_KINDS:
@@ -143,13 +114,6 @@ class Round7TemplateWordingTests(unittest.TestCase):
             wb.close()
             for phrase in phrases:
                 (self.assertIn if kind in NORMAL_KINDS else self.assertNotIn)(phrase, text, kind)
-        for name in NORMAL_HEARINGS:
-            wb = load(find(ROUND7_DIR, name))
-            ws = wb['確認事項']
-            self.assertIn('IT経営サポートセンター', ws['C9'].value)
-            for phrase in phrases:
-                self.assertIn(phrase, ws['D9'].value, name)
-            wb.close()
 
     def test_productivity_plan_is_confirmed_input_not_auto_forecast(self):
         for kind in NORMAL_KINDS:
@@ -169,43 +133,6 @@ class Round7TemplateWordingTests(unittest.TestCase):
             self.assertTrue(ws['B41'].value.startswith('='), kind)
             wb.close()
 
-    def test_only_listed_formulas_differ_from_legacy_templates(self):
-        for kind, name in APPLICATION_FILENAMES.items():
-            old, new = load(LEGACY_DIR / name), load(ROUND7_DIR / name)
-            for ws in old:
-                before, after = formulas(ws), formulas(new[ws.title])
-                changed = {ref for ref in before.keys() | after.keys() if before.get(ref) != after.get(ref)}
-                if ws.title == PRODUCTIVITY:
-                    # 計画列C〜E（34〜42行）と、旧OK/NG判定式だったB42（要件の表示に変更）だけ。
-                    changed = {ref for ref in changed if ref != 'B42'
-                               and not (ref[0] in PLAN_COLUMNS and int(ref[1:]) in PLAN_FORMULA_ROWS)}
-                self.assertEqual(changed, set(), f'{kind} {ws.title}')
-                self.assertEqual(len(ws.data_validations.dataValidation),
-                                 len(new[ws.title].data_validations.dataValidation), f'{kind} {ws.title}')
-                self.assertEqual(sorted(map(str, ws.merged_cells.ranges)),
-                                 sorted(map(str, new[ws.title].merged_cells.ranges)), f'{kind} {ws.title}')
-            old.close()
-            new.close()
-
-    def test_invoice_hearing_asks_current_year_forecast_not_prior_ledger_only(self):
-        wb = load(find(ROUND7_DIR, 'ヒアリングシート2026_インボイス法人.xlsx'))
-        ws = wb['確認事項']
-        self.assertNotIn('生産性', ws['C23'].value)
-        self.assertIn('0年度目', ws['C23'].value)
-        for phrase in ('交付申請日の属する事業年度', '支給済みの月の賃金台帳', '残りの月の支給見込み',
-                       '令和7年10月〜令和8年9月', '申請月の前月'):
-            self.assertIn(phrase, ws['D23'].value)
-        wb.close()
-
-    def test_invoice_hearing_past_grant_note_has_one_year_requirement(self):
-        """インボイス枠：過去交付ありは1年後と年平均の両方で3.5%（第7回〜インボイス要領（ツ））。"""
-        for name in ('ヒアリングシート2026_インボイス法人.xlsx', 'ヒアリングシート2026_インボイス個人.xlsx'):
-            wb = load(find(ROUND7_DIR, name))
-            texts = [c.value for row in wb['基本情報'].iter_rows() for c in row if isinstance(c.value, str)]
-            wb.close()
-            self.assertTrue(any('1年後と年平均の両方で3.5' in t for t in texts), name)
-            self.assertFalse(any('年平均成長率を3.5％以上とすることが申請要件' in t for t in texts), name)
-
     def test_bonus_ledger_rule_marks_absent_months_and_blank_as_unconfirmed(self):
         wb = load(ROUND7_DIR / '加点判定用賃金台帳テンプレート.xlsx')
         rule = wb['記入ルール']['B7'].value
@@ -219,23 +146,28 @@ class Round7TemplateWordingTests(unittest.TestCase):
         for kind, name in APPLICATION_FILENAMES.items():
             wb = load(ROUND7_DIR / name)
             ws = wb['申請内容']
-            self.assertIn('主たる事業場（確認済み）', ws.cell(get_mapping(kind).shinsei['min_wage'], 4).value)
+            self.assertIn('主たる事業場（確認済み）', ws.cell(get_mapping(kind, ROUND7).shinsei['min_wage'], 4).value)
             self.assertIn('第7次以降用', ws['D2'].value)
             self.assertIn('第7次以降用', wb['転記']['A1'].value)
-            self.assertNotIn('登記', ws.cell(get_mapping(kind).shinsei['min_wage'], 4).value)
+            self.assertNotIn('登記', ws.cell(get_mapping(kind, ROUND7).shinsei['min_wage'], 4).value)
             wb.close()
 
     def test_round7_marker_and_package_members_are_kept(self):
         for path in round7_files():
-            legacy = find(LEGACY_DIR, path.name)
-            with zipfile.ZipFile(legacy) as a, zipfile.ZipFile(path) as b:
-                self.assertEqual(a.namelist(), b.namelist(), path.name)
-                for part in a.namelist():
-                    if part.startswith(('xl/media/', 'xl/drawings/', 'xl/styles', 'xl/workbook.xml')):
-                        self.assertEqual(a.read(part), b.read(part), f'{path.name} {part}')
+            with zipfile.ZipFile(path) as b:
+                names = b.namelist()
+                self.assertIn('docProps/core.xml', names, path.name)
+                self.assertIn(b'/docProps/core.xml', b.read('[Content_Types].xml'), path.name)
+                self.assertIn(b'metadata/core-properties', b.read('_rels/.rels'), path.name)
             wb = openpyxl.load_workbook(path, read_only=True)
             self.assertEqual(wb.properties.subject, ROUND7_SUBJECT, path.name)
             wb.close()
+        # 加点台帳だけは旧回の台帳が土台。図形・書式・ブック定義は旧回と同じバイトのまま
+        with zipfile.ZipFile(LEGACY_DIR / LEDGER) as a, zipfile.ZipFile(ROUND7_DIR / LEDGER) as b:
+            self.assertEqual(a.namelist(), b.namelist())
+            for part in a.namelist():
+                if part.startswith(('xl/media/', 'xl/drawings/', 'xl/styles', 'xl/workbook.xml')):
+                    self.assertEqual(a.read(part), b.read(part), part)
 
 
 if __name__ == '__main__':

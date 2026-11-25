@@ -423,7 +423,7 @@ class TemplateOutputTests(unittest.TestCase):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = '申請内容'
-        mapping = get_mapping('通常枠_2026')
+        mapping = get_mapping('通常枠_2026', 7 if round7 else 6)
         for key, expected in SHINSEI_ANCHOR_LABELS.items():
             if key in mapping.shinsei:
                 if round7 and key == 'employee_count_fte':
@@ -566,7 +566,7 @@ class TemplateOutputTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             for kind, name in APPLICATION_FILENAMES.items():
                 with self.subTest(kind=kind):
-                    mapping = get_mapping(kind)
+                    mapping = get_mapping(kind, 7)
                     settings = values(frame='通常' if kind.startswith('通常') else 'インボイス')
                     if '個人' in kind:
                         settings.update(fiscal_year_start='2026-01-01', fiscal_year_end='2026-12-31')

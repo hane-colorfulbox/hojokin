@@ -596,10 +596,10 @@ class ReviewFollowUpTests(unittest.TestCase):
     def test_version_labels_exclude_the_build_without_basis_columns(self):
         # v0.2.99・2026.11.05 版のエンジンは AH〜AT列を読まない。見分け方の下限はそれより後の版。
         app = (ROOT / 'app.py').read_text(encoding='utf-8')
-        self.assertIn('補助金書類自動作成ツール v0.2.100 |', app)
+        self.assertIn('補助金書類自動作成ツール v0.2.101 |', app)
         guide = (ROOT / 'docs' / '第7次申請_担当者向け要点.md').read_text(encoding='utf-8')
-        self.assertIn('v0.2.100 以上', guide)
-        self.assertIn('2026.11.06 以降', guide)
+        self.assertIn('v0.2.101 以上', guide)
+        self.assertIn('2026.11.25 以降', guide)
 
 
 if __name__ == '__main__':

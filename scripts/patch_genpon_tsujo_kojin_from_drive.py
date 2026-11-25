@@ -72,16 +72,20 @@ PATCHES = [
     # P4: 事業所所在地の未配線
     (SHINSEI, 60, 3, None, "='転記'!B20"),
     # P5: AI() のキャッシュ残骸（DUMMYFUNCTION ラッパーは温存＝Google シートに戻すと AI() が復元される）
+    # 修正前はタプルで許容形を並べる（2026-11-09 の Drive 版は残骸が「=AI(C76)」の文字に変わった）
     (SHINSEI, 77, 3,
-     '=IFERROR(__xludf.DUMMYFUNCTION("AI(C76)"),"ヒアリング情報が不足しているため、文章を作成することができません。\n'
-     '「業種・事業内容」「自社の強み」「現在の課題」「導入ツール」「具体的な改善点」などの詳細な情報をご提供いただけますでしょうか。'
-     '情報をいただければ、ご指定の「250文字以上、255文字以内」の範囲で申請用の文章を作成いたします。")',
+     ('=IFERROR(__xludf.DUMMYFUNCTION("AI(C76)"),"ヒアリング情報が不足しているため、文章を作成することができません。\n'
+      '「業種・事業内容」「自社の強み」「現在の課題」「導入ツール」「具体的な改善点」などの詳細な情報をご提供いただけますでしょうか。'
+      '情報をいただければ、ご指定の「250文字以上、255文字以内」の範囲で申請用の文章を作成いたします。")',
+      '=IFERROR(__xludf.DUMMYFUNCTION("AI(C76)"),"=AI(C76)")'),
      '=IFERROR(__xludf.DUMMYFUNCTION("AI(C76)"),"")'),
     # P6: 作業メモ削除
     (SHINSEI, 77, 4, '※AI Worksにて作成\n参考：過去事業内容', None),
-    # P7: IMPORTXML の "#REF!" キャッシュ
+    # P7: IMPORTXML の "#REF!" キャッシュ（2026-11-09 の Drive 版は郵便番号APIのアクセス制限の文言が残る）
     (SHINSEI, 54, 3,
-     '=IFERROR(__xludf.DUMMYFUNCTION("IMPORTXML(""https://api.excelapi.org/post/zipcode?address=""&ENCODEURL(C55),""."")"),"#REF!")',
+     ('=IFERROR(__xludf.DUMMYFUNCTION("IMPORTXML(""https://api.excelapi.org/post/zipcode?address=""&ENCODEURL(C55),""."")"),"#REF!")',
+      '=IFERROR(__xludf.DUMMYFUNCTION("IMPORTXML(""https://api.excelapi.org/post/zipcode?address=""&ENCODEURL(C55),""."")"),'
+      '"ERROR: アクセス制限中です。1日お待ちください。")'),
      '=IFERROR(__xludf.DUMMYFUNCTION("IMPORTXML(""https://api.excelapi.org/post/zipcode?address=""&ENCODEURL(C55),""."")"),"")'),
     # P8: 決算書注記の個人化（法人: 貸借対照表・損益計算書 → 個人: 青色申告決算書/収支内訳書）
     (SHINSEI, 20, 4,
@@ -188,7 +192,8 @@ def main() -> int:
     for sheet, r, c, before, after in PATCHES:
         cell = wb[sheet].cell(row=r, column=c)
         actual = _norm(cell.value)
-        if actual != _norm(before):
+        accepted = before if isinstance(before, tuple) else (before,)
+        if actual not in {_norm(b) for b in accepted}:
             print(f'NG: {sheet}!{cell.coordinate} の現状が期待と不一致（Drive 側が変わった可能性）')
             print(f'    実際: {str(actual)[:120]!r}')
             print(f'    期待: {str(before)[:120]!r}')

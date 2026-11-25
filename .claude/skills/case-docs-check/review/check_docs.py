@@ -232,6 +232,13 @@ BWL_APPYM_CELL = 'C3'   # 交付申請月（yyyy/mm）— 空欄だと加点②�
 #      インボイス法人      0        3        0        0
 #      インボイス個人      0        1        3        1
 #      通常枠個人        0        1        1        3
+#
+# 2026-11-09 の第7次の版（原本管理担当の Drive 版）は「◼️表明を行った従業員名」の上に
+# 昇給時期・今期中の退職予定者・今期賞与見込みの欄が増え、そこから下が layout_shift の行数だけ下がった。
+# 下の行番号は旧版のままにし、見出しの位置で版を見分けて読み替える（2026-11-25 実測。
+# 旧版・第7次の版とも上のスコア行列は変わらない）。第7次の版だけにある欄は added_rows。
+HEARING_ANCHOR_LABEL = '表明を行った従業員名'
+HEARING_ADDED_LABELS = ('昇給時期', '今期中の退職予定者の有無', '今期賞与見込み')
 HEARING_SHEET = '基本情報'
 HEARING_FORMS = {
     '通常枠法人': {
@@ -243,6 +250,8 @@ HEARING_FORMS = {
             72, 73, 74, 77, 82, 84, 85, 86, 89, 90,
         ],
         'sa_id_row': 62,
+        'layout_shift': (83, 9),
+        'added_rows': (84, 86, 89),
     },
     'インボイス法人': {
         'frame': 'インボイス枠', 'entity': '法人',
@@ -253,6 +262,8 @@ HEARING_FORMS = {
             76, 79, 80, 81, 84, 89, 90,
         ],
         'sa_id_row': 63,
+        'layout_shift': (78, 8),
+        'added_rows': (78, 80, 83),
     },
     'インボイス個人': {
         'frame': 'インボイス枠', 'entity': '個人',
@@ -266,6 +277,8 @@ HEARING_FORMS = {
             75, 78, 79, 80, 81, 84, 88, 91, 92, 93, 96, 101, 102,
         ],
         'sa_id_row': 75,
+        'layout_shift': (90, 8),
+        'added_rows': (90, 92, 95),
     },
     '通常枠個人': {
         'frame': '通常枠', 'entity': '個人',
@@ -278,6 +291,8 @@ HEARING_FORMS = {
             76, 79, 80, 81, 82, 85, 86, 87, 88, 91, 96, 98, 99, 100, 103, 104,
         ],
         'sa_id_row': 76,
+        'layout_shift': (97, 9),
+        'added_rows': (98, 100, 103),
     },
 }
 
@@ -919,6 +934,27 @@ def _check_sa_id(rep: Report, ws, row: int, name: str):
                  [name])
 
 
+def _anchor_row(ws) -> int | None:
+    """「◼️表明を行った従業員名」の見出しの行（版の見分けに使う）。見つからない・複数なら None。"""
+    rows = [r for r in range(1, 160) if HEARING_ANCHOR_LABEL in norm(ws.cell(row=r, column=2).value)]
+    return rows[0] if len(rows) == 1 else None
+
+
+def _layout_offset(spec: dict, anchor: int | None) -> int | None:
+    """旧版なら 0、第7次の版なら layout_shift の行数。どちらでもなければ None。"""
+    start, size = spec['layout_shift']
+    if anchor == start:
+        return 0
+    if anchor == start + size:
+        return size
+    return None
+
+
+def _actual_row(spec: dict, row: int, offset: int) -> int:
+    start, _ = spec['layout_shift']
+    return row + offset if row >= start else row
+
+
 def _check_hearing(rep: Report, hearings, frame: str, entity: str):
     """ヒアリングシートの様式判定（フィンガープリント）＋必須セル未記入チェック"""
     from openpyxl import load_workbook
@@ -943,11 +979,14 @@ def _check_hearing(rep: Report, hearings, frame: str, entity: str):
             continue
         ws = wb[wb.sheetnames[sheet_names.index(HEARING_SHEET)]]
 
+        anchor = _anchor_row(ws)
         scores = {}
         for form, spec in HEARING_FORMS.items():
+            # 旧版・第7次の版のどちらで書かれていても同じ指紋で見分ける
+            offsets = {o for o in (0, _layout_offset(spec, anchor)) if o is not None}
             scores[form] = sum(
                 1 for row, label in spec['fingerprint'].items()
-                if label in norm(ws.cell(row=row, column=2).value)
+                if any(label in norm(ws.cell(row=_actual_row(spec, row, o), column=2).value) for o in offsets)
             )
         top = sorted(scores.values(), reverse=True)
         if top[0] < 2 or (len(top) > 1 and top[0] == top[1]):
@@ -980,8 +1019,23 @@ def _check_hearing(rep: Report, hearings, frame: str, entity: str):
                      f'{e["name"]}: ヒアリングシートが{spec["entity"]}様式ですが、'
                      f'案件は{entity}です。様式を確認してください', [e['name']])
 
+        offset = _layout_offset(spec, anchor)
+        if offset is None:
+            rep.warn('HEARING-LAYOUT-UNKNOWN',
+                     f'{e["name"]}: 「◼️表明を行った従業員名」の見出しが想定の行にありません。'
+                     '行の増減や改変の可能性があるため、未記入チェックは旧版の行で行います。目視で確認してください',
+                     [e['name']])
+            offset = 0
+        elif offset == 0:
+            rep.warn('HEARING-OLD-LAYOUT',
+                     f'{e["name"]}: 第7次の版で増えた欄（' + '・'.join(HEARING_ADDED_LABELS)
+                     + '）がない旧版のヒアリングシートです。給与0年度目の見込みに使うので、顧客に別途確認してください',
+                     [e['name']])
+        rows = [_actual_row(spec, row, offset) for row in spec['required_rows']]
+        if offset:
+            rows += list(spec['added_rows'])
         empty = []
-        for row in spec['required_rows']:
+        for row in sorted(rows):
             if not norm(ws.cell(row=row, column=3).value):
                 label = norm(ws.cell(row=row, column=2).value).split('\n')[0][:30]
                 empty.append(f'行{row}: {label}')
@@ -992,7 +1046,7 @@ def _check_hearing(rep: Report, hearings, frame: str, entity: str):
                      f'{e["name"]}: 記入欄（黄色セル相当）に未記入が{len(empty)}件: '
                      f'{head}{more}', [e['name']])
 
-        _check_sa_id(rep, ws, spec['sa_id_row'], e['name'])
+        _check_sa_id(rep, ws, _actual_row(spec, spec['sa_id_row'], offset), e['name'])
     return form_found
 
 

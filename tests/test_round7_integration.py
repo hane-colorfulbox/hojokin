@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import posixpath
+import re
 import sys
 import subprocess
 import tempfile
@@ -57,19 +59,30 @@ class Round7IntegrationTests(unittest.TestCase):
                 self.assertIsNotNone(old)
                 self.assertIsNotNone(new)
                 self.assertNotEqual(old, new)
-                verify_template_labels(old, get_mapping(kind), kind, call_round=6)
-                verify_template_labels(new, get_mapping(kind), kind, call_round=7)
+                verify_template_labels(old, get_mapping(kind, 6), kind, call_round=6)
+                verify_template_labels(new, get_mapping(kind, 7), kind, call_round=7)
                 with self.assertRaises(ValueError):
                     validate_application_template_version(old, 7)
                 with self.assertRaises(ValueError):
                     validate_application_template_version(new, 6)
-                with zipfile.ZipFile(old) as a, zipfile.ZipFile(new) as b:
-                    self.assertEqual(a.namelist(), b.namelist())
-                    for part in a.namelist():
-                        if part.startswith(('xl/media/', 'xl/drawings/', 'xl/charts/')):
-                            self.assertEqual(a.read(part), b.read(part), part)
-                        if part.endswith('.rels'):
-                            self.assertNotIn(b'it2026_chingin_houkoku', b.read(part), part)
+                # 第7次の原本は Drive 版の書き出しが土台（2026-11-25〜）。旧原本との部品の一致ではなく、
+                # 版マーカーの部品があり、各 .rels が指す部品が欠けていないことを確かめる
+                with zipfile.ZipFile(new) as b:
+                    names = set(b.namelist())
+                    self.assertIn('docProps/core.xml', names)
+                    for part in names:
+                        if not part.endswith('.rels'):
+                            continue
+                        rels = b.read(part)
+                        self.assertNotIn(b'it2026_chingin_houkoku', rels, part)
+                        base = posixpath.dirname(posixpath.dirname(part))
+                        for rel in re.findall(rb'<Relationship\b[^>]*>', rels):
+                            if b'TargetMode="External"' in rel:
+                                continue
+                            target = re.search(rb'Target="([^"]+)"', rel).group(1).decode('utf-8')
+                            resolved = (target.lstrip('/') if target.startswith('/')
+                                        else posixpath.normpath(posixpath.join(base, target)))
+                            self.assertIn(resolved, names, f'{kind} {part} -> {target}')
 
     def test_official_forms_are_unmodified_downloaded_bytes(self):
         expected = {
@@ -109,7 +122,7 @@ class Round7IntegrationTests(unittest.TestCase):
                     fi = FinancialData(fiscal_year_start=prior_start, fiscal_year_end=prior_end,
                                        operating_profit=1_000_000, salary=4_000_000)
                     output = Path(td) / f'{start}.xlsx'
-                    fill_template(source, output, get_mapping('通常枠_2026'), {},
+                    fill_template(source, output, get_mapping('通常枠_2026', 7), {},
                                   ExtractionResult(financial=fi), application_context=c,
                                   productivity_total_annual_hours=1000)
                     wb = openpyxl.load_workbook(output)
@@ -124,7 +137,7 @@ class Round7IntegrationTests(unittest.TestCase):
                     self.assertEqual(salary[0], f'{start}〜{end}')
                     self.assertIn(('生産性基準年度（前事業年度）', f'{prior_start}〜{prior_end}', None, None, None, None), rows)
                     ws = wb['申請内容']
-                    mapping = get_mapping('通常枠_2026')
+                    mapping = get_mapping('通常枠_2026', 7)
                     self.assertEqual(ws.cell(mapping.shinsei['wage_total_base'], 3).value, 10_000_000)
                     self.assertIsNone(ws.cell(mapping.shinsei['wage_raise_declaration'], 3).value)
                     wb.close()

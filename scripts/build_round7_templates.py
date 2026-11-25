@@ -1,12 +1,17 @@
-"""旧原本を保存し、第7次候補原本を再現可能に作る。Drive原本への書込みはしない。
+"""第7次以降の原本を、原本管理担当が更新した Drive 版の書き出しから再現可能に作る。Drive原本への書込みはしない。
 
-公式加点様式は取得済みのバイト列をそのまま複製する。社内原本はZIP内の
-表示セル・プルダウンの額・版メタデータ・通常枠の生産性計画欄だけを変更し、
-図形・その他の数式・入力規則・保護を保持する。行・列の挿入削除はしない。
-通常枠個人は既存のDrive由来パッチ済み原本を入力にする。
+2026-11-25〜: 申請書の原本は Drive 版（2026-11-09 更新。ヒアリングの昇給時期などの受け皿と加点①の設問が
+増えた版）の書き出しを入力にし、第7次の直し（版表示・最賃の額・0年度目の文言・通常枠の生産性計画欄など）を当てる。
+行の位置は config の第7次の対応表（get_mapping(種類, 7)）から引く。ヒアリングシートは Drive 版をそのまま写す。
+入力フォルダには正式名（APPLICATION_FILENAMES とヒアリングシート2026_*.xlsx）で置き、通常枠個人だけは
+scripts/patch_genpon_tsujo_kojin_from_drive.py の機械的修正を当てたものを置く。
+社内原本はZIP内の表示セル・プルダウンの額・版メタデータ・通常枠の生産性計画欄だけを変更し、
+図形・その他の数式・入力規則・保護を保持する。行・列の挿入削除はしない。Drive の書き出しには
+docProps/core.xml がないため、版マーカーを付けるときにその部品と登録だけを足す。
+公式加点様式は取得済みのバイト列をそのまま複製する（--official-source-dir を渡したときだけ）。
 加点判定用の専用台帳だけは、右端に時間換算の対象月額の列（AH〜AT）を足す。既存の行・列は動かさず、
 書式は原本にある番号を使う（styles.xml・workbook.xml は旧回の台帳と同じバイトのまま）。
-専用台帳だけを作り直すときは --ledger-only を使う（公式原本のフォルダは不要）。
+専用台帳だけを作り直すときは --ledger-only を使う（Drive の書き出しは不要）。
 文言の根拠: 第7回〜公募要領（通常枠 印刷p.9〜10・23〜25、インボイス枠 印刷p.8〜9・22）、
 交付申請マニュアル11/2版 p.86〜88、公式「賃金状況報告シート」第7次公募回以降用。
 """
@@ -28,7 +33,7 @@ import openpyxl
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from hojokin.config import get_mapping
-from hojokin.template_versions import APPLICATION_FILENAMES, ROUND7_SUBJECT
+from hojokin.template_versions import APPLICATION_FILENAMES, ROUND7_FIRST_CALL, ROUND7_SUBJECT
 from hojokin.wage_reader import (BWL_BASIS_HEADER_KEYWORD, BWL_COL_BASIS_LATEST, BWL_COL_BASIS_WINDOW_START,
                                  BWL_DATA_START_ROW, BWL_HEADER_ROW)
 from hojokin.xlsx_surgical import _patch_sheet_xml, _resolve_sheet_part
@@ -41,8 +46,13 @@ FORMS = {
     'it2026_kaitei_chingin_houkoku1_katen.xlsx': '加点措置①用.xlsx',
     'it2026_kaitei_chingin_houkoku2_katen.xlsx': '加点措置②用.xlsx',
 }
-BASE_ROWS = {'通常枠_2026': 216, '通常枠_個人_2026': 192,
-             'インボイス枠_2026': 201, 'インボイス枠_個人_2026': 173}
+HEARING_PREFIX = 'ヒアリングシート2026_'
+CORE_PART = 'docProps/core.xml'
+CONTENT_TYPES_PART = '[Content_Types].xml'
+ROOT_RELS_PART = '_rels/.rels'
+CORE_CONTENT_TYPE = 'application/vnd.openxmlformats-package.core-properties+xml'
+CORE_REL_TYPE = 'http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties'
+CORE_REL_ID = 'rIdHojokinCore'
 SHINSEI = '申請内容'
 TENKI = '転記'
 PRODUCTIVITY = '生産性指標給与支給総額計算'
@@ -83,42 +93,6 @@ NAVI_NOTE = {
              + IT_SUPPORT_TERMS + '申込みの法人名・住所・法人番号が申請と一致していること'),
     '個人': ('通常枠の加点9）。どちらか一方の利用で加点（両方利用しても加点は1つ）。\nIT経営サポートセンター：'
              + IT_SUPPORT_TERMS + '申込みの「企業名」欄の代表者氏名と住所が申請と一致していること'),
-}
-HEARING_NAVI_ITEM = 'デジwithにおける「IT戦略ナビwith」の実施\n（または中小機構「IT経営サポートセンター」の利用）'
-HEARING_NAVI_NOTE = {
-    kind: ('必ず実施ください。\n※実施にはgBizIDプライムが必要になります。\n'
-           '※中小機構「IT経営サポートセンター」の利用も同じ加点の対象です（両方利用しても加点は1つです）。'
-           '2026年8月1日以降に利用を申し込み、交付申請日までかつ2026年11月30日まで（第7次の場合）に利用したものに限ります。'
-           + tail) for kind, tail in (('法人', '申込みの法人名・住所・法人番号は、申請と同じ内容にしてください。'),
-                                      ('個人', '申込みの「企業名」欄には代表者氏名を入力し、住所は申請と同じ内容にしてください。'))
-}
-SUBSIDY_RATE_NOTE = ('◼️補助率の引上げ（1/2以内→2/3以内）を希望する場合\n'
-                     'その旨お知らせいただき「賃金状況報告シート（補助率引上げ・加点措置①用）」を提出してください。\n'
-                     '（対象）\n令和7年10月から令和8年9月までの間で、「当該期間における地域別最低賃金以上～'
-                     '令和8年度改定の地域別最低賃金未満」で雇用している従業員が全従業員の30％以上である月が'
-                     '3か月以上ある事業者（3か月は連続していなくてもかまいません）')
-INVOICE_WAGE_ITEM = '給与0年度目（交付申請日の属する事業年度）の見込み総額・対象人数と、その算定根拠'
-INVOICE_WAGE_NOTE = ('申請では、0年度目（交付申請日の属する事業年度）から3年度目までの給与支給総額と従業員数を入力します。\n'
-                     '0年度目は見込みの値です。次の資料をご提出ください。\n'
-                     '・今期のうち支給済みの月の賃金台帳と、残りの月の支給見込み（賞与・昇給の予定を含む）\n'
-                     '・加点を希望する場合は、令和7年10月〜令和8年9月の各月と、申請月の前月の賃金台帳\n'
-                     '前事業年度の賃金台帳だけでは、今期の見込みは作れません。')
-REQUIREMENTS_HEADERS = {'C2': '申請額：150万未満', 'D2': '申請額：150万以上',
-                       'B3': '2022から2025で交付決定を受けていない', 'B4': '2022から2025で交付決定を受けた'}
-_DECLARE = '・賃金引き上げ計画を従業員へ表明すること。'
-_GROWTH = '・1年後に、一人当たり給与支給総額を{r}%以上向上させること。\n・事業計画期間において、一人当たり給与支給総額の年平均成長率を{r}%以上とすること。'
-_MIN30 = '・事業計画期間において、事業場内最低賃金（事業場内で最も低い賃金）を地域別最低賃金＋30円以上の水準にすること。'
-_PLUS50 = '【加点の要件】上記に加え、事業場内最低賃金を地域別最低賃金＋50円以上の水準にすること。'
-REQUIREMENTS_TABLE = {
-    'C3': ('【賃上げは必須ではありません。加点を希望する場合の要件】\n' + _MIN30
-           + '\n・事業計画期間において、一人当たり給与支給総額の年平均成長率を3.0%以上とすること。\n' + _DECLARE
-           + '\n※ なお、上記に加え、事業計画期間において、事業場内最低賃金を地域別最低賃金＋50円以上の水準にした場合、更なる加点を行う。'),
-    'D3': '\n'.join(('【必須要件】', _GROWTH.format(r='3.0'), _MIN30, _DECLARE, _PLUS50)),
-    'C4': '\n'.join(('【必須要件】', _GROWTH.format(r='3.5'), _DECLARE,
-                     '【加点の要件】上記に加え、' + _MIN30[1:] + '（＋50円以上の水準にした場合は更なる加点）')),
-    'D4': '\n'.join(('【必須要件】', _GROWTH.format(r='3.5'), _MIN30, _DECLARE, _PLUS50)),
-    'C5': '※ 基準年度（0年度目）は交付申請日の属する事業年度です。計画は交付申請時点の翌事業年度から3年間です。',
-    'C6': '※ 保険医療機関・介護サービス事業者・社会福祉事業者・学校など公募要領で適用外とされる事業者は、必須要件の対象外です。',
 }
 LEDGER_RULES = {
     'B5': ('連番／氏名／「正社員」「パート・アルバイト」「役員」等。判定の母数は各月の常時使用する従業員'
@@ -251,12 +225,36 @@ def _assert_no_stale_text(path: Path) -> None:
         raise AssertionError(f'{path.name} に旧表記が残っています: {hits}')
 
 
+def _new_core_xml() -> str:
+    """Drive の書き出しにない docProps/core.xml を、版マーカー（件名）だけで作る。"""
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"'
+            ' xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/"'
+            ' xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+            f'<dc:subject>{escape(ROUND7_SUBJECT)}</dc:subject></cp:coreProperties>')
+
+
+def _register_core_part(content_types: str, root_rels: str) -> tuple[str, str]:
+    """core.xml を足すときの [Content_Types].xml と _rels/.rels の登録。既にあれば変えない。"""
+    if f'PartName="/{CORE_PART}"' not in content_types:
+        content_types = content_types.replace(
+            '</Types>', f'<Override PartName="/{CORE_PART}" ContentType="{CORE_CONTENT_TYPE}"/></Types>')
+    if CORE_REL_TYPE not in root_rels:
+        if f'Id="{CORE_REL_ID}"' in root_rels:
+            raise ValueError(f'_rels/.rels に {CORE_REL_ID} が既にあります。')
+        root_rels = root_rels.replace(
+            '</Relationships>',
+            f'<Relationship Id="{CORE_REL_ID}" Type="{CORE_REL_TYPE}" Target="{CORE_PART}"/></Relationships>')
+    return content_types, root_rels
+
+
 def _patch_book(source: Path, output: Path, edits: dict[str, dict[str, object]],
                 formulas: dict[str, dict[str, str | None]] | None = None,
                 structure: dict | None = None) -> dict:
     formulas = formulas or {}
     structure = structure or {}
     output.parent.mkdir(parents=True, exist_ok=True)
+    added: dict[str, bytes] = {}
     with zipfile.ZipFile(source) as zin:
         wb = openpyxl.load_workbook(source, read_only=True, data_only=False)
         replacements = {}
@@ -267,32 +265,42 @@ def _patch_book(source: Path, output: Path, edits: dict[str, dict[str, object]],
                 xml = structure[sheet_name](xml)
             xml = _patch_sheet_xml(xml, edits.get(sheet_name, {}))
             replacements[part] = _patch_formula_xml(xml, formulas.get(sheet_name, {})).encode('utf-8')
-        core = zin.read('docProps/core.xml').decode('utf-8')
-        subject = '<dc:subject xmlns:dc="http://purl.org/dc/elements/1.1/">' + escape(ROUND7_SUBJECT) + '</dc:subject>'
-        if re.search(r'<dc:subject(?:\s[^>]*)?>.*?</dc:subject>', core, re.S):
-            core = re.sub(r'<dc:subject(?:\s[^>]*)?>.*?</dc:subject>',
-                          subject, core, flags=re.S)
-        elif '<dc:subject/>' in core:
-            core = core.replace('<dc:subject/>', subject)
+        if CORE_PART not in zin.namelist():
+            # Drive の書き出しは文書情報の部品を持たない。版マーカーの部品と登録だけを足す
+            added[CORE_PART] = _new_core_xml().encode('utf-8')
+            content_types, root_rels = _register_core_part(
+                zin.read(CONTENT_TYPES_PART).decode('utf-8'), zin.read(ROOT_RELS_PART).decode('utf-8'))
+            replacements[CONTENT_TYPES_PART] = content_types.encode('utf-8')
+            replacements[ROOT_RELS_PART] = root_rels.encode('utf-8')
         else:
-            # Keep all namespace declarations, including compatibility prefixes.
-            if 'xmlns:dc=' not in core:
-                core = core.replace('<cp:coreProperties ', '<cp:coreProperties xmlns:dc="http://purl.org/dc/elements/1.1/" ', 1)
-            core = core.replace('</cp:coreProperties>', subject + '</cp:coreProperties>')
-        replacements['docProps/core.xml'] = core.encode('utf-8')
+            core = zin.read(CORE_PART).decode('utf-8')
+            subject = '<dc:subject xmlns:dc="http://purl.org/dc/elements/1.1/">' + escape(ROUND7_SUBJECT) + '</dc:subject>'
+            if re.search(r'<dc:subject(?:\s[^>]*)?>.*?</dc:subject>', core, re.S):
+                core = re.sub(r'<dc:subject(?:\s[^>]*)?>.*?</dc:subject>',
+                              subject, core, flags=re.S)
+            elif '<dc:subject/>' in core:
+                core = core.replace('<dc:subject/>', subject)
+            else:
+                # Keep all namespace declarations, including compatibility prefixes.
+                if 'xmlns:dc=' not in core:
+                    core = core.replace('<cp:coreProperties ', '<cp:coreProperties xmlns:dc="http://purl.org/dc/elements/1.1/" ', 1)
+                core = core.replace('</cp:coreProperties>', subject + '</cp:coreProperties>')
+            replacements[CORE_PART] = core.encode('utf-8')
         for name in zin.namelist():
             if name.endswith('.rels'):
-                raw = zin.read(name)
+                raw = replacements.get(name, zin.read(name))
                 linked = raw.replace(b'it2026_chingin_houkoku', b'it2026_kaitei_chingin_houkoku')
                 if linked != raw:
                     replacements[name] = linked
         with zipfile.ZipFile(output, 'w') as zout:
             for info in zin.infolist():
                 zout.writestr(info, replacements.get(info.filename, zin.read(info.filename)))
+            for name, data in added.items():
+                zout.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
         wb.close()
     # Reopen and confirm no row/sheet/formula/object changes outside explicit cells.
     with zipfile.ZipFile(source) as a, zipfile.ZipFile(output) as b:
-        assert a.namelist() == b.namelist()
+        assert a.namelist() + list(added) == b.namelist()
         for name in a.namelist():
             if name not in replacements:
                 assert a.read(name) == b.read(name), name
@@ -323,8 +331,8 @@ def _row_starting(labels: dict[int, str], prefix: str) -> int:
 
 
 def _application_edits(wb, template_type: str, edits: dict) -> dict:
-    """申請内容の確認文・初期値・注記と版表示。セル番地は config の対応表から引く。"""
-    rows = get_mapping(template_type).shinsei
+    """申請内容の確認文・初期値・注記と版表示。セル番地は config の第7次の対応表から引く。"""
+    rows = get_mapping(template_type, ROUND7_FIRST_CALL).shinsei
     ws = wb[SHINSEI]
     labels = _b_labels(ws)
     frame = '通常' if template_type.startswith('通常枠') else 'インボイス'
@@ -375,111 +383,106 @@ def _productivity_edits(edits: dict) -> dict:
     return {PRODUCTIVITY: cells}
 
 
-# 基本情報の賃上げ欄にある過去交付ありの説明（第1〜6次は年平均だけ）。第7次は1年後要件が加わる（インボイス要領（ツ）一・二・三）
-OLD_PAST_GRANT_NOTE = '※2022から2025までの間にIT導入補助金の交付決定を受けた事業者は年平均成長率を3.5％以上とすることが申請要件となっております'
-PAST_GRANT_NOTE = ('※IT導入補助金2022〜2025の交付決定を受けた事業者は、1人当たり給与支給総額を1年後と年平均の両方で3.5％以上'
-                   '伸ばす計画を立て、従業員に表明することが申請要件です')
-
-
-def _hearing_edits(wb, name: str, edits: dict) -> None:
-    """ヒアリングの確認事項・要件表。行の挿入はせず既存セルの文言だけを変える。"""
-    kind = '個人' if '個人' in name else '法人'
-    normal = '通常枠' in name
-    ws = wb['確認事項']
-    values = edits.setdefault(ws.title, {})
-    for row in ws.iter_rows(min_col=3, max_col=3):
-        for cell in row:
-            text = cell.value if isinstance(cell.value, str) else ''
-            if '前事業年度1年分の給与支給総額' in text:
-                values[cell.coordinate] = INVOICE_WAGE_ITEM
-                values[f'D{cell.row}'] = INVOICE_WAGE_NOTE
-            elif normal and text.startswith('◼️補助率の引上げを希望する場合'):
-                values[cell.coordinate] = SUBSIDY_RATE_NOTE
-            elif normal and text.startswith('デジwithにおける「IT戦略ナビwith」の実施'):
-                values[cell.coordinate] = HEARING_NAVI_ITEM
-                values[f'D{cell.row}'] = HEARING_NAVI_NOTE[kind]
-    if normal and not {SUBSIDY_RATE_NOTE, HEARING_NAVI_ITEM} <= set(values.values()):
-        raise ValueError(f'{name} の確認事項に補助率引上げ・IT戦略ナビの行が見つかりません。')
-    if '基本情報' in wb.sheetnames:
-        basic = wb['基本情報']
-        basic_values = edits.setdefault('基本情報', {})
-        for row in basic.iter_rows():
-            for cell in row:
-                if not isinstance(cell.value, str):
-                    continue
-                current = basic_values.get(cell.coordinate, cell.value)   # 前段の置換結果を優先して重ねる
-                if OLD_PAST_GRANT_NOTE in current:
-                    basic_values[cell.coordinate] = current.replace(OLD_PAST_GRANT_NOTE, PAST_GRANT_NOTE)
-    if 'シート1' in wb.sheetnames:
-        table = wb['シート1']
-        for ref, header in REQUIREMENTS_HEADERS.items():
-            if table[ref].value != header:
-                raise ValueError(f'{name} のシート1 {ref} が想定の見出しではありません。')
-        edits.setdefault('シート1', {}).update(REQUIREMENTS_TABLE)
-
-
-def build(official_source_dir: Path) -> list[dict]:
-    forms_dir = ROOT / '補助金加点' / '第7次以降'
+def _copy_official_forms(official_source_dir: Path | None, forms_dir: Path) -> list[dict]:
+    """公式3様式。取得し直したときだけ複製し、それ以外は手元の版を記録する。"""
     forms_dir.mkdir(parents=True, exist_ok=True)
     log = []
     for official, local in FORMS.items():
-        source, output = official_source_dir / official, forms_dir / local
-        if not source.is_file():
-            raise FileNotFoundError(f'取得済みの公式原本が必要です: {source.name}')
-        shutil.copyfile(source, output)
-        assert _hash(source) == _hash(output)
+        output = forms_dir / local
+        if official_source_dir is not None:
+            source = official_source_dir / official
+            if not source.is_file():
+                raise FileNotFoundError(f'取得済みの公式原本が必要です: {source.name}')
+            shutil.copyfile(source, output)
+            assert _hash(source) == _hash(output)
+        elif not output.is_file():
+            raise FileNotFoundError(f'公式様式がありません（--official-source-dir で取得済みの原本を渡す）: {output}')
         log.append({'official_url': 'https://it-shien.smrj.go.jp/pdf/' + official,
                     'output': output.relative_to(ROOT).as_posix(), 'sha256': _hash(output)})
+    return log
+
+
+def _text_edits(wb, amounts: dict[str, int]) -> dict:
+    """旧回の表記と最賃の額（公式マスタの令和8年度改定額）の置換。数式は触らない。"""
+    edits = {}
+    for ws in wb:
+        values = {}
+        for row in ws:
+            for cell in row:
+                if cell.data_type == 'f' or not isinstance(cell.value, str):
+                    continue
+                changed = _text(cell.value)
+                for pref, amount in amounts.items():
+                    short = pref if pref == '北海道' else pref[:-1]
+                    if re.fullmatch(re.escape(short) + r'/\d+円', changed):
+                        changed = f'{short}/{amount}円'
+                if changed != cell.value:
+                    values[cell.coordinate] = changed
+        if values:
+            edits[ws.title] = values
+    return edits
+
+
+def _application_template_edits(wb, template_type: str, amounts: dict[str, int]) -> tuple[dict, dict]:
+    edits = _text_edits(wb, amounts)
+    base = get_mapping(template_type, ROUND7_FIRST_CALL).shinsei['wage_total_base']
+    fields = edits.setdefault(SHINSEI, {})
+    fields[f'B{base}'] = '事業計画期間における給与支給総額\n（0年度目・申請年度の見込み）'
+    for year in range(1, 4):
+        fields[f'B{base + year}'] = f'給与支給総額\n（{year}年度目の確認済み計画数値）'
+    fields[f'B{base - 1}'] = '0年度目の対象従業員数（確認済みの正社員換算人数）'
+    for sheet_name in wb.sheetnames:
+        if '給与支給総額計算' in sheet_name:
+            original = str(wb[sheet_name]['A2'].value or '')
+            edits.setdefault(sheet_name, {})['A2'] = original + '\n第7次：生産性は前事業年度実績、給与0年度目は申請年度の見込み。給与の提出値は「申請前提・給与見込」を確認。旧計算式を申請値へ流用しない。'
+    if PRODUCTIVITY in wb:
+        edits.setdefault(PRODUCTIVITY, {}).update({
+            'B27': '前事業年度（生産性の基準実績）',
+            'C27': '1年度目（申請時点の翌事業年度）確認済み計画',
+            'D27': '2年度目（申請時点の翌々事業年度）確認済み計画',
+            'E27': '3年度目（申請時点の3事業年度後）確認済み計画'})
+    return edits, _application_edits(wb, template_type, edits)
+
+
+def _find_input(drive_dir: Path, name: str) -> Path:
+    """日本語名の濁点の合成・分解の違い（Windows/Mac）を吸収して入力を探す。"""
+    want = unicodedata.normalize('NFC', name)
+    hits = [p for p in drive_dir.iterdir() if unicodedata.normalize('NFC', p.name) == want]
+    if len(hits) != 1:
+        raise FileNotFoundError(f'Drive の書き出しフォルダに {name} がありません（または重複）: {drive_dir}')
+    return hits[0]
+
+
+def build(drive_dir: Path, official_source_dir: Path | None = None) -> list[dict]:
+    drive_dir = drive_dir.resolve()
+    forms_dir = ROOT / '補助金加点' / '第7次以降'
+    log = _copy_official_forms(official_source_dir, forms_dir)
     master = openpyxl.load_workbook(forms_dir / '加点措置①用.xlsx', read_only=True, data_only=True)
     amounts = {str(row[0]): int(row[2]) for row in list(master['マスタ'].values)[1:48]}
     master.close()
     assert len(amounts) == 47
     tools_dir = ROOT / 'ツール'
-    source_names = list(APPLICATION_FILENAMES.values())
-    source_names += [p.name for p in tools_dir.iterdir() if p.suffix == '.xlsx' and p.name.startswith('ヒアリングシート2026_')]
-    for name in source_names:
-        source = tools_dir / name
+    out_dir = tools_dir / '第7次以降'
+    for template_type, name in APPLICATION_FILENAMES.items():
+        source = _find_input(drive_dir, name)
         wb = openpyxl.load_workbook(source, read_only=True, data_only=False)
-        edits = {}
-        for ws in wb:
-            values = {}
-            for row in ws:
-                for cell in row:
-                    if cell.data_type == 'f' or not isinstance(cell.value, str):
-                        continue
-                    changed = _text(cell.value)
-                    for pref, amount in amounts.items():
-                        short = pref if pref == '北海道' else pref[:-1]
-                        if re.fullmatch(re.escape(short) + r'/\d+円', changed):
-                            changed = f'{short}/{amount}円'
-                    if changed != cell.value:
-                        values[cell.coordinate] = changed
-            if values:
-                edits[ws.title] = values
-        template_type = next((key for key, filename in APPLICATION_FILENAMES.items() if filename == name), None)
-        formulas = {}
-        if template_type:
-            base = BASE_ROWS[template_type]
-            fields = edits.setdefault(SHINSEI, {})
-            fields[f'B{base}'] = '事業計画期間における給与支給総額\n（0年度目・申請年度の見込み）'
-            for year in range(1, 4):
-                fields[f'B{base + year}'] = f'給与支給総額\n（{year}年度目の確認済み計画数値）'
-            fields[f'B{base - 1}'] = '0年度目の対象従業員数（確認済みの正社員換算人数）'
-            for sheet_name in wb.sheetnames:
-                if '給与支給総額計算' in sheet_name:
-                    original = str(wb[sheet_name]['A2'].value or '')
-                    edits.setdefault(sheet_name, {})['A2'] = original + '\n第7次：生産性は前事業年度実績、給与0年度目は申請年度の見込み。給与の提出値は「申請前提・給与見込」を確認。旧計算式を申請値へ流用しない。'
-            if PRODUCTIVITY in wb:
-                edits.setdefault(PRODUCTIVITY, {}).update({
-                    'B27': '前事業年度（生産性の基準実績）',
-                    'C27': '1年度目（申請時点の翌事業年度）確認済み計画',
-                    'D27': '2年度目（申請時点の翌々事業年度）確認済み計画',
-                    'E27': '3年度目（申請時点の3事業年度後）確認済み計画'})
-            formulas = _application_edits(wb, template_type, edits)
-        elif '確認事項' in wb:
-            _hearing_edits(wb, unicodedata.normalize('NFC', name), edits)
+        edits, formulas = _application_template_edits(wb, template_type, amounts)
         wb.close()
-        log.append(_patch_book(source, tools_dir / '第7次以降' / name, edits, formulas))
+        log.append(_patch_book(source, out_dir / name, edits, formulas))
+    hearings = sorted(p for p in drive_dir.iterdir()
+                      if p.suffix == '.xlsx' and unicodedata.normalize('NFC', p.name).startswith(HEARING_PREFIX))
+    if len(hearings) != len(APPLICATION_FILENAMES):
+        raise FileNotFoundError(f'ヒアリングシートは4様式そろえて置いてください: {[p.name for p in hearings]}')
+    for source in hearings:
+        # ヒアリングは原本管理担当の Drive 版が正。文言は変えずにそのまま写す
+        output = out_dir / unicodedata.normalize('NFC', source.name)
+        for stale in out_dir.iterdir():
+            if stale != output and unicodedata.normalize('NFC', stale.name) == output.name:
+                stale.unlink()
+        shutil.copyfile(source, output)
+        assert _hash(source) == _hash(output)
+        log.append({'input': source.relative_to(ROOT).as_posix(), 'output': output.relative_to(ROOT).as_posix(),
+                    'sha256': _hash(output), 'copied_as_is': True})
     log.append(build_ledger_template(tools_dir))
     return log
 
@@ -510,9 +513,12 @@ def build_ledger_template(tools_dir: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--official-source-dir', type=Path)
+    parser.add_argument('--drive-export-dir', type=Path,
+                        help='Drive 版の書き出しを正式名で置いたフォルダ（申請書4種類・ヒアリング4種類）')
+    parser.add_argument('--official-source-dir', type=Path,
+                        help='公式3様式を取得し直したときだけ渡す（省略時は 補助金加点/第7次以降/ の版を使う）')
     parser.add_argument('--ledger-only', action='store_true',
-                        help='加点判定用の専用台帳だけを作り直す（公式原本のフォルダは不要）')
+                        help='加点判定用の専用台帳だけを作り直す（Drive の書き出しは不要）')
     parser.add_argument('--log', type=Path, required=True)
     args = parser.parse_args()
     if args.ledger_only:
@@ -521,12 +527,12 @@ def main() -> None:
         args.log.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
         print(f'第7次以降の専用台帳を作成・再読取確認。ログ {args.log}')
         return
-    if args.official_source_dir is None:
-        parser.error('--official-source-dir が必要です（専用台帳だけなら --ledger-only）')
-    result = build(args.official_source_dir)
+    if args.drive_export_dir is None:
+        parser.error('--drive-export-dir が必要です（専用台帳だけなら --ledger-only）')
+    result = build(args.drive_export_dir, args.official_source_dir)
     args.log.parent.mkdir(parents=True, exist_ok=True)
     args.log.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
-    print(f'第7次候補原本を作成・再読取確認：公式3本、社内原本8本、専用台帳1本。ログ {args.log}')
+    print(f'第7次以降の原本を作成・再読取確認：公式3本、申請書4本、ヒアリング4本、専用台帳1本。ログ {args.log}')
 
 
 if __name__ == '__main__':

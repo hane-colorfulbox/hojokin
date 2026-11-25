@@ -51,8 +51,8 @@ ZIP_NAME = '第7次申請_配布資料_{date}.zip'
 README_NAME = 'README.txt'
 SUMMARY_NAME = 'guide_artifact_summary.json'
 DEFAULT_LABEL = '第7次対応版'
-DEFAULT_TOOL_MIN = 'v0.2.100'
-DEFAULT_PLUGIN_MIN = '2026.11.06'
+DEFAULT_TOOL_MIN = 'v0.2.101'
+DEFAULT_PLUGIN_MIN = '2026.11.25'
 # 正本に「vX 以上」「YYYY.MM.DD 以降」と書いた版の基準（旧版を「使わない版」として挙げる文は対象外）
 MIN_VERSION_RES = (re.compile(r'(?<![A-Za-z])v(\d+(?:\.\d+)+)\s*(?:以上|以降)'),
                    re.compile(r'(?<![\d.])(\d{4}\.\d{2}\.\d{2})\s*(?:以上|以降)'))

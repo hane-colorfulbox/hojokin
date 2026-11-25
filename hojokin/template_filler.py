@@ -58,6 +58,7 @@ DECLARATION_GUIDANCE = {
 }
 DECLARATION_LABELS = {'wage_raise_method': '表明を行った方法', 'wage_raise_date': '表明を行った日付'}
 _EMPTY_CELL_ROW_RE = re.compile(r'^行\s*(\d+)\s')
+HEARING_NOTE_ROW = 0   # ヒアリングの行そろえの注意は申請内容の行に結びつかないので、一覧の末尾に出す
 
 
 # ══════════════ 申請書テンプレの版ズレゲート（W-TPL-001）══════════════
@@ -709,7 +710,7 @@ def fill_template(
     wage_plan: 旧制度の台帳実績基準計画。第7次はapplication_contextの確認済み
         0〜3年度目見込入力で置き換える。生産性の前期時間は別引数で受け取る。
     """
-    from .hearing_reader import transfer_hearing_to_tenki
+    from .hearing_reader import align_hearing_rows, transfer_hearing_to_tenki
 
     # 直接この関数を呼ぶ場合も、確認不足や原本版の取り違えを迂回させない。
     mapping_frame = ('通常' if mapping.kyuyo_sheet_name == '生産性指標給与支給総額計算' else 'インボイス')
@@ -722,9 +723,13 @@ def fill_template(
         if mapping.kyuyo_sheet_name == '生産性指標給与支給総額計算':
             productivity_validation = validate_productivity_inputs(
                 application_context, extraction.financial, productivity_total_annual_hours)
-    wage_raise_choice = wage_raise_choice_from_hearing(hearing_data or {}, mapping)
+    # 顧客が旧版・第7次の版のどちらのヒアリングに書いても、対応表の行で読めるようにそろえる
+    hearing_data, hearing_note = align_hearing_rows(hearing_data or {}, mapping.hearing_anchor_row)
+    wage_raise_choice = wage_raise_choice_from_hearing(hearing_data, mapping)
     req = wage_requirements(application_context)
     review_notes: list[tuple[int, str]] = []
+    if hearing_note:
+        review_notes.append((HEARING_NOTE_ROW, f'⚠ [ヒアリング]: {hearing_note}'))
     if application_context.is_round7:
         # 第7次は案件設定（担当者確認済み）だけで決め、ヒアリング回答は照合に使う。
         wage_raise_choice, wage_note = _round7_wage_raise_choice(
