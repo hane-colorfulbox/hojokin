@@ -51,6 +51,26 @@ import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
 
+# ── 公開停止（2026-11-25〜）──
+# 補助金業務は組織プラグイン hojokin（Claude）中心に移した。この画面はアプリ本体のURLから
+# ログインなしで開け、Drive の顧客フォルダと Claude API に届くため、既定で止める。
+# 再開するときだけ Streamlit Cloud の Secrets に HOJOKIN_APP_OPEN = "true" を置く。
+APP_OPEN_FLAG = 'HOJOKIN_APP_OPEN'
+
+
+def _app_is_open() -> bool:
+    try:
+        value = st.secrets.get(APP_OPEN_FLAG, '')
+    except Exception:
+        value = ''
+    return str(value or os.getenv(APP_OPEN_FLAG, '')).strip().lower() == 'true'
+
+
+if not _app_is_open():
+    st.set_page_config(page_title='補助金書類自動作成（停止中）', page_icon='📋')
+    st.info('この書類作成ツールは停止しました。補助金の書類作成は、組織プラグイン hojokin（Claude）で行ってください。')
+    st.stop()
+
 # ── Streamlit Cloud Secrets を os.environ に橋渡し ──
 # 【重要】hojokin.* の import より前に実行する必要がある。
 # config.py は import された時点で os.getenv('USE_*') を評価するため、
